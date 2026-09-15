@@ -89,24 +89,28 @@ export function agentMachineUserId(): Promise<string> {
   return machineUserId;
 }
 
-const orderChains = new Map<string, Promise<unknown>>();
-
-/** Run `fn` after every earlier call queued for this discussion. */
-export function withDiscussionOrder<T>(
-  discussionId: string,
+/** A per-key promise chain: each call runs after every earlier call for
+ *  the same key, whether that one succeeded or failed. */
+export function keyedOrder(): <T>(
+  key: string,
   fn: () => Promise<T>,
-): Promise<T> {
-  const prev = orderChains.get(discussionId) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  orderChains.set(discussionId, next);
-  next
-    .catch(() => {})
-    .finally(() => {
-      if (orderChains.get(discussionId) === next)
-        orderChains.delete(discussionId);
-    });
-  return next;
+) => Promise<T> {
+  const chains = new Map<string, Promise<unknown>>();
+  return (key, fn) => {
+    const prev = chains.get(key) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    chains.set(key, next);
+    next
+      .catch(() => {})
+      .finally(() => {
+        if (chains.get(key) === next) chains.delete(key);
+      });
+    return next;
+  };
 }
+
+/** Run `fn` after every earlier API call queued for this discussion. */
+export const withDiscussionOrder = keyedOrder();
 
 export async function sendDiscussionMessage(
   discussionId: string,

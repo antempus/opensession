@@ -13,6 +13,7 @@ import {
   toolCallIdFor,
   turnReplyMarkdown,
 } from "./discussion-mirror";
+import { keyedOrder } from "./discussion-api";
 
 const ME = "mu_open_session";
 
@@ -187,5 +188,30 @@ describe("turnReplyMarkdown", () => {
         runFailure: null,
       }),
     ).toBe("The turn ended with an error before a reply was ready.");
+  });
+});
+
+describe("keyedOrder", () => {
+  it("runs calls for one key in order, past failures, and keys independently", async () => {
+    const order = keyedOrder();
+    const log: string[] = [];
+    let releaseFirst!: () => void;
+    const first = order("a", async () => {
+      await new Promise<void>((r) => (releaseFirst = r));
+      log.push("a1");
+      throw new Error("a1 failed");
+    });
+    const second = order("a", async () => {
+      log.push("a2");
+      return "done";
+    });
+    await order("b", async () => {
+      log.push("b1");
+    });
+    expect(log).toEqual(["b1"]);
+    releaseFirst();
+    await expect(first).rejects.toThrow("a1 failed");
+    expect(await second).toBe("done");
+    expect(log).toEqual(["b1", "a1", "a2"]);
   });
 });

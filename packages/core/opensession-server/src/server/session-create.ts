@@ -2137,6 +2137,14 @@ export async function openCreatedSession(
         });
       }
       await reportSetupFailure(bksId, io, e.message || String(e));
+      // createSession already resolved at the announce, so the discussion
+      // handler cannot report this one: settle Plain from here or its
+      // composer stays locked on IN_PROGRESS.
+      mirrorTurnToPlainDiscussion(spec.plainDiscussionId, {
+        assistantText,
+        endedWithError: true,
+        runFailure: e.message || String(e),
+      });
     } else {
       io.fail(e.message || String(e));
     }

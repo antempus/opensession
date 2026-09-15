@@ -16,7 +16,11 @@ import {
   upsertDiscussionToolCall,
   withDiscussionOrder,
 } from "./discussion-api";
-import { awaitApproval, type ApprovalOutcome } from "./discussions";
+import {
+  awaitApproval,
+  resolveApproval,
+  type ApprovalOutcome,
+} from "./discussions";
 
 const APPROVAL_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -34,20 +38,33 @@ async function openGate(
   ctx: GateContext,
   justification: string,
 ): Promise<ApprovalOutcome> {
-  await withDiscussionOrder(ctx.discussionId, async () => {
-    await upsertDiscussionToolCall({
-      discussionId: ctx.discussionId,
-      toolCallId: ctx.toolCallId,
-      status: "PENDING",
-      text: ctx.heading,
+  // Wait before publishing: a teammate can decide the card while the
+  // approval mutation's response is still in flight, and that webhook has
+  // to find a waiter or the tool sits out the whole timeout.
+  const decision = awaitApproval(
+    ctx.discussionId,
+    ctx.toolCallId,
+    APPROVAL_TIMEOUT_MS,
+  );
+  try {
+    await withDiscussionOrder(ctx.discussionId, async () => {
+      await upsertDiscussionToolCall({
+        discussionId: ctx.discussionId,
+        toolCallId: ctx.toolCallId,
+        status: "PENDING",
+        text: ctx.heading,
+      });
+      await requestDiscussionToolCallApproval({
+        discussionId: ctx.discussionId,
+        toolCallId: ctx.toolCallId,
+        justification,
+      });
     });
-    await requestDiscussionToolCallApproval({
-      discussionId: ctx.discussionId,
-      toolCallId: ctx.toolCallId,
-      justification,
-    });
-  });
-  return awaitApproval(ctx.discussionId, ctx.toolCallId, APPROVAL_TIMEOUT_MS);
+  } catch (e) {
+    resolveApproval(ctx.toolCallId, { status: "CANCELLED" });
+    throw e;
+  }
+  return decision;
 }
 
 async function closeGate(

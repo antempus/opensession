@@ -14,6 +14,7 @@ import { productName } from "../../server/config";
 import {
   agentMachineUserId,
   discussionAgentConfigured,
+  keyedOrder,
   sendDiscussionMessage,
   updateDiscussionAgentStatus,
   withDiscussionOrder,
@@ -185,42 +186,36 @@ export function discussionOpeningPrompt(
   return `${preamble}\n\n${message}`;
 }
 
-const creating = new Map<string, Promise<string>>();
-
 async function createDiscussionSession(
   discussion: DiscussionRef,
   message: string,
 ): Promise<string> {
-  const inFlight = creating.get(discussion.id);
-  if (inFlight) return inFlight;
-  const create = (async () => {
-    const { getSessionControl } = await import("../../server/session-control");
-    let workspaceId: string | undefined;
-    if (discussion.threadId) {
-      const { resolvePlainWorkspace } =
-        await import("../../server/workspace-resolve");
-      const { workspace } = await resolvePlainWorkspace({
-        threadId: discussion.threadId,
-        createdBy: "Plain",
-      });
-      workspaceId = workspace.id;
-    }
-    const { id } = await getSessionControl().createSession({
-      prompt: discussionOpeningPrompt(discussion, message),
-      mode: "ask",
-      workspaceId,
-      plainDiscussionId: discussion.id,
-      user: "Plain",
+  const { getSessionControl } = await import("../../server/session-control");
+  let workspaceId: string | undefined;
+  if (discussion.threadId) {
+    const { resolvePlainWorkspace } =
+      await import("../../server/workspace-resolve");
+    const { workspace } = await resolvePlainWorkspace({
+      threadId: discussion.threadId,
+      createdBy: "Plain",
     });
-    return id;
-  })();
-  creating.set(discussion.id, create);
-  try {
-    return await create;
-  } finally {
-    creating.delete(discussion.id);
+    workspaceId = workspace.id;
   }
+  const { id } = await getSessionControl().createSession({
+    prompt: discussionOpeningPrompt(discussion, message),
+    mode: "ask",
+    workspaceId,
+    plainDiscussionId: discussion.id,
+    user: "Plain",
+  });
+  return id;
 }
+
+/** One message at a time per discussion. `createSession` resolves once the
+ *  session is announced, so a message that lands while the first one is
+ *  still creating waits here and is then delivered into that session
+ *  instead of racing it (and losing). */
+const withMessageOrder = keyedOrder();
 
 async function failTurn(discussionId: string, reason: string): Promise<void> {
   await withDiscussionOrder(discussionId, async () => {
@@ -245,33 +240,35 @@ async function onMessageCreated(
     console.warn(`[plain] discussion ${discussion.id} IN_PROGRESS failed:`, e),
   );
 
-  try {
-    const existing = await findDiscussionSession(discussion.id);
-    if (existing) {
-      const { getSessionControl } =
-        await import("../../server/session-control");
-      const result = await getSessionControl().deliverToSession(
-        existing.id,
-        text,
-        "Plain",
-        { deliveryId: `plain-discussion:${message.id}` },
+  await withMessageOrder(discussion.id, async () => {
+    try {
+      const existing = await findDiscussionSession(discussion.id);
+      if (existing) {
+        const { getSessionControl } =
+          await import("../../server/session-control");
+        const result = await getSessionControl().deliverToSession(
+          existing.id,
+          text,
+          "Plain",
+          { deliveryId: `plain-discussion:${message.id}` },
+        );
+        if (result.status === "error")
+          throw new Error(result.message || "delivery failed");
+        console.log(
+          `[plain] Discussion ${discussion.id} → session ${existing.id} (${result.status})`,
+        );
+        return;
+      }
+      const id = await createDiscussionSession(discussion, text);
+      console.log(`[plain] Discussion ${discussion.id} → new session ${id}`);
+    } catch (e) {
+      console.error(`[plain] Discussion ${discussion.id} turn failed:`, e);
+      await failTurn(
+        discussion.id,
+        `I could not start on this: ${e instanceof Error ? e.message : String(e)}`,
       );
-      if (result.status === "error")
-        throw new Error(result.message || "delivery failed");
-      console.log(
-        `[plain] Discussion ${discussion.id} → session ${existing.id} (${result.status})`,
-      );
-      return;
     }
-    const id = await createDiscussionSession(discussion, text);
-    console.log(`[plain] Discussion ${discussion.id} → new session ${id}`);
-  } catch (e) {
-    console.error(`[plain] Discussion ${discussion.id} turn failed:`, e);
-    await failTurn(
-      discussion.id,
-      `I could not start on this: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
+  });
 }
 
 async function onTurnStopRequested(

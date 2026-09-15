@@ -217,9 +217,11 @@ import {
 } from "./interactive-mcp";
 import { makeAskHandler, settleRestoredAskAfterRecovery } from "./asks";
 import {
-  mirrorTurnToPlainDiscussion,
+  forgetPlainDiscussionRun,
+  lastAssistantReply,
   plainDiscussionToolResult,
   plainDiscussionToolUse,
+  settlePlainDiscussionTurn,
 } from "../agents/plain/discussion-mirror";
 import {
   registerSessionEffectExecutor,
@@ -1318,6 +1320,22 @@ export async function recordRecoveredRunEvent(
 
   if (event.type === "done" || event.type === "error") {
     recoveredFeedStarted.delete(osSessionId);
+    // A discussion turn that outlived a gateway restart still owes Plain its
+    // answer and IDLE. The in-memory reply is gone with the old process, so
+    // the complete final text comes from the transcript the host proxied.
+    if (session.plainDiscussionId) {
+      const runKey = `recovered:${osSessionId}`;
+      const assistantText = lastAssistantReply(
+        await mergedSessionTranscriptAsync(session).catch(() => []),
+      );
+      settlePlainDiscussionTurn(session.plainDiscussionId, runKey, {
+        assistantText,
+        endedWithError: event.type === "error",
+        runFailure:
+          event.type === "error" ? event.content || "run failed" : null,
+      });
+      forgetPlainDiscussionRun(runKey);
+    }
     // Exact steer-delivered events already retired anything the engine read.
     // Every remaining receipt becomes the immediate next turn, even after a
     // clean finish: the run may have ended between buffering and its next step.
@@ -2617,8 +2635,23 @@ export async function runSessionPrompt(
     // dispatch in and must retain it for the caller to restore atomically.
     if (!promptEntryId)
       await acknowledgePromptDispatch(sessionId, durablePromptEntryId);
+    // A throw is the one terminal path the run loop cannot settle itself:
+    // the discussion still gets its IDLE (and the failure, unless the throw
+    // came from a Stop). No-op when the loop already mirrored this run.
+    settlePlainDiscussionTurn(
+      findSession(sessionId)?.plainDiscussionId,
+      startToken,
+      isAgentSessionCancelled(sessionId, startToken)
+        ? { assistantText: "", endedWithError: false, runFailure: null }
+        : {
+            assistantText: "",
+            endedWithError: true,
+            runFailure: e instanceof Error ? e.message : String(e),
+          },
+    );
     throw e;
   } finally {
+    forgetPlainDiscussionRun(startToken);
     finishDeskNavigation();
     unmarkSessionStarting(sessionId, startToken);
   }
@@ -3066,7 +3099,18 @@ async function runSessionPromptInner(
           (entry) => entry.id !== durablePromptEntryId,
         )
       : undefined;
-  if (isAgentSessionCancelled(session.id, startToken)) return;
+  // Every terminal path of this run settles its Plain discussion through the
+  // same idempotent finalizer (see settlePlainDiscussionTurn); the wrapper's
+  // catch covers throws under this key.
+  const plainRunKey = startToken ?? sessionId;
+  if (isAgentSessionCancelled(session.id, startToken)) {
+    settlePlainDiscussionTurn(session.plainDiscussionId, plainRunKey, {
+      assistantText: "",
+      endedWithError: false,
+      runFailure: null,
+    });
+    return;
+  }
   if (
     session.automationDescendantPolicy &&
     !session.runner?.id &&
@@ -3135,6 +3179,11 @@ async function runSessionPromptInner(
       type: "session_status",
       sessionId,
       isRunning: false,
+    });
+    settlePlainDiscussionTurn(session.plainDiscussionId, plainRunKey, {
+      assistantText: "",
+      endedWithError: true,
+      runFailure: msg,
     });
     return;
   }
@@ -3702,7 +3751,7 @@ async function runSessionPromptInner(
 
   // A session answering a Plain discussion posts the turn there and reports
   // itself idle, whoever started the turn.
-  mirrorTurnToPlainDiscussion(session.plainDiscussionId, {
+  settlePlainDiscussionTurn(session.plainDiscussionId, plainRunKey, {
     assistantText,
     endedWithError,
     runFailure,

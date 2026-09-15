@@ -8,6 +8,7 @@
  * a session that has no discussion.
  */
 import type { StreamEvent } from "../../server/run-events";
+import type { TranscriptEntry } from "../../server/types";
 import { splitNoteText } from "./notes";
 import {
   sendDiscussionMessage,
@@ -155,4 +156,55 @@ export function mirrorTurnToPlainDiscussion(
       );
     }
   });
+}
+
+/** Runs whose turn already reached Plain, by run key. Every terminal path of
+ *  a run (normal tail, cancellation, launch failure, a throw, recovered
+ *  completion) goes through `settlePlainDiscussionTurn`; only the first one
+ *  posts. `forgetPlainDiscussionRun` drops the key once the run is over. */
+const settledRuns = new Set<string>();
+
+export function claimPlainDiscussionRun(runKey: string): boolean {
+  if (settledRuns.has(runKey)) return false;
+  settledRuns.add(runKey);
+  return true;
+}
+
+export function forgetPlainDiscussionRun(runKey: string): void {
+  settledRuns.delete(runKey);
+}
+
+/** Idempotent per run: the first terminal path to get here posts the turn and
+ *  reports IDLE, later ones (a throw past the normal tail, the caller's
+ *  fallback) are no-ops. Returns whether this call did the mirroring. */
+export function settlePlainDiscussionTurn(
+  discussionId: string | undefined,
+  runKey: string,
+  input: {
+    assistantText: string;
+    endedWithError: boolean;
+    runFailure: string | null;
+  },
+): boolean {
+  if (!discussionId) return false;
+  if (!claimPlainDiscussionRun(runKey)) return false;
+  mirrorTurnToPlainDiscussion(discussionId, input);
+  return true;
+}
+
+/** The reply a run left in the transcript: the assistant text after the last
+ *  user turn. A gateway restart loses the in-memory accumulation, and the
+ *  chunks seen after the restart alone would post a truncated answer. */
+export function lastAssistantReply(
+  entries: readonly Pick<TranscriptEntry, "type" | "content" | "isReasoning">[],
+): string {
+  const parts: string[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type === "user") break;
+    if (entry.type !== "assistant" || entry.isReasoning) continue;
+    const text = entry.content.trim();
+    if (text) parts.unshift(text);
+  }
+  return parts.join("\n\n");
 }

@@ -8,8 +8,12 @@ import {
   type DiscussionMessageCreatedPayload,
 } from "./discussions";
 import {
+  claimPlainDiscussionRun,
   describeToolCall,
+  forgetPlainDiscussionRun,
+  lastAssistantReply,
   looksLikeToolError,
+  settlePlainDiscussionTurn,
   toolCallIdFor,
   turnReplyMarkdown,
 } from "./discussion-mirror";
@@ -217,6 +221,51 @@ describe("turnReplyMarkdown", () => {
         runFailure: null,
       }),
     ).toBe("The turn ended with an error before a reply was ready.");
+  });
+});
+
+describe("turn finalizer", () => {
+  it("settles a run once, whichever terminal path gets there first", () => {
+    expect(claimPlainDiscussionRun("run-1")).toBe(true);
+    expect(claimPlainDiscussionRun("run-1")).toBe(false);
+    forgetPlainDiscussionRun("run-1");
+    expect(claimPlainDiscussionRun("run-1")).toBe(true);
+    forgetPlainDiscussionRun("run-1");
+  });
+
+  it("is a no-op for a session without a discussion", () => {
+    expect(
+      settlePlainDiscussionTurn(undefined, "run-2", {
+        assistantText: "",
+        endedWithError: false,
+        runFailure: null,
+      }),
+    ).toBe(false);
+    expect(claimPlainDiscussionRun("run-2")).toBe(true);
+    forgetPlainDiscussionRun("run-2");
+  });
+
+  it("reads a recovered run's complete reply from the transcript", () => {
+    const entry = (
+      type: "user" | "assistant" | "tool_use" | "tool_result" | "system",
+      content: string,
+      isReasoning?: boolean,
+    ) => ({ type, content, isReasoning });
+    expect(
+      lastAssistantReply([
+        entry("user", "earlier question"),
+        entry("assistant", "earlier answer"),
+        entry("user", "refund status?"),
+        entry("assistant", "Let me check.", true),
+        entry("assistant", "Checking Stripe."),
+        entry("tool_use", "stripe"),
+        entry("tool_result", "ch_1 refunded"),
+        entry("assistant", "The refund went through."),
+        entry("system", "turn ended"),
+      ]),
+    ).toBe("Checking Stripe.\n\nThe refund went through.");
+    expect(lastAssistantReply([entry("user", "hi")])).toBe("");
+    expect(lastAssistantReply([])).toBe("");
   });
 });
 

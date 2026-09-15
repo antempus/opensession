@@ -216,7 +216,9 @@ async function createDiscussionSession(
  *  one is still creating waits here and is then delivered into that session
  *  instead of racing it (and losing). Stop rides the same chain: pressed
  *  during creation it waits for the announce and then cancels that session,
- *  instead of finding nothing and letting the run answer anyway. */
+ *  instead of finding nothing and letting the run answer anyway. Both join
+ *  the chain before their first network call, so webhook arrival order is
+ *  the chain order (`agentMachineUserId` is one shared promise). */
 const withMessageOrder = keyedOrder();
 
 async function failTurn(discussionId: string, reason: string): Promise<void> {
@@ -236,13 +238,17 @@ async function onMessageCreated(
   const text = message.markdown.trim();
   if (!text) return;
 
-  await withDiscussionOrder(discussion.id, () =>
-    updateDiscussionAgentStatus(discussion.id, "IN_PROGRESS"),
-  ).catch((e) =>
-    console.warn(`[plain] discussion ${discussion.id} IN_PROGRESS failed:`, e),
-  );
-
   await withMessageOrder(discussion.id, async () => {
+    // Inside the chain: a Stop that lands while this status update is in
+    // flight must queue behind the message, not overtake it and find nothing.
+    await withDiscussionOrder(discussion.id, () =>
+      updateDiscussionAgentStatus(discussion.id, "IN_PROGRESS"),
+    ).catch((e) =>
+      console.warn(
+        `[plain] discussion ${discussion.id} IN_PROGRESS failed:`,
+        e,
+      ),
+    );
     try {
       const existing = await findDiscussionSession(discussion.id);
       if (existing) {

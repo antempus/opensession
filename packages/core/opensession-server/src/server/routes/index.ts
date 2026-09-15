@@ -56,6 +56,7 @@ import { handleDatabasesRoutes } from "./databases";
 import { handleAnalyticsRoutes } from "./analytics";
 import { handleSearchRoutes } from "./search";
 import { handleSetupRoutes } from "./setup";
+import { handlePersonalGithubRoutes } from "./personal-github";
 import { handleOs1UpdateRoutes } from "./os1-update";
 import { handleInstanceSettingsRoutes } from "./instance-settings";
 import { handleLiveActivityRoutes } from "./live-activities";
@@ -120,6 +121,7 @@ export const routeHandlers: RouteHandler[] = [
   handleDatabasesRoutes,
   handleAnalyticsRoutes,
   handleSearchRoutes,
+  handlePersonalGithubRoutes,
   handleSetupRoutes,
   handleInstanceSettingsRoutes,
 ];

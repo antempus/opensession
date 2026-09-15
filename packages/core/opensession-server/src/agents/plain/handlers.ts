@@ -21,6 +21,7 @@ import { getDefaultModel, toPiModel } from "../../server/models";
 import { runAgent } from "../../server/agent-runner";
 import { STRIPE_CONFIRM_TOOLS } from "../../server/runner-shared";
 import { classifyRefundApproval } from "./refund-intent";
+import { handleDiscussionEvent, type DiscussionWebhook } from "./discussions";
 import { createWorktree as createRepoWorktree } from "../../server/worktree";
 import {
   configuredIntegration,
@@ -193,6 +194,21 @@ async function runWorkTurn(
   }
 
   return { result, sessionId };
+}
+
+/** The approved-refund execution turn: money tools unlocked, the exact
+ *  proposal only. Shared by the note flow and the discussion approval card. */
+export async function executeApprovedStripeAction(
+  request: string,
+  threadContext: string,
+): Promise<string> {
+  const { result } = await runWorkTurn(
+    buildRefundExecutionPrompt(request, threadContext),
+    DEFAULT_REPO_DIR,
+    undefined,
+    /*allowMoneyTools*/ true,
+  );
+  return result;
 }
 
 // --- Worktree creation ---
@@ -761,6 +777,11 @@ export async function handleWebhook(
 ): Promise<Response> {
   const eventType = payload.type;
   console.log(`[plain] Webhook received: ${eventType}`);
+
+  // Ask Sidekick discussions carry no thread envelope (discussions.ts).
+  if (eventType.startsWith("discussion.")) {
+    return handleDiscussionEvent(payload as unknown as DiscussionWebhook);
+  }
 
   const thread = payload.payload.thread;
   if (!thread) {

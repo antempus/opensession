@@ -213,6 +213,11 @@ import {
 import { automationSessionMcp, interactiveMcpServers } from "./interactive-mcp";
 import { makeAskHandler, settleRestoredAskAfterRecovery } from "./asks";
 import {
+  mirrorTurnToPlainDiscussion,
+  plainDiscussionToolResult,
+  plainDiscussionToolUse,
+} from "../agents/plain/discussion-mirror";
+import {
   registerSessionEffectExecutor,
   SessionEffectDeferredError,
   settleCreationCancelled,
@@ -3445,6 +3450,7 @@ async function runSessionPromptInner(
       }
       case "tool_use":
         toolUseCount++;
+        plainDiscussionToolUse(session.plainDiscussionId, event);
         broadcastToSession(sessionId, {
           type: "stream_tool_use",
           sessionId,
@@ -3460,6 +3466,7 @@ async function runSessionPromptInner(
         });
         break;
       case "tool_result":
+        plainDiscussionToolResult(session.plainDiscussionId, event);
         broadcastToSession(sessionId, {
           type: "stream_tool_result",
           sessionId,
@@ -3699,6 +3706,14 @@ async function runSessionPromptInner(
       slackReplyTo.threadTs,
     ).catch(() => {});
   }
+
+  // A session answering a Plain discussion posts the turn there and reports
+  // itself idle, whoever started the turn.
+  mirrorTurnToPlainDiscussion(session.plainDiscussionId, {
+    assistantText,
+    endedWithError,
+    runFailure,
+  });
 
   // Announce-then-stop guard (shared with the create path — see
   // maybeQueueAutoContinue). runSessionPromptAndDrain delivers what it queues.

@@ -75,3 +75,24 @@ export const AUTOMATION_DENIED_TOOLS: Record<string, string> = {
   mcp__incident__extension_plugin_sync: INCIDENT_WRITE_DENIAL,
   mcp__incident__extension_skill_feedback_update: INCIDENT_WRITE_DENIAL,
 };
+
+// A Plain discussion session (Ask Sidekick → Open Session) is driven by a
+// teammate, but the ticket text it reads is still untrusted, and the teammate
+// only sees the discussion — a reply sent straight through the Plain MCP would
+// be invisible to them until the customer answered. Customer-facing writes go
+// through opensession-plain-discussion, whose tools park behind an
+// Approve/Deny card in the discussion.
+const PLAIN_DISCUSSION_DENIAL =
+  "This tool isn't available in a Plain discussion session. To reply to the " +
+  "customer use reply_to_customer (opensession-plain-discussion), which shows " +
+  "the teammate an Approve/Deny card in Plain; describe status changes in " +
+  "your reply for the teammate to do.";
+export const PLAIN_DISCUSSION_DENIED_TOOLS: Record<string, string> = {
+  mcp__plain__reply_to_thread: PLAIN_DISCUSSION_DENIAL,
+  mcp__plain__mark_thread_done: PLAIN_DISCUSSION_DENIAL,
+  mcp__plain__mark_thread_todo: PLAIN_DISCUSSION_DENIAL,
+  mcp__plain__snooze_thread: PLAIN_DISCUSSION_DENIAL,
+};
+export function plainDiscussionDeniedTools(): Record<string, string> {
+  return PLAIN_DISCUSSION_DENIED_TOOLS;
+}

@@ -23,6 +23,7 @@ import {
   automationMcpServersByName,
 } from "./automations";
 import { humanPrompter } from "./session-actors";
+import { plainDiscussionDeniedTools } from "./automation-denied-tools";
 
 /** Which config decided the run's MCP allowlist. */
 export type McpScopeSource =
@@ -87,6 +88,7 @@ export type RunInputsSession = Pick<
   | "goalId"
   | "startedBy"
   | "createdByLogin"
+  | "plainDiscussionId"
 >;
 
 /** Which in-process server set the next turn carries. Pure — mirrors the
@@ -148,7 +150,14 @@ export async function resolveSessionRunInputs(
     // An automation whose record is gone (or that names no allowlist) resolves
     // to undefined, i.e. no allowlist — report the source honestly.
     mcpServersSource: mcpServers === undefined ? "all" : source,
-    deniedTools: isAutomationSession ? automationDeniedTools() : undefined,
+    // A discussion session answers a trusted teammate but reads untrusted
+    // ticket text: customer-facing Plain writes go through the approval card
+    // (opensession-plain-discussion), never straight through the Plain MCP.
+    deniedTools: isAutomationSession
+      ? automationDeniedTools()
+      : session.plainDiscussionId
+        ? plainDiscussionDeniedTools()
+        : undefined,
     user: isAutomationSession ? undefined : opts.user,
     mcpGrantUser: session.createdByLogin || undefined,
     accountUser: humanPrompter(opts.user) ?? undefined,

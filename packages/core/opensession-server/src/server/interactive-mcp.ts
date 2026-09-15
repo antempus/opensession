@@ -28,6 +28,7 @@ import { createDesktopMcpServer } from "./desktop-mcp";
 import { getSandboxProvider } from "./sandbox";
 import { createWalkthroughMcpServer } from "../agents/slack/walkthrough-tools";
 import { createSlackComposeMcpServer } from "../agents/slack/slack-compose-tools";
+import { createPlainDiscussionMcpServer } from "../agents/plain/discussion-tools";
 import { createMemoryMcpServer } from "../agents/slack/memory-tools";
 import {
   createGoalsMcpServer,
@@ -125,6 +126,19 @@ function desktopServerFor(sessionId: string): Record<string, unknown> {
           ? provider.desktopControl(sandbox.id)
           : null;
       },
+    }),
+  };
+}
+
+/** Approval-gated customer reply / Stripe action for a session that answers
+ *  a Plain discussion (discussion-tools.ts). Absent everywhere else. */
+function plainDiscussionServerFor(sessionId: string): Record<string, unknown> {
+  const discussionId = findSession(sessionId)?.plainDiscussionId;
+  if (!discussionId) return {};
+  return {
+    "opensession-plain-discussion": createPlainDiscussionMcpServer({
+      sessionId,
+      discussionId,
     }),
   };
 }
@@ -421,6 +435,7 @@ export function interactiveMcpServers(
           // Only a sandboxed session has one; the person watches the same
           // screen in the session's Desktop tab.
           ...desktopServerFor(sessionId),
+          ...plainDiscussionServerFor(sessionId),
         }
       : {}),
   };

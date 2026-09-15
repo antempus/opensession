@@ -87,6 +87,13 @@ import {
   watchExternalRunAndDrain,
 } from "./run-session";
 import { type McpScope, STRIPE_CONFIRM_TOOLS } from "./runner-shared";
+import { plainDiscussionDeniedTools } from "./automation-denied-tools";
+import { createPlainDiscussionMcpServer } from "../agents/plain/discussion-tools";
+import {
+  mirrorTurnToPlainDiscussion,
+  plainDiscussionToolResult,
+  plainDiscussionToolUse,
+} from "../agents/plain/discussion-mirror";
 import {
   isRemoteSandboxProvider,
   resolveRequestedSandbox,
@@ -403,6 +410,7 @@ export interface ResolvedCreate {
   images?: ImageInput[];
   externalRefs?: NativeSessionFile["externalRefs"];
   plainThreadId?: string;
+  plainDiscussionId?: string;
   /** MCP allowlist persisted on the session file. Empty means no MCP servers. */
   persistMcpServers?: string[];
   /**
@@ -701,6 +709,9 @@ function createdSessionFileDefaults(spec: ResolvedCreate): NativeSessionFile {
     ...(spec.fastMode ? { fastMode: true } : {}),
     ...(spec.accountId ? { accountId: spec.accountId } : {}),
     ...(spec.plainThreadId ? { plainThreadId: spec.plainThreadId } : {}),
+    ...(spec.plainDiscussionId
+      ? { plainDiscussionId: spec.plainDiscussionId }
+      : {}),
     ...(spec.externalRefs?.length ? { externalRefs: spec.externalRefs } : {}),
     ...(spec.persistMcpServers !== undefined
       ? { mcpServers: spec.persistMcpServers }
@@ -1800,10 +1811,23 @@ export async function openCreatedSession(
       const automationChild = openingTrust.automation;
       const openingMcp = automationChild
         ? {}
-        : interactiveMcpServers(spec.user, bksId);
+        : {
+            ...interactiveMcpServers(spec.user, bksId),
+            ...(spec.plainDiscussionId
+              ? {
+                  "opensession-plain-discussion":
+                    createPlainDiscussionMcpServer({
+                      sessionId: bksId,
+                      discussionId: spec.plainDiscussionId,
+                    }),
+                }
+              : {}),
+          };
       const openingDeniedTools = automationChild
         ? (await import("./automations")).automationDeniedTools()
-        : undefined;
+        : spec.plainDiscussionId
+          ? plainDiscussionDeniedTools()
+          : undefined;
       const openingReposNote = automationChild
         ? undefined
         : [
@@ -1944,6 +1968,7 @@ export async function openCreatedSession(
         }
         if (event.type === "tool_use") {
           toolUseCount++;
+          plainDiscussionToolUse(spec.plainDiscussionId, event);
           const entry = {
             id: event.toolUseId || crypto.randomUUID(),
             type: "tool_use" as const,
@@ -1956,6 +1981,7 @@ export async function openCreatedSession(
           io.emit({ type: "stream_tool_use", entry });
         }
         if (event.type === "tool_result") {
+          plainDiscussionToolResult(spec.plainDiscussionId, event);
           const entry = {
             id: event.toolUseId ? `tr-${event.toolUseId}` : crypto.randomUUID(),
             type: "tool_result" as const,
@@ -2039,6 +2065,11 @@ export async function openCreatedSession(
 
     io.emit({ type: "stream_done" });
     io.emit({ type: "session_status", isRunning: false });
+    mirrorTurnToPlainDiscussion(spec.plainDiscussionId, {
+      assistantText,
+      endedWithError: !!runFailure,
+      runFailure,
+    });
     if (spec.finish === "auto-continue-guard") {
       // An opening turn announce-then-stops exactly like a later one, and
       // this path bypasses runSessionPromptInner — so run the shared guard
@@ -2069,6 +2100,13 @@ export async function openCreatedSession(
       return;
     }
     if (await openingTurnWasCancelled()) {
+      // A Stop from the discussion cancels the opening turn here, past the
+      // mirror above: report idle so Plain's composer unlocks.
+      mirrorTurnToPlainDiscussion(spec.plainDiscussionId, {
+        assistantText: "",
+        endedWithError: false,
+        runFailure: null,
+      });
       await settleCreationCancelled(
         bksId,
         creationIdentity,

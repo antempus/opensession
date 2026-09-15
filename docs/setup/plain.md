@@ -16,7 +16,7 @@ customer or change thread state.
 | `PLAIN_WEBHOOK_SECRET`        | webhook intake  | **fail-closed**: unset or empty means every Plain webhook returns 401                                                                                                               |
 | `PLAIN_SPAM_CHECK_MODEL`      | optional        | tool-less pre-triage router model; default `claude-haiku-4-5`                                                                                                                       |
 | `PLAIN_REFUND_INTENT_MODEL`   | optional        | tool-less classifier for the legacy mention flow's refund/cancellation approval; default `claude-haiku-4-5`                                                                         |
-| `PLAIN_AGENT_API_KEY`         | Ask Sidekick    | API key of the **Custom agent** machine user that answers discussions (see [Internal agent](#internal-agent-ask-sidekick)); falls back to `PLAIN_API_KEY`                           |
+| `PLAIN_AGENT_API_KEY`         | optional        | key of a separate **Custom agent** machine user for Ask Sidekick (see [Internal agent](#internal-agent-ask-sidekick)); unset, the discussions use `PLAIN_API_KEY`                   |
 | `PLAIN_AGENT_MACHINE_USER_ID` | optional        | pins the agent's `mu_…` id instead of resolving it with `myMachineUser` at first use                                                                                                |
 
 Put server secrets and an optional enable flag in `~/.opensession.env`; the
@@ -229,14 +229,15 @@ after 30 minutes.
 
 ### Setup
 
-1. **Settings → Machine users & API keys → Add machine user**: name it
-   `Open Session`, set **Type** to **Custom agent** (that is what lists it in
-   Ask Sidekick). Keep it separate from the triage machine user; the picker
-   shows the machine user's name.
-2. **Add API key** on it with `threadDiscussion:read`, `threadDiscussion:edit`,
-   `threadDiscussionMessage:create`, `threadDiscussionMessage:edit`,
-   `thread:read`, `customer:read`. Store it as `PLAIN_AGENT_API_KEY` in
-   `~/.opensession.env`.
+1. **Settings → Machine users & API keys**: open the machine user whose key
+   is `PLAIN_API_KEY` and set **Type** to **Custom agent** (that is what
+   lists it in Ask Sidekick; the picker shows the machine user's name, so
+   name it `Open Session`). Its key must carry `threadDiscussion:read`,
+   `threadDiscussion:edit`, `threadDiscussionMessage:create`,
+   `threadDiscussionMessage:edit`, `thread:read`, `customer:read`.
+2. To keep the agent identity separate from the triage machine user instead,
+   add a second machine user with the same type and permissions and store its
+   key as `PLAIN_AGENT_API_KEY`; the triage code keeps using `PLAIN_API_KEY`.
 3. **Settings → Webhooks → Add webhook target** for `POST /plain/webhook`
    (or edit the existing one), version `2026-09-14`, subscribed to
    `discussion.message_created`, `discussion.turn_stop_requested` and

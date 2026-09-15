@@ -43,7 +43,10 @@ import { buildForkHandoffNote } from "./fork-handoff";
 import { ensureGeneratedTitle } from "./generated-titles";
 import { nameKnownSessionReferencesForTitle } from "./session-reference-title";
 import { onSessionIdle as onHumanAsksSessionIdle } from "./human-asks";
-import { interactiveMcpServers } from "./interactive-mcp";
+import {
+  interactiveMcpServers,
+  plainDiscussionSessionMcp,
+} from "./interactive-mcp";
 import { runAgentHosted } from "./host-client";
 import {
   accountProviderForModel,
@@ -88,7 +91,6 @@ import {
 } from "./run-session";
 import { type McpScope, STRIPE_CONFIRM_TOOLS } from "./runner-shared";
 import { plainDiscussionDeniedTools } from "./automation-denied-tools";
-import { createPlainDiscussionMcpServer } from "../agents/plain/discussion-tools";
 import {
   mirrorTurnToPlainDiscussion,
   plainDiscussionToolResult,
@@ -459,6 +461,7 @@ export function openingCreateTrustPolicy(
     | "runMcpServers"
     | "user"
     | "createdByLogin"
+    | "plainDiscussionId"
   >,
 ): {
   automation: boolean;
@@ -473,9 +476,12 @@ export function openingCreateTrustPolicy(
   return {
     automation: !!policy,
     mcpServers: policy ? [] : (spec.runMcpServers as McpScope),
-    user: policy ? undefined : spec.user,
+    // A Plain discussion session reads untrusted ticket text: like an
+    // automation run it passes no user, so an allowedUsers-gated server
+    // stays invisible (session-run-inputs.ts makes the same call on resume).
+    user: policy || spec.plainDiscussionId ? undefined : spec.user,
     mcpGrantUser: policy ? undefined : spec.createdByLogin,
-    aws: !policy,
+    aws: !policy && !spec.plainDiscussionId,
     trustProfile: policy ? "automation" : "interactive",
     ...(policy
       ? {
@@ -1809,20 +1815,13 @@ export async function openCreatedSession(
       };
       const openingTrust = openingCreateTrustPolicy(spec);
       const automationChild = openingTrust.automation;
+      // A discussion session carries only the approval server, never the
+      // interactive siblings (see plainDiscussionSessionMcp).
       const openingMcp = automationChild
         ? {}
-        : {
-            ...interactiveMcpServers(spec.user, bksId),
-            ...(spec.plainDiscussionId
-              ? {
-                  "opensession-plain-discussion":
-                    createPlainDiscussionMcpServer({
-                      sessionId: bksId,
-                      discussionId: spec.plainDiscussionId,
-                    }),
-                }
-              : {}),
-          };
+        : spec.plainDiscussionId
+          ? plainDiscussionSessionMcp(bksId, spec.plainDiscussionId)
+          : interactiveMcpServers(spec.user, bksId);
       const openingDeniedTools = automationChild
         ? (await import("./automations")).automationDeniedTools()
         : spec.plainDiscussionId

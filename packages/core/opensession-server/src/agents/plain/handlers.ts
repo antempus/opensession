@@ -15,6 +15,7 @@ import {
 import {
   buildMentionPrompt,
   buildWorkPrompt,
+  buildDiscussionRefundExecutionPrompt,
   buildRefundExecutionPrompt,
 } from "./prompts";
 import { getDefaultModel, toPiModel } from "../../server/models";
@@ -197,13 +198,19 @@ async function runWorkTurn(
 }
 
 /** The approved-refund execution turn: money tools unlocked, the exact
- *  proposal only. Shared by the note flow and the discussion approval card. */
+ *  proposal only. Shared by the note flow, where the proposal is the agent's
+ *  own "needs approval" note on the thread, and the discussion approval card,
+ *  where the approved proposal text is the action itself (a discussion opened
+ *  from Home has no thread to find a note on). */
 export async function executeApprovedStripeAction(
   request: string,
   threadContext: string,
+  source: "note" | "discussion" = "note",
 ): Promise<string> {
   const { result } = await runWorkTurn(
-    buildRefundExecutionPrompt(request, threadContext),
+    source === "discussion"
+      ? buildDiscussionRefundExecutionPrompt(request, threadContext)
+      : buildRefundExecutionPrompt(request, threadContext),
     DEFAULT_REPO_DIR,
     undefined,
     /*allowMoneyTools*/ true,

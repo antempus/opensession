@@ -14,6 +14,9 @@ import {
   turnReplyMarkdown,
 } from "./discussion-mirror";
 import { keyedOrder } from "./discussion-api";
+import { buildDiscussionRefundExecutionPrompt } from "./prompts";
+import { PLAIN_DISCUSSION_DENIED_TOOLS } from "../../server/automation-denied-tools";
+import { STRIPE_CONFIRM_TOOLS } from "../../server/runner-shared";
 
 const ME = "mu_open_session";
 
@@ -124,6 +127,32 @@ describe("discussionOpeningPrompt", () => {
     expect(
       discussionOpeningPrompt({ id: "disc_1", threadId: null }, "hi"),
     ).toContain("not on a thread");
+  });
+});
+
+describe("buildDiscussionRefundExecutionPrompt", () => {
+  it("treats the approved proposal as the action, with or without a thread", () => {
+    const onThread = buildDiscussionRefundExecutionPrompt(
+      "Refund ch_123 in full ($20) for cus_1, duplicate charge",
+      "[customer] please refund me",
+    );
+    expect(onThread).toContain("Refund ch_123 in full ($20)");
+    expect(onThread).toContain("[customer] please refund me");
+    // The note flow's requirement, which a discussion can never meet.
+    expect(onThread).not.toContain("Proposed refund/cancellation");
+    const fromHome = buildDiscussionRefundExecutionPrompt(
+      "Cancel sub_9 at period end",
+      "",
+    );
+    expect(fromHome).toContain("there is no support thread");
+    expect(fromHome).not.toContain("Thread context");
+  });
+});
+
+describe("discussion session denials", () => {
+  it("deny every money-moving Stripe tool: they run only through execute_stripe_action", () => {
+    for (const name of Object.keys(STRIPE_CONFIRM_TOOLS))
+      expect(PLAIN_DISCUSSION_DENIED_TOOLS).toHaveProperty(name);
   });
 });
 

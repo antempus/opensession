@@ -211,17 +211,29 @@ is reported idle, whoever started the turn: a teammate steering the same
 session in the Open Session UI answers in Plain too. Each tool call is reported
 on the discussion timeline. **Stop** in Plain cancels the session's run.
 
-Nothing posted in a discussion reaches the customer. The session's Plain MCP
-customer-facing writes (`reply_to_thread`, status changes) are denied; instead
-the session carries the `opensession-plain-discussion` tools:
+A discussion session reads untrusted ticket text, so its turns run under the
+triage automation's policy rather than an interactive session's: the
+automation deny-set plus the Plain customer-facing writes and the Stripe money
+movers are denied, no user is passed (an `allowedUsers` server stays
+invisible), no AWS credentials are provisioned, and the only in-process
+`opensession-*` server it carries is `opensession-plain-discussion`; the
+interactive admin, sessions, workflows, publish, keychain and self-deploy tools
+are never mounted. This holds on the opening turn, on every later message and
+on a turn a person sends from the Open Session UI.
+
+Nothing posted in a discussion reaches the customer. Instead of the Plain MCP
+writes the session carries the `opensession-plain-discussion` tools:
 
 - `reply_to_customer`: shows the exact reply on an **Approve / Deny** card in
   the discussion and waits for the decision. Approved: the reply is sent as the
   triage machine user and the thread is snoozed as waiting for the customer.
   Denied: nothing is sent and the reviewer note goes back to the model.
 - `execute_stripe_action`: the same card for a specific refund or
-  cancellation. Approved: the existing money-tools execution turn (the one the
-  `@<handle> go ahead` note flow uses) runs that exact proposal.
+  cancellation. Approved: the money-tools execution turn the
+  `@<handle> go ahead` note flow uses runs with a discussion prompt that
+  treats the approved proposal as the action, re-verifies its identifiers and
+  amount in Stripe, and aborts on any ambiguity (a discussion opened from
+  Home has no thread note to fall back on).
 
 A decision that arrives after a restart finds no waiting tool; the card stays
 answered in Plain and the model is told nothing ran. Waiting tools give up

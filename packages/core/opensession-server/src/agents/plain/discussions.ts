@@ -211,10 +211,12 @@ async function createDiscussionSession(
   return id;
 }
 
-/** One message at a time per discussion. `createSession` resolves once the
- *  session is announced, so a message that lands while the first one is
- *  still creating waits here and is then delivered into that session
- *  instead of racing it (and losing). */
+/** One lifecycle event at a time per discussion. `createSession` resolves
+ *  once the session is announced, so a message that lands while the first
+ *  one is still creating waits here and is then delivered into that session
+ *  instead of racing it (and losing). Stop rides the same chain: pressed
+ *  during creation it waits for the announce and then cancels that session,
+ *  instead of finding nothing and letting the run answer anyway. */
 const withMessageOrder = keyedOrder();
 
 async function failTurn(discussionId: string, reason: string): Promise<void> {
@@ -277,21 +279,26 @@ async function onTurnStopRequested(
   const { discussion } = payload;
   const me = await agentMachineUserId();
   if (discussion.agent?.id !== me) return;
+  // A waiting approval card is released right away; the session cancel
+  // queues behind any creation or delivery still in flight for this
+  // discussion, so a Stop during creation reaches the announced session.
   const cancelledApprovals = cancelApprovalsFor(discussion.id);
-  const session = await findDiscussionSession(discussion.id);
-  const { getSessionControl } = await import("../../server/session-control");
-  const cancelled = session
-    ? await getSessionControl().cancelSession(session.id)
-    : false;
-  console.log(
-    `[plain] Stop on discussion ${discussion.id}: session ${session?.id ?? "none"}, cancelled=${cancelled}, approvals=${cancelledApprovals}`,
-  );
-  // A cancelled run ends its turn and the mirror reports IDLE; with nothing
-  // running the status has to be settled here.
-  if (!cancelled)
-    await withDiscussionOrder(discussion.id, () =>
-      updateDiscussionAgentStatus(discussion.id, "IDLE"),
-    ).catch(() => {});
+  await withMessageOrder(discussion.id, async () => {
+    const session = await findDiscussionSession(discussion.id);
+    const { getSessionControl } = await import("../../server/session-control");
+    const cancelled = session
+      ? await getSessionControl().cancelSession(session.id)
+      : false;
+    console.log(
+      `[plain] Stop on discussion ${discussion.id}: session ${session?.id ?? "none"}, cancelled=${cancelled}, approvals=${cancelledApprovals}`,
+    );
+    // A cancelled run ends its turn and the mirror reports IDLE; with nothing
+    // running the status has to be settled here.
+    if (!cancelled)
+      await withDiscussionOrder(discussion.id, () =>
+        updateDiscussionAgentStatus(discussion.id, "IDLE"),
+      ).catch(() => {});
+  });
 }
 
 function onApprovalResolved(payload: DiscussionApprovalResolvedPayload): void {

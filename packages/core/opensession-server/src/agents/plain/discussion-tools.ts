@@ -211,6 +211,7 @@ export function createPlainDiscussionMcpServer(ctx: {
             const result = await executeApprovedStripeAction(
               args.proposal,
               threadContext,
+              "discussion",
             );
             const failed = /^error\b/i.test(result.trim());
             await closeGate(

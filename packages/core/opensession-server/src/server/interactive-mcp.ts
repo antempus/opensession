@@ -130,11 +130,21 @@ function desktopServerFor(sessionId: string): Record<string, unknown> {
   };
 }
 
-/** Approval-gated customer reply / Stripe action for a session that answers
- *  a Plain discussion (discussion-tools.ts). Absent everywhere else. */
-function plainDiscussionServerFor(sessionId: string): Record<string, unknown> {
-  const discussionId = findSession(sessionId)?.plainDiscussionId;
-  if (!discussionId) return {};
+/**
+ * The whole in-process set for a session that answers a Plain discussion
+ * (plainDiscussionId): the approval-gated customer reply / Stripe action
+ * (discussion-tools.ts) and nothing else. A teammate drives the discussion,
+ * but the ticket text the session reads is untrusted, so it gets the triage
+ * automation's surface — external connectors under the discussion deny-set,
+ * none of the interactive siblings (admin, sessions, workflows, publish,
+ * self-deploy, keychain). Served on the opening turn, every resume, and the
+ * run-rpc fallback builder below, so a hosted or sandboxed run cannot ask
+ * for more.
+ */
+export function plainDiscussionSessionMcp(
+  sessionId: string,
+  discussionId: string,
+): Record<string, unknown> {
   return {
     "opensession-plain-discussion": createPlainDiscussionMcpServer({
       sessionId,
@@ -435,7 +445,6 @@ export function interactiveMcpServers(
           // Only a sandboxed session has one; the person watches the same
           // screen in the session's Desktop tab.
           ...desktopServerFor(sessionId),
-          ...plainDiscussionServerFor(sessionId),
         }
       : {}),
   };
@@ -479,6 +488,11 @@ registerInteractiveMcpBuilder(async (sessionId, user, promptEntryId) => {
   const session = sessionId ? findSession(sessionId) : undefined;
   if (sessionId && session?.automation) {
     return automationSessionMcp(session, sessionId);
+  }
+  // Same fail-closed rule for a Plain discussion session: untrusted ticket
+  // text, so only the approval server (plainDiscussionSessionMcp above).
+  if (sessionId && session?.plainDiscussionId) {
+    return plainDiscussionSessionMcp(sessionId, session.plainDiscussionId);
   }
   const servers = interactiveMcpServers(user, sessionId, promptEntryId);
   const goalId = session?.goalId;

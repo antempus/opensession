@@ -363,10 +363,11 @@ export const MCP_SERVER_CATALOG: McpServerCatalogEntry[] = [
     wiring: [
       "packages/core/opensession-server/src/server/interactive-mcp.ts",
       "packages/core/opensession-server/src/server/session-create.ts",
+      "packages/core/opensession-server/src/server/run-session.ts",
     ],
     runClasses: ["interactive"],
     condition:
-      "Needs a session that answers a Plain discussion (plainDiscussionId).",
+      "Only a session that answers a Plain discussion (plainDiscussionId), which carries this server alone instead of the interactive set.",
     build: () =>
       createPlainDiscussionMcpServer({
         sessionId: SESSION_ID,

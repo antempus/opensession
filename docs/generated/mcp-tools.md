@@ -56,7 +56,7 @@ touches an in-process tool:
 | [`opensession-desktop`](#opensession-desktop) | 8 | interactive | Needs a sandboxed session. |
 | [`opensession-walkthrough`](#opensession-walkthrough) | 2 | interactive | Needs a session id. |
 | [`opensession-slack`](#opensession-slack) | 1 | interactive | Needs a session id. |
-| [`opensession-plain-discussion`](#opensession-plain-discussion) | 2 | interactive | Needs a session that answers a Plain discussion (plainDiscussionId). |
+| [`opensession-plain-discussion`](#opensession-plain-discussion) | 2 | interactive | Only a session that answers a Plain discussion (plainDiscussionId), which carries this server alone instead of the interactive set. |
 | [`opensession-ask`](#opensession-ask) | 1 | interactive, Slack loop | Needs a session id. |
 | [`opensession-workflows`](#opensession-workflows) | 8 | interactive, automation | Automation runs get it ONLY with the human-set `workflows` flag. |
 | [`opensession-assets`](#opensession-assets) | 4 | interactive | Needs a session id. Works in read-only Ask mode — assets land outside the checkout. |
@@ -786,9 +786,9 @@ Open an editable Slack composer in this Open Session and wait for the signed-in 
 Reply to the customer or run a Stripe action from a Plain Ask Sidekick discussion, behind the teammate's Approve/Deny card.
 
 - **Source** `packages/core/opensession-server/src/agents/plain/discussion-tools.ts`
-- **Wired in** `packages/core/opensession-server/src/server/interactive-mcp.ts`, `packages/core/opensession-server/src/server/session-create.ts`
+- **Wired in** `packages/core/opensession-server/src/server/interactive-mcp.ts`, `packages/core/opensession-server/src/server/session-create.ts`, `packages/core/opensession-server/src/server/run-session.ts`
 - **Runs** interactive
-- **Condition** Needs a session that answers a Plain discussion (plainDiscussionId).
+- **Condition** Only a session that answers a Plain discussion (plainDiscussionId), which carries this server alone instead of the interactive set.
 
 ### `reply_to_customer`
 

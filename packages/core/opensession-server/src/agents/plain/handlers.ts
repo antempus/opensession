@@ -22,11 +22,7 @@ import { getDefaultModel, toPiModel } from "../../server/models";
 import { cancelAgentRun, runAgent } from "../../server/agent-runner";
 import { STRIPE_CONFIRM_TOOLS } from "../../server/runner-shared";
 import { classifyRefundApproval } from "./refund-intent";
-import {
-  handleDiscussionEvent,
-  resolveDiscussionsForThread,
-  type DiscussionWebhook,
-} from "./discussions";
+import { handleDiscussionEvent, type DiscussionWebhook } from "./discussions";
 import { createWorktree as createRepoWorktree } from "../../server/worktree";
 import {
   configuredIntegration,
@@ -822,7 +818,9 @@ export async function handleWebhook(
     );
   }
 
-  // Archive triage sessions when their ticket is done
+  // Archive triage sessions when their ticket is done. Their discussions are
+  // resolved on the same path (plain-archive.ts), which the safety sweep
+  // shares, so a missed webhook or a failed resolution is retried there.
   if (
     eventType === "thread.thread_status_transitioned" &&
     thread.status === "DONE"
@@ -833,11 +831,6 @@ export async function handleWebhook(
     if (n > 0)
       console.log(
         `[plain] Archived ${n} session(s) for done thread ${thread.id}`,
-      );
-    const resolved = await resolveDiscussionsForThread(thread.id);
-    if (resolved > 0)
-      console.log(
-        `[plain] Resolved ${resolved} discussion(s) for done thread ${thread.id}`,
       );
   }
 

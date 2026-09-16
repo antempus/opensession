@@ -17,7 +17,6 @@ import {
   createDiscussion,
   discussionAgentConfigured,
   keyedOrder,
-  resolveDiscussion,
   sendDiscussionMessage,
   updateDiscussionAgentStatus,
   withDiscussionOrder,
@@ -304,40 +303,6 @@ export async function openTriageDiscussion(
     console.warn(`[plain] Could not open a discussion on ${threadId}:`, e);
     return undefined;
   }
-}
-
-/** The discussions the sessions tied to a thread report into, deduplicated. */
-export function discussionIdsForThread(
-  sessions: readonly {
-    plainThreadId?: string | null;
-    plainDiscussionId?: string | null;
-  }[],
-  threadId: string,
-): string[] {
-  const ids = new Set<string>();
-  for (const s of sessions)
-    if (s.plainThreadId === threadId && s.plainDiscussionId)
-      ids.add(s.plainDiscussionId);
-  return [...ids];
-}
-
-/** Resolve the auto-triage discussions of a ticket that reached DONE, after
- *  their sessions were archived. Returns how many were resolved. */
-export async function resolveDiscussionsForThread(
-  threadId: string,
-): Promise<number> {
-  if (!discussionAgentConfigured()) return 0;
-  const { getCachedSessions } = await import("../../server/session-cache");
-  let resolved = 0;
-  for (const id of discussionIdsForThread(getCachedSessions(), threadId)) {
-    try {
-      await withDiscussionOrder(id, () => resolveDiscussion(id));
-      resolved++;
-    } catch (e) {
-      console.warn(`[plain] Could not resolve discussion ${id}:`, e);
-    }
-  }
-  return resolved;
 }
 
 /** One lifecycle event at a time per discussion. `createSession` resolves

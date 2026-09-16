@@ -4,7 +4,6 @@ import {
   awaitApproval,
   beginDiscussionAction,
   cancelApprovalsFor,
-  discussionIdsForThread,
   discussionOpeningPrompt,
   resolveApproval,
   shouldAnswer,
@@ -160,18 +159,6 @@ describe("auto-triage discussions", () => {
       expect(
         triageDiscussionThread({ ...input, eventContext }),
       ).toBeUndefined();
-  });
-
-  it("resolves the discussions of the done ticket's sessions, and only those", () => {
-    const sessions = [
-      { plainThreadId: "th_done", plainDiscussionId: "thd_a" },
-      { plainThreadId: "th_done", plainDiscussionId: "thd_a" },
-      { plainThreadId: "th_done", plainDiscussionId: undefined },
-      { plainThreadId: "th_other", plainDiscussionId: "thd_b" },
-      { plainThreadId: undefined, plainDiscussionId: "thd_c" },
-    ];
-    expect(discussionIdsForThread(sessions, "th_done")).toEqual(["thd_a"]);
-    expect(discussionIdsForThread(sessions, "th_none")).toEqual([]);
   });
 
   it("seeds the discussion with the agent's own message, which comes back INBOUND and is never answered", () => {

@@ -2803,10 +2803,20 @@ async function* runPiAttempt(
     // chain means a steer still being staged is never enqueued twice, and a
     // steer retracted mid-staging is never enqueued at all.
     let engineQueue: Promise<void> = Promise.resolve();
+    // Steps still to run or running. The pump below reads it before trusting
+    // pi's pendingMessageCount: a steer accepted just before the prompt
+    // settled may not have reached pi's queue yet.
+    let engineQueueDepth = 0;
     const onEngineQueue = (step: () => Promise<void>, what: string) => {
-      engineQueue = engineQueue.then(step).catch((e) => {
-        console.warn(`[pi-runner] ${what} failed:`, e);
-      });
+      engineQueueDepth++;
+      engineQueue = engineQueue
+        .then(step)
+        .catch((e) => {
+          console.warn(`[pi-runner] ${what} failed:`, e);
+        })
+        .finally(() => {
+          engineQueueDepth--;
+        });
     };
     handle.steer = (text, images, steerId) => {
       // Same skill expansion as the prompt path. The queue holds the expanded
@@ -3217,6 +3227,14 @@ async function* runPiAttempt(
     while (true) {
       while (queue.length) yield queue.shift()!;
       if (promptOutcome) {
+        if (engineQueueDepth > 0) {
+          // An accepted steer is still being staged, so pi's queue count is
+          // not final yet. steerPiRun already told the caller "accepted";
+          // finishing now would drop it silently. Wait for the chain, then
+          // re-read everything (more steers may have joined meanwhile).
+          await engineQueue;
+          continue;
+        }
         if (
           promptOutcome.ok &&
           !abort.signal.aborted &&

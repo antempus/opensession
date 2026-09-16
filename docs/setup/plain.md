@@ -265,6 +265,27 @@ only `AGENT_SESSION` discussions whose agent is this machine user, for
 `OUTBOUND` messages, while the discussion is not `RESOLVED`; everything else
 is dropped silently.
 
+### Auto-triage discussions
+
+With the agent set up, every ticket the auto-triage flow actually triages
+(past the outbound and spam gates in `handlers.ts`) also gets an Ask Sidekick
+discussion opened by the agent on the thread before the `plain:thread_created`
+automation fires. The triage session is that discussion's session: it runs
+exactly as before and still posts the diagnosis as an internal note, and on
+top of that every tool call shows on the discussion timeline and its final
+message is posted there. The discussion stays open after triage: a teammate
+who asks a follow-up in it is answered by the same session, with the
+investigation already in context, and the session then carries the
+`opensession-plain-discussion` approval tools beside its automation set (the
+discussion deny-set applies, so replies and Stripe actions only go through the
+card). A turn relayed from the discussion is sent as `Plain`, which counts as a
+machine actor: it bills no subscription and unlocks no spawn suite. When the
+ticket reaches DONE the session is archived and the discussion resolved.
+
+A ticket that the classifier skips gets the existing "auto-triage skipped" note
+and no discussion. If the discussion cannot be opened (no agent key, Plain
+down) the run still fires, without one.
+
 ## Internal notes in English
 
 The legacy prompts and the "Support ticket triage" template require internal

@@ -11,10 +11,13 @@
  */
 import { wrapContext } from "../../server/prompt-context";
 import { productName } from "../../server/config";
+import { PLAIN_ACTOR } from "../../server/session-actors";
 import {
   agentMachineUserId,
+  createDiscussion,
   discussionAgentConfigured,
   keyedOrder,
+  resolveDiscussion,
   sendDiscussionMessage,
   updateDiscussionAgentStatus,
   withDiscussionOrder,
@@ -244,9 +247,78 @@ async function createDiscussionSession(
     mode: "ask",
     workspaceId,
     plainDiscussionId: discussion.id,
-    user: "Plain",
+    user: PLAIN_ACTOR,
   });
   return id;
+}
+
+// --- Auto-triage discussions ----------------------------------------------
+
+/** The agent's own opening message on an auto-triage discussion; it comes
+ *  back INBOUND, so shouldAnswer never treats it as a person's turn. */
+export const TRIAGE_DISCUSSION_SEED =
+  "Auto-triage started. The run's tool calls and its summary land here; the " +
+  "diagnosis is posted as an internal note as before. Ask a follow-up in this " +
+  "discussion to keep investigating with the same context.";
+
+/**
+ * Open the discussion an auto-triage run reports into, on the ticket it
+ * triages. The run mirrors its tool calls and final message here exactly as
+ * an Ask Sidekick session does, and a later message in the discussion is
+ * delivered into that same session. Best effort: triage never waits on it,
+ * so a failure (no agent key, Plain down) means a run with no discussion.
+ */
+export async function openTriageDiscussion(
+  threadId: string,
+): Promise<string | undefined> {
+  if (!discussionAgentConfigured()) return undefined;
+  try {
+    const id = await createDiscussion({
+      threadId,
+      markdownContent: TRIAGE_DISCUSSION_SEED,
+    });
+    await withDiscussionOrder(id, () =>
+      updateDiscussionAgentStatus(id, "IN_PROGRESS"),
+    ).catch(() => {});
+    return id;
+  } catch (e) {
+    console.warn(`[plain] Could not open a discussion on ${threadId}:`, e);
+    return undefined;
+  }
+}
+
+/** The discussions the sessions tied to a thread report into, deduplicated. */
+export function discussionIdsForThread(
+  sessions: readonly {
+    plainThreadId?: string | null;
+    plainDiscussionId?: string | null;
+  }[],
+  threadId: string,
+): string[] {
+  const ids = new Set<string>();
+  for (const s of sessions)
+    if (s.plainThreadId === threadId && s.plainDiscussionId)
+      ids.add(s.plainDiscussionId);
+  return [...ids];
+}
+
+/** Resolve the auto-triage discussions of a ticket that reached DONE, after
+ *  their sessions were archived. Returns how many were resolved. */
+export async function resolveDiscussionsForThread(
+  threadId: string,
+): Promise<number> {
+  if (!discussionAgentConfigured()) return 0;
+  const { getCachedSessions } = await import("../../server/session-cache");
+  let resolved = 0;
+  for (const id of discussionIdsForThread(getCachedSessions(), threadId)) {
+    try {
+      await withDiscussionOrder(id, () => resolveDiscussion(id));
+      resolved++;
+    } catch (e) {
+      console.warn(`[plain] Could not resolve discussion ${id}:`, e);
+    }
+  }
+  return resolved;
 }
 
 /** One lifecycle event at a time per discussion. `createSession` resolves
@@ -295,7 +367,7 @@ async function onMessageCreated(
         const result = await getSessionControl().deliverToSession(
           existing.id,
           text,
-          "Plain",
+          PLAIN_ACTOR,
           { deliveryId: `plain-discussion:${message.id}` },
         );
         if (result.status === "error")

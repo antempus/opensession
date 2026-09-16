@@ -113,6 +113,12 @@ import {
   type AutomationOutput,
 } from "./automation-outputs";
 import { automationIntentAlreadySettled } from "./automation-intent-recovery";
+import {
+  forgetPlainDiscussionRun,
+  plainDiscussionToolResult,
+  plainDiscussionToolUse,
+  settlePlainDiscussionTurn,
+} from "../agents/plain/discussion-mirror";
 
 const SESSIONS_DIR = OPENSESSION_SESSIONS_DIR;
 
@@ -1737,6 +1743,11 @@ export async function runAutomation(
   // run rather than to whatever owns the session when it lands. Declared out
   // here so the outer catch can settle a launch that threw before dispatch.
   const automationRunKey = `rh-${randomUUIDv7()}`;
+  // The Plain discussion an auto-triage run reports into, and the reply it
+  // posts there when the turn is over (the whole assistant text; textTail
+  // below is only a verdict window).
+  let plainDiscussionId: string | undefined;
+  let discussionReply = "";
 
   try {
     const runModel = automationModel(
@@ -1907,10 +1918,15 @@ export async function runAutomation(
         const parsed = JSON.parse(options.eventContext);
         if (typeof parsed.threadId === "string")
           plainThreadId = parsed.threadId;
+        if (typeof parsed.discussionId === "string")
+          plainDiscussionId = parsed.discussionId;
         if (typeof parsed.title === "string" && parsed.title.trim()) {
           eventTitle = parsed.title.trim().slice(0, 100);
         }
       } catch {}
+    }
+    if (plainDiscussionId) {
+      prompt += `\n\n## Plain discussion\n\nThis run also reports into the ticket's "Ask Sidekick" discussion (${plainDiscussionId}): every tool call shows on its timeline and your final message is posted there for the support team, who may ask follow-up questions in it later. Keep posting the diagnosis as an internal note as instructed above; make your final message a concise summary of what you found and did. Nothing in the discussion reaches the customer.`;
     }
     // File ticket-triggered sessions under the ticket's ONE workspace so they
     // show up as session tabs there (adopt-don't-duplicate; workspace-resolve.ts).
@@ -1991,6 +2007,7 @@ export async function runAutomation(
             ? { automationEvent: options.eventContext.slice(0, 10_000) }
             : {}),
           ...(plainThreadId ? { plainThreadId } : {}),
+          ...(plainDiscussionId ? { plainDiscussionId } : {}),
           ...(ticketWorkspaceId ? { workspaceId: ticketWorkspaceId } : {}),
           ...existing,
           // Intent recovery reuses the session id but may materialize a new
@@ -2202,7 +2219,12 @@ export async function runAutomation(
       }
       if (event.type === "text_chunk" && event.text) {
         textTail = (textTail + event.text).slice(-16384);
+        if (plainDiscussionId) discussionReply += event.text;
       }
+      if (event.type === "tool_use")
+        plainDiscussionToolUse(plainDiscussionId, event);
+      if (event.type === "tool_result")
+        plainDiscussionToolResult(plainDiscussionId, event);
       if (event.type === "error") {
         sawTerminalEvent = true;
         errorMsg = event.content || "Unknown error";
@@ -2261,6 +2283,11 @@ export async function runAutomation(
       );
 
     await persistSession(engineSessionId);
+    settlePlainDiscussionTurn(plainDiscussionId, automationRunKey, {
+      assistantText: discussionReply,
+      endedWithError: !!errorMsg,
+      runFailure: errorMsg || null,
+    });
 
     if (!errorMsg) {
       await deliverAutomationOutputs({
@@ -2287,6 +2314,11 @@ export async function runAutomation(
   } catch (e: any) {
     console.error(`[automations] "${automation.name}" failed:`, e);
     const errorMessage = e.message || String(e);
+    settlePlainDiscussionTurn(plainDiscussionId, automationRunKey, {
+      assistantText: discussionReply,
+      endedWithError: true,
+      runFailure: errorMessage,
+    });
     // A throw is usually ambiguous. The host may still be executing, so the
     // journal stays and boot recovery owns settling it. A definitive launch
     // failure has neither a journal record nor a live engine. Retire that
@@ -2306,6 +2338,7 @@ export async function runAutomation(
     // Keep the intent; boot reconciles its active journal or terminal receipt
     // before replay.
   } finally {
+    forgetPlainDiscussionRun(automationRunKey);
     automationPreparations.delete(bksId);
     activeAutomationIntentSessions.delete(bksId);
     unregisterRunToken(sandboxRpcToken);

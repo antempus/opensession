@@ -4,9 +4,11 @@ import {
   awaitApproval,
   beginDiscussionAction,
   cancelApprovalsFor,
+  discussionIdsForThread,
   discussionOpeningPrompt,
   resolveApproval,
   shouldAnswer,
+  TRIAGE_DISCUSSION_SEED,
   type DiscussionMessageCreatedPayload,
 } from "./discussions";
 import {
@@ -129,6 +131,32 @@ describe("approval registry", () => {
     // A finished action is out of reach; a Stop then has nothing to abort.
     expect(abortDiscussionActions("disc_other")).toBe(0);
     expect(other.signal.aborted).toBe(false);
+  });
+});
+
+describe("auto-triage discussions", () => {
+  it("resolves the discussions of the done ticket's sessions, and only those", () => {
+    const sessions = [
+      { plainThreadId: "th_done", plainDiscussionId: "thd_a" },
+      { plainThreadId: "th_done", plainDiscussionId: "thd_a" },
+      { plainThreadId: "th_done", plainDiscussionId: undefined },
+      { plainThreadId: "th_other", plainDiscussionId: "thd_b" },
+      { plainThreadId: undefined, plainDiscussionId: "thd_c" },
+    ];
+    expect(discussionIdsForThread(sessions, "th_done")).toEqual(["thd_a"]);
+    expect(discussionIdsForThread(sessions, "th_none")).toEqual([]);
+  });
+
+  it("seeds the discussion with the agent's own message, which comes back INBOUND and is never answered", () => {
+    expect(TRIAGE_DISCUSSION_SEED).toContain("Auto-triage started");
+    expect(
+      shouldAnswer(
+        messageCreated({
+          message: { type: "INBOUND", markdown: TRIAGE_DISCUSSION_SEED },
+        }),
+        ME,
+      ),
+    ).toBe(false);
   });
 });
 

@@ -22,7 +22,12 @@ import { getDefaultModel, toPiModel } from "../../server/models";
 import { cancelAgentRun, runAgent } from "../../server/agent-runner";
 import { STRIPE_CONFIRM_TOOLS } from "../../server/runner-shared";
 import { classifyRefundApproval } from "./refund-intent";
-import { handleDiscussionEvent, type DiscussionWebhook } from "./discussions";
+import {
+  handleDiscussionEvent,
+  openTriageDiscussion,
+  resolveDiscussionsForThread,
+  type DiscussionWebhook,
+} from "./discussions";
 import { createWorktree as createRepoWorktree } from "../../server/worktree";
 import {
   configuredIntegration,
@@ -710,11 +715,17 @@ async function gateAndFireThreadCreated(
     );
   }
 
+  // The run reports into an Ask Sidekick discussion on the ticket (its tool
+  // calls and summary), beside the note it posts; only tickets that get
+  // triaged open one.
+  const discussionId = await openTriageDiscussion(thread.id);
+
   await fireAutomationsForEvent(
     "plain:thread_created",
     JSON.stringify(
       {
         threadId: thread.id,
+        ...(discussionId ? { discussionId } : {}),
         title: thread.title || null,
         previewText: thread.previewText || null,
         status: thread.status,
@@ -829,6 +840,11 @@ export async function handleWebhook(
     if (n > 0)
       console.log(
         `[plain] Archived ${n} session(s) for done thread ${thread.id}`,
+      );
+    const resolved = await resolveDiscussionsForThread(thread.id);
+    if (resolved > 0)
+      console.log(
+        `[plain] Resolved ${resolved} discussion(s) for done thread ${thread.id}`,
       );
   }
 

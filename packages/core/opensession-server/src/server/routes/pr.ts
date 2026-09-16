@@ -249,6 +249,21 @@ export async function handlePrRoutes(
     return conditionalJsonResponse(req, { prs });
   }
 
+  // One PR by number, for the hover card behind a transcript's `repo#123`
+  // chip: title, description and lifecycle from one `gh pr view`, cached per
+  // PR (see pr-summary.ts). The recent-PRs window above knows only what it
+  // keeps, and never the body; this answers for any PR the repo ever had.
+  if (path === "/api/pr-summary" && req.method === "GET") {
+    const number = Number(url.searchParams.get("number"));
+    if (!Number.isInteger(number) || number < 1)
+      return Response.json({ error: "number required" }, { status: 400 });
+    const repo = getRepo(url.searchParams.get("repo") || undefined);
+    const { getPrSummary } = await import("../pr-summary");
+    return prApiResponse(async () => ({
+      pr: await getPrSummary(repo, number),
+    }));
+  }
+
   // The same window for repos that ship without pull requests: commits on
   // their default branch, read from the checkout (see recent-commits.ts).
   // `?days=` widens it — the feed asks for more as you page down, and the

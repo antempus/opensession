@@ -7,7 +7,7 @@ const runDir = argv.shift();
 const command = argv.shift();
 if (!runDir || !command) {
   fail(
-    "usage: browser.mjs <run-dir> <open|click|fill|press|wait|snapshot|screenshot|url|eval> [flags]",
+    "usage: browser.mjs <run-dir> <open|click|hover|fill|press|wait|snapshot|screenshot|url|eval> [flags]",
   );
 }
 
@@ -147,15 +147,28 @@ async function matchingNode() {
   );
 }
 
-async function clickNode(node) {
+async function nodeCentre(node) {
   const model = await send("DOM.getBoxModel", {
     backendNodeId: node.backendDOMNodeId,
   });
   const quad = model?.model?.border;
   if (!Array.isArray(quad) || quad.length < 8)
     fail("target has no clickable box");
-  const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
-  const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+  return {
+    x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+    y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4,
+  };
+}
+
+/** Park the pointer on the node without pressing: what a hover card or a
+ *  tooltip needs, where a click would follow the link instead. */
+async function hoverNode(node) {
+  const { x, y } = await nodeCentre(node);
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+}
+
+async function clickNode(node) {
+  const { x, y } = await nodeCentre(node);
   await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
   await send("Input.dispatchMouseEvent", {
     type: "mousePressed",
@@ -215,6 +228,12 @@ try {
       const node = await matchingNode();
       await clickNode(node);
       console.log(`clicked ${role} ${JSON.stringify(name)}`);
+      break;
+    }
+    case "hover": {
+      const node = await matchingNode();
+      await hoverNode(node);
+      console.log(`hovering ${role} ${JSON.stringify(name)}`);
       break;
     }
     case "fill": {

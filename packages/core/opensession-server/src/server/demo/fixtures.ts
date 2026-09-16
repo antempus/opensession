@@ -290,7 +290,7 @@ export function demoSessions(opts: {
           t0 + 140_000,
         ),
         transcriptLineAssistantText(
-          "Fixed and verified — 100/100 green. The loop now honors the configured retry budget. I committed the change on `demo/fix-flaky-upload` and opened a PR with the regression note in the description.\n\n" +
+          "Fixed and verified — 100/100 green. The loop now honors the configured retry budget. I committed the change on `demo/fix-flaky-upload` and opened PR #128 with the regression note in the description.\n\n" +
             "Where the flakes were coming from, per attempt across the 50 reruns:\n\n" +
             "```vega-lite\n" +
             JSON.stringify({
@@ -974,7 +974,7 @@ export function demoReplayScript(): Array<() => JsonlLine[]> {
     ],
     say(
       "demo-live-a1",
-      "Plan: find the route registration choke point, wrap it once instead of editing 40 handlers, then verify a trace end-to-end.",
+      "Plan: find the route registration choke point, wrap it once instead of editing 40 handlers (the same one-site fix as #128), then verify a trace end-to-end.",
     ),
     step(
       1,

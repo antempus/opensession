@@ -111,6 +111,42 @@ export async function fetchRecentPr(
   return data?.prs?.[0] || null;
 }
 
+/**
+ * One PR by number, from the server's one-call read (server/pr-summary.ts):
+ * what a transcript chip's hover card shows, including the description no
+ * list endpoint carries. Answers for any PR the repo ever had, not only the
+ * open and recent ones.
+ */
+export interface PrSummary {
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  state: "OPEN" | "MERGED" | "CLOSED";
+  isDraft: boolean;
+  branch: string;
+  author: string;
+  /** The PR description as written, markdown and all. */
+  body: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  reviewDecision: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchPrSummary(
+  repo: string,
+  number: number,
+): Promise<PrSummary | null> {
+  const query = new URLSearchParams({ repo, number: String(number) });
+  const data = await request<{ pr: PrSummary | null }>(`/pr-summary?${query}`, {
+    label: "Failed to fetch PR",
+  });
+  return data?.pr ?? null;
+}
+
 /** One commit on the default branch of a repo that ships without PRs. */
 export interface RecentCommit {
   repo: string;

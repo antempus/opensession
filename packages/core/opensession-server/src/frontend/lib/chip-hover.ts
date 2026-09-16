@@ -1,10 +1,12 @@
 import {
   fetchCommit,
   fetchOpenPrs,
+  fetchPrSummary,
   fetchRecentPr,
   fetchSession,
   type CommitDetails,
   type OpenPr,
+  type PrSummary,
   type RecentPr,
 } from "./api";
 import type { OsReview, UnifiedSession } from "./types";
@@ -21,8 +23,11 @@ import type { OsReview, UnifiedSession } from "./types";
  * Everything comes from data the app already holds, since the polled session
  * list covers most chips. One lazy, cached fetch behind each kind answers for
  * the rest: a session that has been archived out of the list, and a PR that no
- * loaded session owns. A commit reference is the one kind nothing here already
- * knows, so it is always the fetch (server/commit-lookup.ts reads it off the
+ * loaded session owns. A PR chip also asks the server for the PR itself
+ * (server/pr-summary.ts), because no list the app holds carries the
+ * description, and a PR merged long before the recent window opened is in no
+ * list at all. A commit reference is the one kind nothing here already knows,
+ * so it is always the fetch (server/commit-lookup.ts reads it off the
  * checkout).
  */
 
@@ -53,6 +58,37 @@ export function chipTarget(el: HTMLElement): ChipTarget | null {
   return null;
 }
 
+const attrValue = (value: string) => value.replace(/["\\]/g, "\\$&");
+
+/**
+ * The selector that finds a chip for this target again.
+ *
+ * A running session rewrites its transcript's HTML on every tick, so the
+ * element the pointer dwelled on is often gone by the time its card opens,
+ * and a card anchored to a detached element lands at the page's top-left
+ * corner. The card measures whichever element currently says the same thing
+ * instead; the first match is the one the pointer is on in every case but a
+ * paragraph that names the same PR twice, where either is close enough.
+ */
+export function chipSelector(target: ChipTarget): string {
+  switch (target.kind) {
+    case "session":
+      return `a.session-link[data-session-id="${attrValue(target.id)}"]`;
+    case "pr":
+      return (
+        `a.pr-ref[data-pr-repo="${attrValue(target.repo)}"]` +
+        `[data-pr-number="${target.number}"]`
+      );
+    case "commit":
+      return (
+        `.commit-ref[data-commit-sha="${attrValue(target.sha)}"]` +
+        (target.repo
+          ? `[data-commit-repo="${attrValue(target.repo)}"]`
+          : ":not([data-commit-repo])")
+      );
+  }
+}
+
 /**
  * One PR, assembled from wherever this client already knows it. Shaped to be
  * readable by the PR vocabulary the rest of the app shares: `refTone` and
@@ -77,6 +113,9 @@ export type ChipPr = {
   updatedAt?: string;
   additions?: number;
   deletions?: number;
+  changedFiles?: number;
+  /** The description as written, once the summary read has answered. */
+  body?: string;
   /** The session that opened it, when one of ours did. */
   session?: UnifiedSession;
 };
@@ -137,7 +176,10 @@ function prFromSessions(
  * Everything known about the PR a chip names. The open-PR list is the rich
  * half (review requests and automated review), while recent history is the
  * lifecycle authority and keeps merged/closed PRs available after their
- * workspace leaves the live session list.
+ * workspace leaves the live session list. The summary, when it has answered,
+ * is the PR as GitHub has it right now: it wins on identity and lifecycle and
+ * is the only source of the description. It knows nothing of checks, review
+ * requests or the session that opened the PR, so those still come from here.
  */
 export function chipPr(
   repo: string,
@@ -145,39 +187,52 @@ export function chipPr(
   sessions: UnifiedSession[],
   openPrs: OpenPr[],
   recentPrs: RecentPr[] = [],
+  summary: PrSummary | null = null,
 ): ChipPr | null {
   const mine = prFromSessions(repo, number, sessions);
   const open = openPrs.find((p) => p.repo === repo && p.number === number);
   const recent = recentPrs.find((p) => p.repo === repo && p.number === number);
   const terminal =
     recent?.state === "MERGED" || recent?.state === "CLOSED" ? recent : null;
-  if (!mine && !open && !recent) return null;
+  if (!mine && !open && !recent && !summary) return null;
   return {
     repo,
     number,
-    title: recent?.title || mine?.title || open?.title,
-    url: recent?.url || mine?.url || open?.url,
-    branch: recent?.branch || mine?.branch || open?.branch,
-    author: recent?.author || mine?.author || open?.author,
+    title: summary?.title || recent?.title || mine?.title || open?.title,
+    url: summary?.url || recent?.url || mine?.url || open?.url,
+    branch: summary?.branch || recent?.branch || mine?.branch || open?.branch,
+    author: summary?.author || recent?.author || mine?.author || open?.author,
     state:
+      summary?.state ??
       terminal?.state ??
       mine?.state ??
       recent?.state ??
       (open ? "OPEN" : undefined),
-    isDraft: terminal
-      ? terminal.isDraft
-      : (mine?.isDraft ?? recent?.isDraft ?? open?.isDraft),
+    isDraft: summary
+      ? summary.isDraft
+      : terminal
+        ? terminal.isDraft
+        : (mine?.isDraft ?? recent?.isDraft ?? open?.isDraft),
     reviewDecision:
-      mine?.reviewDecision || recent?.reviewDecision || open?.reviewDecision,
+      summary?.reviewDecision ||
+      mine?.reviewDecision ||
+      recent?.reviewDecision ||
+      open?.reviewDecision,
     mergeable: mine?.mergeable || recent?.mergeable || open?.mergeable,
     checks: mine?.checks ?? recent?.checks ?? open?.checks,
     osReview: mine?.osReview ?? open?.osReview ?? recent?.osReview,
     reviewRequested:
       recent?.reviewRequested ?? mine?.reviewRequested ?? open?.reviewRequested,
-    createdAt: recent?.createdAt || open?.createdAt,
-    updatedAt: recent?.updatedAt || mine?.updatedAt || open?.updatedAt,
-    additions: recent?.additions ?? mine?.additions,
-    deletions: recent?.deletions ?? mine?.deletions,
+    createdAt: summary?.createdAt || recent?.createdAt || open?.createdAt,
+    updatedAt:
+      summary?.updatedAt ||
+      recent?.updatedAt ||
+      mine?.updatedAt ||
+      open?.updatedAt,
+    additions: summary?.additions ?? recent?.additions ?? mine?.additions,
+    deletions: summary?.deletions ?? recent?.deletions ?? mine?.deletions,
+    changedFiles: summary?.changedFiles,
+    body: summary?.body,
     session: mine?.session,
   };
 }
@@ -262,6 +317,47 @@ export function loadRecentPr(
       recentPrsInFlight.delete(key);
     });
   recentPrsInFlight.set(key, request);
+  return request;
+}
+
+// The PR itself, by number. Longer-lived than the list caches: a title and
+// body change rarely and a merged PR never, and each answer is one GitHub
+// call. A miss is cached too, so a chip on a number that was never a PR does
+// not retry on every hover.
+const SUMMARY_TTL_MS = 5 * 60_000;
+const prSummaries = new Map<string, { pr: PrSummary | null; at: number }>();
+const prSummariesInFlight = new Map<string, Promise<PrSummary | null>>();
+
+/** The summary already fetched, for the synchronous first look on hover. */
+export function cachedPrSummary(
+  repo: string,
+  number: number,
+): PrSummary | null {
+  return prSummaries.get(recentPrKey(repo, number))?.pr ?? null;
+}
+
+export function loadPrSummary(
+  repo: string,
+  number: number,
+): Promise<PrSummary | null> {
+  const key = recentPrKey(repo, number);
+  const cached = prSummaries.get(key);
+  if (cached && Date.now() - cached.at < SUMMARY_TTL_MS)
+    return Promise.resolve(cached.pr);
+  const pending = prSummariesInFlight.get(key);
+  if (pending) return pending;
+  const request = fetchPrSummary(repo, number)
+    .then((pr) => {
+      prSummaries.set(key, { pr, at: Date.now() });
+      return pr;
+    })
+    // A failed read (rate limit, GitHub down) is not an answer: keep whatever
+    // the last one said and let the next hover try again.
+    .catch(() => cached?.pr ?? null)
+    .finally(() => {
+      prSummariesInFlight.delete(key);
+    });
+  prSummariesInFlight.set(key, request);
   return request;
 }
 

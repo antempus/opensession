@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { chipPr, chipPrIsWorthShowing, chipTarget } from "./chip-hover";
-import type { OpenPr, RecentPr } from "./api";
+import {
+  chipPr,
+  chipPrIsWorthShowing,
+  chipSelector,
+  chipTarget,
+} from "./chip-hover";
+import type { OpenPr, PrSummary, RecentPr } from "./api";
 import type { UnifiedSession } from "./types";
 
 // The chips are HTML the markdown renderer wrote, so the only handle the card
@@ -55,6 +60,25 @@ const recentPr = (over: Partial<RecentPr>): RecentPr => ({
   ...over,
 });
 
+const summary = (over: Partial<PrSummary>): PrSummary => ({
+  repo: "opensession",
+  number: 128,
+  title: "Hover cards for transcript chips",
+  url: "https://github.com/tellahq/opensession/pull/128",
+  state: "MERGED",
+  isDraft: false,
+  branch: "chip-hover-cards",
+  author: "kentdebruin",
+  body: "## Summary\n\nOne card off the hovered chip.",
+  additions: 130,
+  deletions: 30,
+  changedFiles: 5,
+  reviewDecision: "APPROVED",
+  createdAt: "2026-08-14T08:00:00.000Z",
+  updatedAt: "2026-08-14T11:00:00.000Z",
+  ...over,
+});
+
 describe("chipTarget", () => {
   test("reads a session chip", () => {
     expect(chipTarget(chip({ sessionId: "os-019f" }))).toEqual({
@@ -77,6 +101,30 @@ describe("chipTarget", () => {
 
   test("ignores an anchor that names neither", () => {
     expect(chipTarget(chip({ assetPath: "shot.png" }))).toBeNull();
+  });
+});
+
+describe("chipSelector", () => {
+  test("finds the same chip again after the transcript is rewritten", () => {
+    expect(
+      chipSelector({ kind: "pr", key: "", repo: "opensession", number: 128 }),
+    ).toBe('a.pr-ref[data-pr-repo="opensession"][data-pr-number="128"]');
+    expect(chipSelector({ kind: "session", key: "", id: "os-019f" })).toBe(
+      'a.session-link[data-session-id="os-019f"]',
+    );
+    expect(chipSelector({ kind: "commit", key: "", sha: "4ed1ef09" })).toBe(
+      '.commit-ref[data-commit-sha="4ed1ef09"]:not([data-commit-repo])',
+    );
+    expect(
+      chipSelector({
+        kind: "commit",
+        key: "",
+        sha: "4ed1ef09",
+        repo: "webapp",
+      }),
+    ).toBe(
+      '.commit-ref[data-commit-sha="4ed1ef09"][data-commit-repo="webapp"]',
+    );
   });
 });
 
@@ -160,6 +208,52 @@ describe("chipPr", () => {
       [recentPr({ state: "OPEN", mergeable: "UNKNOWN" })],
     );
     expect(pr?.mergeable).toBe("CONFLICTING");
+  });
+
+  // A PR merged before the recent window opened is in no list the app holds;
+  // the summary read is what lets its chip have a card at all.
+  test("a PR no list knows resolves from the summary alone", () => {
+    const pr = chipPr("opensession", 128, [], [], [], summary({}));
+    expect(pr).toMatchObject({
+      title: "Hover cards for transcript chips",
+      state: "MERGED",
+      author: "kentdebruin",
+      branch: "chip-hover-cards",
+      body: "## Summary\n\nOne card off the hovered chip.",
+      changedFiles: 5,
+    });
+    expect(chipPrIsWorthShowing(pr)).toBe(true);
+  });
+
+  // The summary is GitHub's current answer, so it wins on lifecycle and
+  // identity, but it knows nothing of what only this instance tracks.
+  test("the summary leads on identity and keeps the instance's own facts", () => {
+    const owner = session({
+      repo: "opensession",
+      prNumber: 128,
+      prState: "OPEN",
+      prChecks: { total: 4, passed: 3, failed: 0, pending: 1 },
+    });
+    const pr = chipPr(
+      "opensession",
+      128,
+      [owner],
+      [openPr({ title: "Old title", reviewRequested: ["kent"] })],
+      [],
+      summary({ title: "New title", state: "MERGED" }),
+    );
+    expect(pr?.title).toBe("New title");
+    expect(pr?.state).toBe("MERGED");
+    expect(pr?.additions).toBe(130);
+    expect(pr?.checks).toEqual({ total: 4, passed: 3, failed: 0, pending: 1 });
+    expect(pr?.reviewRequested).toEqual(["kent"]);
+    expect(pr?.session?.id).toBe("os-1");
+  });
+
+  test("a summary miss leaves the list sources in charge", () => {
+    const pr = chipPr("opensession", 128, [], [openPr({})], [], null);
+    expect(pr?.title).toBe("Hover cards for transcript chips");
+    expect(pr?.body).toBeUndefined();
   });
 
   test("falls back to the PRs a session merely spans", () => {

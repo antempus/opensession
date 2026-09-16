@@ -11,22 +11,26 @@ import {
   cachedChipCommit,
   cachedChipSession,
   cachedOpenPrs,
+  cachedPrSummary,
   cachedRecentPr,
   cachedRecentPrs,
   cacheRecentPrs,
   chipCommitResolved,
   chipPr,
   chipPrIsWorthShowing,
+  chipSelector,
   chipTarget,
   loadChipCommit,
   loadChipSession,
   loadOpenPrs,
+  loadPrSummary,
   loadRecentPr,
   type ChipPr,
   type ChipTarget,
 } from "../lib/chip-hover";
-import type { CommitDetails } from "../lib/api";
+import type { CommitDetails, PrSummary } from "../lib/api";
 import { setKnownRepoPrStates } from "../lib/markdown";
+import { prDescriptionExcerpt } from "../lib/pr-description";
 import { prStatusDisplay } from "../lib/pr-status";
 import { PR_STATE_TEXT } from "../lib/pr-tone-classes";
 import { providerFromUrl } from "../lib/provider";
@@ -222,28 +226,45 @@ export function ChipHoverCards({ sessions }: { sessions: UnifiedSession[] }) {
       sessions,
       cachedOpenPrs(),
       recent ? [recent] : [],
+      cachedPrSummary(target.repo, target.number),
     );
     if (chipPrIsWorthShowing(known))
       setCard({ key: target.key, kind: "pr", pr: known });
     // Revalidate even when the synchronous sources can name it. The old path
     // returned above and froze the first open-PR snapshot forever, which is how
     // a merged PR kept an Open card and then lost its card once archived.
+    //
+    // The summary is the slow half (one GitHub call the first time), so the
+    // list caches answer first and the card fills in the description, or
+    // names a PR no list knew, when the summary lands.
+    const show = (
+      openPrs: OpenPr[],
+      recentPr: RecentPr | null,
+      summary: PrSummary | null,
+    ) => {
+      const filled = chipPr(
+        target.repo,
+        target.number,
+        sessions,
+        openPrs,
+        recentPr ? [recentPr] : [],
+        summary,
+      );
+      if (chipPrIsWorthShowing(filled)) {
+        setCard({ key: target.key, kind: "pr", pr: filled });
+      } else {
+        setCard((current) => (current?.key === target.key ? null : current));
+      }
+    };
+    const summaryRequest = loadPrSummary(target.repo, target.number);
     void Promise.all([loadOpenPrs(), loadRecentPr(target.repo, target.number)])
       .then(([openPrs, recentPr]) => {
         if (!alive) return;
         syncRepoPrStates(openPrs, recentPr ? [recentPr] : []);
-        const filled = chipPr(
-          target.repo,
-          target.number,
-          sessions,
-          openPrs,
-          recentPr ? [recentPr] : [],
-        );
-        if (chipPrIsWorthShowing(filled)) {
-          setCard({ key: target.key, kind: "pr", pr: filled });
-        } else {
-          setCard((current) => (current?.key === target.key ? null : current));
-        }
+        show(openPrs, recentPr, cachedPrSummary(target.repo, target.number));
+        return summaryRequest.then((summary) => {
+          if (alive) show(openPrs, recentPr, summary);
+        });
       })
       .catch(() => {});
     return () => {
@@ -252,6 +273,25 @@ export function ChipHoverCards({ sessions }: { sessions: UnifiedSession[] }) {
   }, [hover, sessions]);
 
   const open = !!hover && card?.key === hover.target.key;
+
+  // The chip as it is now, not as it was on hover: a running session's
+  // transcript is rewritten every tick (MarkdownBody), which replaces the
+  // dwelled-on element under a still pointer. Measured through a virtual
+  // anchor so each measurement finds the element currently in the page, and
+  // a card that opened after the swap still stands under the chip.
+  const liveChip = (): HTMLElement | null => {
+    if (!hover) return null;
+    if (hover.el.isConnected) return hover.el;
+    const found = document.querySelector(chipSelector(hover.target));
+    return found instanceof HTMLElement ? found : hover.el;
+  };
+  const anchor = hover
+    ? {
+        getBoundingClientRect: () =>
+          (liveChip() ?? hover.el).getBoundingClientRect(),
+        contextElement: liveChip() ?? hover.el,
+      }
+    : null;
 
   // The chip's `title` is the card's own summary in one line. Both at once
   // puts an OS tooltip over the card that replaced it, so the attribute steps
@@ -337,7 +377,7 @@ export function ChipHoverCards({ sessions }: { sessions: UnifiedSession[] }) {
           // paragraph, and a card off in the margin points at a word instead
           // of standing under it. Base UI flips it above when there is no room.
           <RowCardPopup
-            anchor={hover.el}
+            anchor={anchor}
             side="bottom"
             align="start"
             sideOffset={8}
@@ -446,9 +486,14 @@ function CommitChipCardBody({ commit }: { commit: CommitDetails }) {
 function PrChipCardBody({ pr }: { pr: ChipPr }) {
   const status = prStatusDisplay(pr);
   const tone = status.tone;
+  const description = prDescriptionExcerpt(pr.body);
+  const showsChange = pr.additions != null && pr.deletions != null;
   const rows: Array<[string, React.ReactNode]> = [];
   if (pr.author) rows.push(["Author", pr.author]);
   rows.push(["Repo", repoLabel(pr.repo)]);
+  // The header spends its line on the change size once that is known, so the
+  // branch moves down here rather than dropping off the card.
+  if (showsChange && pr.branch) rows.push(["Branch", pr.branch]);
   if (pr.reviewDecision) rows.push(["Review", prettyReview(pr.reviewDecision)]);
   if (pr.osReview) rows.push(["OS review", osReviewLabel(pr.osReview)]);
   const checks = checksLabel(pr.checks);
@@ -468,6 +513,12 @@ function PrChipCardBody({ pr }: { pr: ChipPr }) {
             <>
               <span className="text-green">+{compactNum(pr.additions)}</span>{" "}
               <span className="text-red">-{compactNum(pr.deletions)}</span>
+              {!!pr.changedFiles && (
+                <span className="text-faint">
+                  {" "}
+                  · {pr.changedFiles} {pr.changedFiles === 1 ? "file" : "files"}
+                </span>
+              )}
             </>
           ) : (
             pr.branch
@@ -488,6 +539,14 @@ function PrChipCardBody({ pr }: { pr: ChipPr }) {
       <div className="mt-[5px] text-label font-semibold leading-[1.3]">
         {pr.title}
       </div>
+
+      {/* The description, clamped, in the slot the commit card gives its
+          message body: the title says what, this says why. */}
+      {description && (
+        <div className="mt-[3px] line-clamp-3 text-supporting leading-[1.4] text-dim">
+          {description}
+        </div>
+      )}
 
       <div className={`mt-[3px] text-meta font-medium ${PR_STATE_TEXT[tone]}`}>
         {status.label}

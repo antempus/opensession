@@ -64,10 +64,13 @@ Common actions:
 ./.agents/skills/verify-opensession/bin/verify-opensession browser "$RUN_ID" click --role button --name "New goal"
 ./.agents/skills/verify-opensession/bin/verify-opensession browser "$RUN_ID" fill --role textbox --name "Name" --value "Verification goal"
 ./.agents/skills/verify-opensession/bin/verify-opensession browser "$RUN_ID" press --key Escape
+./.agents/skills/verify-opensession/bin/verify-opensession browser "$RUN_ID" hover --role link --name "#128"
 ./.agents/skills/verify-opensession/bin/verify-opensession browser "$RUN_ID" url
 ```
 
-`wait`, `click`, and `fill` require one exact accessible match. Add `--index 1` only when the UI intentionally exposes duplicate names. A lookup failure prints nearby names for that role. Use `snapshot` to inspect the current tree instead of guessing selectors:
+`hover` parks the pointer on the element without pressing, for hover cards and tooltips where a click would follow the link. Dwell a moment before the snapshot or screenshot. A transcript chip's accessible name starts with a zero-width space (`$(printf '\xe2\x80\x8b #128')`).
+
+`wait`, `click`, `hover`, and `fill` require one exact accessible match. Add `--index 1` only when the UI intentionally exposes duplicate names. A lookup failure prints nearby names for that role. Use `snapshot` to inspect the current tree instead of guessing selectors:
 
 ```bash
 ./.agents/skills/verify-opensession/bin/verify-opensession browser "$RUN_ID" snapshot
@@ -120,4 +123,4 @@ Both shipped helpers are executable:
 - `bin/verify-opensession` owns launch, doctor, API reads, browser delegation, and cleanup. Invoke it exactly as shown above.
 - `bin/browser.mjs` is the CDP implementation. Do not call it directly because it needs run metadata. Use `verify-opensession browser`.
 
-The browser subcommands are `open`, `click`, `fill`, `press`, `wait`, `snapshot`, `screenshot`, `url`, and `eval`. `press` takes a bare key (`b`, `Enter`) or a chord with the modifiers first (`Control+i`, `Meta+Shift+g`). Reserve `eval` for read-only diagnosis. It is not acceptable proof of a user path or mutation.
+The browser subcommands are `open`, `click`, `hover`, `fill`, `press`, `wait`, `snapshot`, `screenshot`, `url`, and `eval`. `press` takes a bare key (`b`, `Enter`) or a chord with the modifiers first (`Control+i`, `Meta+Shift+g`). Reserve `eval` for read-only diagnosis. It is not acceptable proof of a user path or mutation.

@@ -462,6 +462,16 @@ export function knownPrNumberForBranch(
   return numberByBranch.get(cacheKey(repo, branch));
 }
 
+/** The details already loaded for a branch, stale or not, without a fetch.
+ *  For readers that want whatever is on hand (a hover card) rather than a
+ *  current answer: the row refreshes on its own clock behind getPrDetails. */
+export function cachedPrDetails(
+  repo: string,
+  branch: string,
+): PrDetails | null {
+  return cache.get(cacheKey(repo, branch))?.data ?? null;
+}
+
 // The same shape gh's branch finder uses, minus the fields: 30 candidates,
 // newest first, own-repository heads only, the open one preferred. One point.
 const PR_NUMBER_QUERY = `query($owner: String!, $name: String!, $branch: String!) {

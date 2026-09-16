@@ -53,7 +53,7 @@ describe("automation descendant opening policy", () => {
       mcpServers: [],
       user: undefined,
       mcpGrantUser: undefined,
-      aws: false,
+      aws: true,
       trustProfile: "automation",
       publicationPolicy: {
         repo: "tellahq/renderer",
@@ -163,7 +163,7 @@ describe("automation descendant opening policy", () => {
         branch: "main",
         headBranch: "compat/layout",
       },
-      aws: false,
+      aws: true,
       user: undefined,
       mcpGrantUser: undefined,
       // Only the person's provider subscription follows them across the

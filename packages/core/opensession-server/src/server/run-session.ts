@@ -1926,9 +1926,9 @@ export function sandboxRunSecuritySpec(
           headBranch: session.branch || "",
         }
       : undefined,
-    // No AWS credentials for untrusted text: automation runs and Plain
-    // discussion sessions (which read customer ticket text).
-    aws: !opts.isAutomationSession && !session.plainDiscussionId,
+    // Every run gets the read-only AWS credentials: automation and Plain
+    // discussion sessions investigate S3 uploads and logs like anyone else.
+    aws: true,
     user: opts.isAutomationSession ? undefined : opts.user,
     mcpGrantUser: opts.isAutomationSession
       ? undefined
@@ -3343,7 +3343,7 @@ async function runSessionPromptInner(
               }
             : undefined,
           confirmTools: STRIPE_CONFIRM_TOOLS,
-          aws: !isAutomationSession && !session.plainDiscussionId,
+          aws: true,
           author: commitAuthorFor(user, sessionPrincipal(session)),
           user: runInputs.user,
           accountUser: runInputs.accountUser,
@@ -3433,9 +3433,7 @@ async function runSessionPromptInner(
           }
         : undefined,
       confirmTools: STRIPE_CONFIRM_TOOLS,
-      // Automation descendants and Plain discussion sessions (untrusted
-      // ticket text) never receive AWS credentials.
-      aws: !isAutomationSession && !session.plainDiscussionId,
+      aws: true,
       // Attribute any commits this turn makes to whoever sent the prompt, or
       // to the person the session acts for when nobody did (an auto-continue,
       // a restart resume, a queue drain): the last person who prompted it,

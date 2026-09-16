@@ -15,9 +15,10 @@ configuration for the run.
 
 - Runner local tools receive an explicit, non-inherited environment. The base
   includes PATH/HOME/LANG, scoped session scratch variables when available,
-  and Git identity. Eligible runs may additionally receive projected GitHub
-  authority, short-lived AWS credentials through a fixed credentials-file
-  pointer, or human-enabled Claude/Codex pool credentials. `OPENSESSION_MODEL`
+  and Git identity. Every run receives the instance's short-lived read-only
+  AWS credentials through a fixed credentials-file pointer when the mint is
+  configured; eligible runs may additionally receive projected GitHub
+  authority or human-enabled Claude/Codex pool credentials. `OPENSESSION_MODEL`
   is not added to Pi's local-tool environment. MCP subprocesses use safe SDK
   defaults plus their configured headers/env or OAuth projection. Neither path
   inherits the server's full environment or `~/.opensession.env`.
@@ -61,7 +62,7 @@ configuration for the run.
   `docs/setup/plain.md`) is prompted by a teammate but reads the same untrusted
   ticket text, so every one of its turns carries the automation deny-set plus
   the Plain customer-facing writes and the Stripe money movers, passes no
-  user, gets no AWS credentials, and mounts only `opensession-plain-discussion`
+  user, and mounts only `opensession-plain-discussion`
   (the Approve/Deny-gated customer reply and Stripe execution) in place of the
   interactive set. The run-rpc fallback builder serves that same set, so a
   hosted or sandboxed turn cannot ask for more.

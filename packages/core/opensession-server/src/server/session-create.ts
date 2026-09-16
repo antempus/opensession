@@ -491,7 +491,7 @@ export function openingCreateTrustPolicy(
     // stays invisible (session-run-inputs.ts makes the same call on resume).
     user: policy || spec.plainDiscussionId ? undefined : spec.user,
     mcpGrantUser: policy ? undefined : spec.createdByLogin,
-    aws: !policy && !spec.plainDiscussionId,
+    aws: true,
     trustProfile: policy ? "automation" : "interactive",
     ...(policy
       ? {

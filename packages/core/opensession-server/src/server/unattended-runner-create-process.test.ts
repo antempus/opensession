@@ -72,7 +72,7 @@ describe("automation descendant Runner create orchestration", () => {
         trustProfile: "automation",
         mcpServers: [],
         proxyMcpServers: [],
-        aws: false,
+        aws: true,
         user: undefined,
         publicationPolicy: {
           repo: "tellahq/renderer",

@@ -130,7 +130,7 @@ describe("unattended workflow swarm integration", () => {
           automation: true,
           mcpServers: [],
           user: undefined,
-          aws: false,
+          aws: true,
           trustProfile: "automation",
         });
         expect(
@@ -150,7 +150,7 @@ describe("unattended workflow swarm integration", () => {
         ).toMatchObject({
           mcpServers: [],
           proxyMcpServers: [],
-          aws: false,
+          aws: true,
           user: undefined,
           trustProfile: "automation",
         });

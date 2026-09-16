@@ -127,7 +127,7 @@ export async function dispatchSlackSessionMessage(
       repo: repo.id,
       // New Slack questions follow native code-session policy. Migrating a
       // legacy session must retain an explicitly read-only ask policy.
-      mode: legacy?.mode ?? "code",
+      mode: source?.mode ?? legacy?.mode ?? "code",
       branch: owned ? legacy?.branch || message.branch : undefined,
       ...(owned ? { sandbox: "local" as const } : {}),
       model: legacy?.model,

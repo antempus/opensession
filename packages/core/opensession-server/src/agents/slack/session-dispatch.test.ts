@@ -160,6 +160,13 @@ test("explicit legacy ask policy survives native migration and admission retry",
   expect(saved).toBe(1);
 });
 
+test("native migration honors the canonical session's read-only mode overlay", async () => {
+  legacy = { mode: "code", worktreeDir: "/owned", branch: "task" };
+  source = { id: "slack-C1-123.1", mode: "ask" };
+  await dispatchSlackSessionMessage("C1-123.1", message());
+  expect(created[0]?.mode).toBe("ask");
+});
+
 test("legacy shared-checkout questions receive their own native workspace", async () => {
   legacy = { worktreeDir: "/shared", branch: "main" };
   source = { id: "slack-C1-123.1" };

@@ -462,14 +462,15 @@ export function knownPrNumberForBranch(
   return numberByBranch.get(cacheKey(repo, branch));
 }
 
-/** The details already loaded for a branch, stale or not, without a fetch.
- *  For readers that want whatever is on hand (a hover card) rather than a
- *  current answer: the row refreshes on its own clock behind getPrDetails. */
+/** Fresh details already loaded for a branch, without a fetch. Unlike the
+ *  detail pane's stale-while-revalidate read, callers must fetch elsewhere
+ *  when this expires: nobody may be polling getPrDetails anymore. */
 export function cachedPrDetails(
   repo: string,
   branch: string,
 ): PrDetails | null {
-  return cache.get(cacheKey(repo, branch))?.data ?? null;
+  const hit = cache.get(cacheKey(repo, branch));
+  return hit && Date.now() - hit.ts < TTL ? hit.data : null;
 }
 
 // The same shape gh's branch finder uses, minus the fields: 30 candidates,

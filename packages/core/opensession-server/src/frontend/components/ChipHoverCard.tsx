@@ -18,7 +18,7 @@ import {
   chipCommitResolved,
   chipPr,
   chipPrIsWorthShowing,
-  chipSelector,
+  createChipAnchor,
   chipTarget,
   loadChipCommit,
   loadChipSession,
@@ -99,6 +99,7 @@ export function ChipHoverCards({ sessions }: { sessions: UnifiedSession[] }) {
   const [hover, setHover] = useState<{
     el: HTMLElement;
     target: ChipTarget;
+    anchor: ReturnType<typeof createChipAnchor>;
   } | null>(null);
   // What the card says, keyed by the chip it was resolved for: a chip whose
   // subject needs a fetch resolves after the dwell, and the card only opens
@@ -129,17 +130,21 @@ export function ChipHoverCards({ sessions }: { sessions: UnifiedSession[] }) {
     closeTimer.current = setTimeout(() => setHover(null), CLOSE_MS);
   }
   function enter(el: HTMLElement, target: ChipTarget, immediate = false) {
-    if (hoverRef.current?.target.key === target.key) {
+    if (
+      hoverRef.current?.target.key === target.key &&
+      hoverRef.current.anchor.contextElement === el
+    ) {
       cancelTimers();
       return;
     }
     cancelTimers();
     const delay = immediate ? 0 : hoverRef.current ? SWITCH_MS : DWELL_MS;
+    const next = { el, target, anchor: createChipAnchor(el, target) };
     if (!delay) {
-      setHover({ el, target });
+      setHover(next);
       return;
     }
-    openTimer.current = setTimeout(() => setHover({ el, target }), delay);
+    openTimer.current = setTimeout(() => setHover(next), delay);
   }
   const api = useRef({ enter, scheduleClose, close, cancelTimers });
   useLayoutEffect(() => {
@@ -274,25 +279,6 @@ export function ChipHoverCards({ sessions }: { sessions: UnifiedSession[] }) {
 
   const open = !!hover && card?.key === hover.target.key;
 
-  // The chip as it is now, not as it was on hover: a running session's
-  // transcript is rewritten every tick (MarkdownBody), which replaces the
-  // dwelled-on element under a still pointer. Measured through a virtual
-  // anchor so each measurement finds the element currently in the page, and
-  // a card that opened after the swap still stands under the chip.
-  const liveChip = (): HTMLElement | null => {
-    if (!hover) return null;
-    if (hover.el.isConnected) return hover.el;
-    const found = document.querySelector(chipSelector(hover.target));
-    return found instanceof HTMLElement ? found : hover.el;
-  };
-  const anchor = hover
-    ? {
-        getBoundingClientRect: () =>
-          (liveChip() ?? hover.el).getBoundingClientRect(),
-        contextElement: liveChip() ?? hover.el,
-      }
-    : null;
-
   // The chip's `title` is the card's own summary in one line. Both at once
   // puts an OS tooltip over the card that replaced it, so the attribute steps
   // aside while the card is up and comes back when it goes.
@@ -377,7 +363,7 @@ export function ChipHoverCards({ sessions }: { sessions: UnifiedSession[] }) {
           // paragraph, and a card off in the margin points at a word instead
           // of standing under it. Base UI flips it above when there is no room.
           <RowCardPopup
-            anchor={anchor}
+            anchor={hover.anchor}
             side="bottom"
             align="start"
             sideOffset={8}

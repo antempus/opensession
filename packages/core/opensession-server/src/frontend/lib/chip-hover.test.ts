@@ -4,16 +4,19 @@ import {
   chipPrIsWorthShowing,
   chipSelector,
   chipTarget,
+  createChipAnchor,
 } from "./chip-hover";
 import type { OpenPr, PrSummary, RecentPr } from "./api";
 import type { UnifiedSession } from "./types";
 
 // The chips are HTML the markdown renderer wrote, so the only handle the card
 // has on them is their data attributes. A fake element is enough to pin that.
+let matchingChips: HTMLElement[] = [];
 Object.defineProperty(globalThis, "document", {
   configurable: true,
   value: {
     createElement: () => ({ dataset: {} }),
+    querySelectorAll: () => matchingChips,
   },
 });
 
@@ -101,6 +104,95 @@ describe("chipTarget", () => {
 
   test("ignores an anchor that names neither", () => {
     expect(chipTarget(chip({ assetPath: "shot.png" }))).toBeNull();
+  });
+});
+
+describe("createChipAnchor", () => {
+  const target = {
+    kind: "pr" as const,
+    key: "pr:opensession#128",
+    repo: "opensession",
+    number: 128,
+  };
+  function element(left: number, top: number) {
+    const rect = {
+      x: left,
+      y: top,
+      left,
+      top,
+      width: 60,
+      height: 20,
+      right: left + 60,
+      bottom: top + 20,
+      toJSON: () => ({}),
+    };
+    const el = {
+      isConnected: true,
+      getBoundingClientRect: () => {
+        if (!el.isConnected) throw new Error("Measured a detached chip");
+        return rect;
+      },
+    };
+    // SAFETY: the anchor only reads these two HTMLElement members; this test
+    // supplies both and deliberately rejects measurements after detachment.
+    return {
+      el: el as HTMLElement,
+      rect,
+      disconnect: () => {
+        el.isConnected = false;
+      },
+    };
+  }
+
+  test("keeps the hovered occurrence while it is connected", () => {
+    const first = element(100, 100);
+    const hovered = element(100, 700);
+    matchingChips = [first.el, hovered.el];
+    const anchor = createChipAnchor(hovered.el, target);
+    expect(anchor.contextElement).toBe(hovered.el);
+    expect(anchor.getBoundingClientRect()).toBe(hovered.rect);
+  });
+
+  test("re-anchors to the nearest duplicate after replacement during dwell", () => {
+    const hovered = element(100, 700);
+    const anchor = createChipAnchor(hovered.el, target);
+    hovered.disconnect();
+    const earlier = element(100, 100);
+    const replacement = element(102, 704);
+    const later = element(100, 1200);
+    matchingChips = [earlier.el, replacement.el, later.el];
+    expect(anchor.getBoundingClientRect()).toBe(replacement.rect);
+    expect(anchor.contextElement).toBe(replacement.el);
+
+    // Keep following that occurrence on subsequent transcript ticks.
+    replacement.rect.top = 900;
+    anchor.getBoundingClientRect();
+    replacement.disconnect();
+    const next = element(100, 905);
+    matchingChips = [earlier.el, next.el, later.el];
+    expect(anchor.getBoundingClientRect()).toBe(next.rect);
+  });
+
+  test("distinguishes repeated mentions on the same line", () => {
+    const hovered = element(500, 700);
+    const anchor = createChipAnchor(hovered.el, target);
+    hovered.disconnect();
+    const first = element(100, 700);
+    const second = element(502, 700);
+    matchingChips = [first.el, second.el];
+    expect(anchor.contextElement).toBe(second.el);
+  });
+
+  test("retains the last rectangle when no visible replacement exists", () => {
+    const hovered = element(100, 700);
+    const anchor = createChipAnchor(hovered.el, target);
+    hovered.disconnect();
+    const hidden = element(0, 0);
+    hidden.rect.width = 0;
+    matchingChips = [hidden.el];
+    expect(anchor.getBoundingClientRect()).toBe(hovered.rect);
+    matchingChips = [];
+    expect(anchor.getBoundingClientRect()).toBe(hovered.rect);
   });
 });
 

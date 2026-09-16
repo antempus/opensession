@@ -66,9 +66,8 @@ const attrValue = (value: string) => value.replace(/["\\]/g, "\\$&");
  * A running session rewrites its transcript's HTML on every tick, so the
  * element the pointer dwelled on is often gone by the time its card opens,
  * and a card anchored to a detached element lands at the page's top-left
- * corner. The card measures whichever element currently says the same thing
- * instead; the first match is the one the pointer is on in every case but a
- * paragraph that names the same PR twice, where either is close enough.
+ * corner. Repeated mentions share this selector, so the anchor below chooses
+ * the match nearest the hovered occurrence's last measured position.
  */
 export function chipSelector(target: ChipTarget): string {
   switch (target.kind) {
@@ -87,6 +86,40 @@ export function chipSelector(target: ChipTarget): string {
           : ":not([data-commit-repo])")
       );
   }
+}
+
+/** Capture before the dwell timer: Markdown can replace the chip even before
+ * the card opens. Keep the last rectangle if its replacement is not there yet. */
+export function createChipAnchor(el: HTMLElement, target: ChipTarget) {
+  let current = el;
+  let rect = el.getBoundingClientRect();
+  const measure = () => {
+    if (!current.isConnected) {
+      let nearest: HTMLElement | null = null;
+      let distance = Infinity;
+      for (const candidate of document.querySelectorAll<HTMLElement>(
+        chipSelector(target),
+      )) {
+        const next = candidate.getBoundingClientRect();
+        if (!next.width || !next.height) continue;
+        const d = (next.left - rect.left) ** 2 + (next.top - rect.top) ** 2;
+        if (d < distance) {
+          nearest = candidate;
+          distance = d;
+        }
+      }
+      if (nearest) current = nearest;
+    }
+    if (current.isConnected) rect = current.getBoundingClientRect();
+    return rect;
+  };
+  return {
+    getBoundingClientRect: measure,
+    get contextElement() {
+      measure();
+      return current;
+    },
+  };
 }
 
 /**

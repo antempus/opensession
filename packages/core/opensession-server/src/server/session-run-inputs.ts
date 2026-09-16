@@ -22,7 +22,7 @@ import {
   automationDeniedTools,
   automationMcpServersByName,
 } from "./automations";
-import { humanPrompter } from "./session-actors";
+import { humanPrompter, interactivePrompter } from "./session-actors";
 
 /** Which config decided the run's MCP allowlist. */
 export type McpScopeSource =
@@ -40,10 +40,11 @@ export type InProcessMcpBranch =
   /** Automation-owned: the automation-bar set, plus the scoped spawn/self
    *  pair when the automation is `selfImprove`. */
   | "automation-self-improve"
-  /** Automation-owned, prompted by a person: the automation-bar set plus
-   *  `opensession-sessions` in its spawn-only `humanResume` shape, so the
-   *  session can start the work the person asked for. Never the automation's
-   *  own ticks, and never a sandboxed descendant. */
+  /** Automation-owned, prompted by a person themselves: the automation-bar
+   *  set plus `opensession-sessions` in its spawn-only `humanResume` shape,
+   *  so the session can start the work the person asked for. Never the
+   *  automation's own ticks, a scheduled /loop tick sent in a person's name,
+   *  or a sandboxed descendant. */
   | "automation+human-spawn"
   /** Goal-driven session: the interactive set plus opensession-goal-self. */
   | "interactive+goal-self"
@@ -73,10 +74,17 @@ export interface SessionRunInputs {
    *  automation tick, a review handoff, auto-continue). Unlike `user` it
    *  survives an automation-owned session, because a person who takes one
    *  over and presses send is spending their own subscription; the shared
-   *  pool stays the backup. It reaches provider account selection and, for
-   *  an automation-owned session, the `automation+human-spawn` branch below;
-   *  never the `allowedUsers` MCP gate, GitHub or trust policy. */
+   *  pool stays the backup. It reaches provider account selection only,
+   *  never MCP, GitHub or trust policy. A scheduled /loop tick keeps the
+   *  name of the person who set it here, because the turn is billed to them. */
   accountUser: string | undefined;
+  /** The person who sent this turn themselves, or undefined: every machine
+   *  actor and every scheduled tick (`"Kent (loop)"`) resolves to undefined
+   *  even though `accountUser` keeps the name. This, not `accountUser`, is
+   *  what an automation-owned session's `automation+human-spawn` branch and
+   *  the run token's `humanPrompter` read: a capability a present person
+   *  unlocks must not fire from scheduled prompt text. */
+  humanPrompter: string | undefined;
   inProcessMcpBranch: InProcessMcpBranch;
   /** Whether the run gets the repos/memory/personal-prompt note. Automation
    *  runs get none: their prompts are untrusted text. */
@@ -98,7 +106,8 @@ export type RunInputsSession = Pick<
 
 /** Which in-process server set the next turn carries. Pure — mirrors the
  *  `inProcessMcp` ternary at the runAgent call site. `humanPrompter` is the
- *  person who sent this turn's prompt (`humanPrompter(user)`), if any. */
+ *  person who sent this turn themselves (`interactivePrompter(user)`), if
+ *  any; a scheduled tick or machine actor passes undefined. */
 export function sessionInProcessMcpBranch(
   session: RunInputsSession,
   humanPrompter?: string | null,
@@ -153,6 +162,7 @@ export async function resolveSessionRunInputs(
             ).feedMcpServersForRefs(session.externalRefs!)
           : undefined;
   const accountUser = humanPrompter(opts.user) ?? undefined;
+  const prompter = interactivePrompter(opts.user) ?? undefined;
   return {
     isAutomationSession,
     mcpServers,
@@ -163,7 +173,8 @@ export async function resolveSessionRunInputs(
     user: isAutomationSession ? undefined : opts.user,
     mcpGrantUser: session.createdByLogin || undefined,
     accountUser,
-    inProcessMcpBranch: sessionInProcessMcpBranch(session, accountUser),
+    humanPrompter: prompter,
+    inProcessMcpBranch: sessionInProcessMcpBranch(session, prompter),
     sessionNote: !isAutomationSession,
   };
 }

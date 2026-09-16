@@ -537,6 +537,7 @@ import {
 } from "./auto-continue";
 import {
   humanPrompter,
+  loopActor,
   sessionPrincipal,
   SYSTEM_RESTART_USER,
 } from "./session-actors";
@@ -1906,6 +1907,9 @@ export async function maybeLaunchSandboxedRun(
     cwd: string;
     user?: string;
     accountUser?: string;
+    /** The person who sent this turn themselves (RunInputs.humanPrompter);
+     *  undefined for machine turns and scheduled ticks. Run-rpc only. */
+    humanPrompter?: string;
     images?: ImageInput[];
     mcpServers?: McpScope;
     deniedTools?: Record<string, string>;
@@ -2131,7 +2135,7 @@ export async function maybeLaunchSandboxedRun(
     registerRunToken(rpcToken, {
       sessionId: session.id,
       user: opts.isAutomationSession ? undefined : opts.user,
-      humanPrompter: opts.accountUser,
+      humanPrompter: opts.humanPrompter,
       promptEntryId: opts.promptEntryId,
     });
     // Detached sandbox hosts cannot read the server's workspace store. Resolve
@@ -3074,15 +3078,16 @@ async function runSessionPromptInner(
   // Resolved once, before a backend is chosen: the automation-bar server set
   // is a catalog read, and the Runner, sandbox and hosted proxy name lists,
   // the run-rpc fallback and the in-process mount below must all describe
-  // the same set. A person's turn in an automation-owned session (accountUser
-  // is the human prompter, undefined for the automation's own ticks) adds the
-  // scoped spawn suite so the session can start the work they asked for; the
-  // automation's MCP allowlist and denials still apply. Sandboxed
+  // the same set. A person's own turn in an automation-owned session
+  // (runInputs.humanPrompter: undefined for the automation's ticks, every
+  // machine actor and a scheduled /loop tick sent in a person's name) adds
+  // the scoped spawn suite so the session can start the work they asked for;
+  // the automation's MCP allowlist and denials still apply. Sandboxed
   // descendants carry none of it.
   const automationMcp =
     isAutomationSession && !session.automationDescendantPolicy
       ? await automationSessionMcp(session, sessionId, {
-          humanPrompter: runInputs.accountUser,
+          humanPrompter: runInputs.humanPrompter,
         })
       : {};
   const automationProxyMcpServers = Object.keys(automationMcp);
@@ -3110,6 +3115,7 @@ async function runSessionPromptInner(
         cwd,
         user,
         accountUser: runInputs.accountUser,
+        humanPrompter: runInputs.humanPrompter,
         images,
         mcpServers: mcpServers ?? "all",
         deniedTools,
@@ -3895,7 +3901,7 @@ export function startLoopTicker(): void {
       void runSessionPromptAndDrain(
         session.id,
         loop.prompt,
-        loop.setBy ? `${loop.setBy} (loop)` : "loop",
+        loopActor(loop.setBy),
       ).catch((e) =>
         console.error(`[loop] Loop prompt failed for ${session.id}:`, e),
       );

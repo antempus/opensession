@@ -179,7 +179,30 @@ describe("resolveSessionRunInputs", () => {
       { user: "Plain ticket triage (automation)" },
     );
     expect(inputs.accountUser).toBeUndefined();
+    expect(inputs.humanPrompter).toBeUndefined();
     expect(inputs.inProcessMcpBranch).toBe("automation-self-improve");
+  });
+
+  test("a scheduled loop tick in a person's name never gets the spawn suite", async () => {
+    // Kent set the loop, so the turn is still billed to him, but nobody
+    // pressed send: scheduled prompt text must not start person-owned
+    // sessions on every tick.
+    for (const user of ["Kent (loop)", "loop"]) {
+      const inputs = await resolveSessionRunInputs(
+        { ...plain, automation: "Plain ticket triage" },
+        { user },
+      );
+      expect(inputs.humanPrompter).toBeUndefined();
+      expect(inputs.inProcessMcpBranch).toBe("automation-self-improve");
+    }
+    expect(
+      (
+        await resolveSessionRunInputs(
+          { ...plain, automation: "Plain ticket triage" },
+          { user: "Kent (loop)" },
+        )
+      ).accountUser,
+    ).toBe("Kent (loop)");
   });
 
   test("a person taking over an automation-owned session keeps their provider account", async () => {

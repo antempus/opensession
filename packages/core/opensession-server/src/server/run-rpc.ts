@@ -50,7 +50,10 @@ export interface RunTokenContext {
    *  turn. Kept apart from `user`, which automation-owned turns drop so the
    *  `allowedUsers` gate never clears for them: the fallback builder reads
    *  this to decide whether an automation-owned session's human turn carries
-   *  the scoped spawn suite (interactive-mcp.ts automationSessionMcp). */
+   *  the scoped spawn suite. Reattach paths register the persisted account
+   *  user here, which may name a scheduled tick (`"Kent (loop)"`);
+   *  automationSessionMcp (interactive-mcp.ts) applies `interactivePrompter`
+   *  at the mount, so that still fails closed. */
   humanPrompter?: string;
 }
 

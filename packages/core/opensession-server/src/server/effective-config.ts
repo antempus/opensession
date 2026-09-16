@@ -282,7 +282,7 @@ export async function inProcessServerNames(
     // builder run-session mounts.
     return Object.keys(
       await automationSessionMcp(session, session.id, {
-        humanPrompter: inputs.accountUser,
+        humanPrompter: inputs.humanPrompter,
       }),
     );
   }

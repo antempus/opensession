@@ -417,11 +417,14 @@ set:
   is not `cancel_session` under another name. Children are created for the
   person who prompted, so they are ordinary interactive sessions in that
   person's workspaces, depth-guarded like every spawned child. The
-  automation's own ticks never carry it: the human prompter is read from the
-  run's `accountUser`, which is undefined for machine turns, and the run-rpc
-  fallback builder receives the same identity through the run token's
-  `humanPrompter`, registered on launch and on every reattachment (local host,
-  Runner, sandbox). Runner and sandbox turns proxy the same automation-bar
+  automation's own ticks never carry it, and neither does a scheduled `/loop`
+  tick sent in a person's name (`"Kent (loop)"`, `loopActor`): the prompter
+  is `interactivePrompter(user)` (`RunInputs.humanPrompter`), undefined for
+  every machine actor and every scheduled actor, while `accountUser` keeps
+  the name for billing. `automationSessionMcp` applies the same classifier at
+  the mount, so a reattachment (local host, Runner, sandbox) that registers
+  the persisted account user on the run token's `humanPrompter` still fails
+  closed. Runner and sandbox turns proxy the same automation-bar
   set over run-rpc that the in-process and hosted paths mount; run-session
   computes it once before choosing a backend. Sandboxed descendants (sessions
   with an `automationDescendantPolicy`) are excluded. The turn keeps the

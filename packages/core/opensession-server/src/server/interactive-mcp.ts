@@ -15,6 +15,7 @@
 
 import { deskNavigationMcp } from "./desk-navigation-mcp";
 import { createSessionsMcpServer } from "../agents/slack/sessions-tools";
+import { interactivePrompter } from "./session-actors";
 import { isDevInstance } from "./dev-mode";
 import { createRunnersMcpServer } from "./runners-mcp";
 import { createAdminMcpServer } from "../agents/slack/admin-tools";
@@ -448,6 +449,10 @@ export function interactiveMcpServers(
  * person as ordinary interactive sessions. The automation's own runs never
  * carry it: the prompt they act on is untrusted text, and a person asking
  * for "a new session" in the thread is what makes spawning legitimate here.
+ * The gate is applied here, at the one mount point every launch and reattach
+ * path resolves through: `interactivePrompter` drops every machine actor and
+ * every scheduled /loop tick sent in a person's name (`"Kent (loop)"`), so a
+ * caller that only has the persisted account user still fails closed.
  * Descendants (sandboxed children with a publication policy) are excluded.
  */
 export async function automationSessionMcp(
@@ -468,13 +473,10 @@ export async function automationSessionMcp(
     ...((await automationRunMcpForSession(session, sessionId)) || {}),
     ...((await selfImproveMcpForSession(session, sessionId)) || {}),
   };
-  if (
-    opts.humanPrompter &&
-    session.automation &&
-    !session.automationDescendantPolicy
-  ) {
+  const prompter = interactivePrompter(opts.humanPrompter);
+  if (prompter && session.automation && !session.automationDescendantPolicy) {
     servers["opensession-sessions"] = createSessionsMcpServer({
-      createdBy: opts.humanPrompter,
+      createdBy: prompter,
       isAdmin: false,
       humanResume: true,
       currentSessionId: sessionId,

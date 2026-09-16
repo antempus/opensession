@@ -17,6 +17,7 @@ import {
   transcriptLineUser,
 } from "./transcript-persistence";
 import { sessionKernel } from "./session-kernel";
+import { stagePromptImages, withImagesNote } from "./uploads";
 
 type QueuedSteerFence = {
   token: string;
@@ -55,7 +56,26 @@ export type QueuedSteerDeps = {
     text: string,
     images: ImageInput[] | undefined,
   ): Promise<void>;
+  /** Put the steer's images on disk for the engine text's note (stagePromptImages). */
+  stageImages?(
+    sessionId: string,
+    images: ImageInput[] | undefined,
+  ): Promise<{ name: string; path: string }[]>;
 };
+
+/** The text the engine receives: the person's message plus the fenced note
+ *  naming where its images landed. The transcript row keeps the bare text; the
+ *  pictures already render there. */
+async function engineSteerText(
+  input: { sessionId: string; text: string; images?: ImageInput[] },
+  deps: QueuedSteerDeps,
+): Promise<string> {
+  const staged = await (deps.stageImages ?? stagePromptImages)(
+    input.sessionId,
+    input.images,
+  );
+  return withImagesNote(input.text, staged);
+}
 
 const queuedSteerDeps: QueuedSteerDeps = {
   target(sessionId) {
@@ -115,6 +135,7 @@ export async function prepareAndSteerQueuedPrompt(
         promptEntryId: input.item.promptEntryId || input.itemId,
       }
     : undefined;
+  const text = await engineSteerText(input, deps);
   const prepared = await deps.prepare(
     input.sessionId,
     input.itemId,
@@ -146,7 +167,7 @@ export async function prepareAndSteerQueuedPrompt(
     return "rejected";
   }
   deskTextNavigation.steer(input.sessionId, input.itemId);
-  if (!deps.steer(before.token, input.text, input.images, input.itemId)) {
+  if (!deps.steer(before.token, text, input.images, input.itemId)) {
     if (!(await deps.reject(input.sessionId, input.itemId, before)))
       throw new Error("Pending steer changed before fenced rejection");
     return "rejected";
@@ -179,6 +200,7 @@ export async function prepareAndInterruptQueuedPrompt(
         promptEntryId: input.item.promptEntryId || input.itemId,
       }
     : undefined;
+  const text = await engineSteerText(input, deps);
   const prepared = await deps.prepare(
     input.sessionId,
     input.itemId,
@@ -211,7 +233,7 @@ export async function prepareAndInterruptQueuedPrompt(
       );
     return "target_changed";
   }
-  if (!deps.steer(before.token, input.text, input.images, input.itemId)) {
+  if (!deps.steer(before.token, text, input.images, input.itemId)) {
     if (!(await deps.reject(input.sessionId, input.itemId, before)))
       throw new Error(
         "Pending interrupt steer changed before fenced rejection",

@@ -203,6 +203,8 @@ import { isShuttingDown } from "./shutdown-state";
 import {
   parseImageDataUrls,
   stageFileAttachments,
+  stagePromptImages,
+  withImagesNote,
   withUploadsNote,
 } from "./uploads";
 import {
@@ -2920,7 +2922,11 @@ async function runSessionPromptInner(
     if (attachedDigests.length)
       prompt = `${wrapContext(buildSessionContextNote(attachedDigests), "attached-session-excerpt")}\n\n${prompt}`;
   }
-  // Non-image attachments: stage to disk and tell the agent where they landed.
+  // Attachments: the images ride the vision channel AND land on disk, so the
+  // agent has a path when it needs the file rather than the picture; non-image
+  // files only exist on disk. The uploads note stays last: its parser is
+  // end-anchored.
+  prompt = withImagesNote(prompt, await stagePromptImages(sessionId, images));
   prompt = withUploadsNote(prompt, stageFileAttachments(sessionId, rawFiles));
   // The goal guides the model on every turn, but it is session-level system
   // context, not text the person added to this message. Fence it so the model

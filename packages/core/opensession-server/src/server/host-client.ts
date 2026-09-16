@@ -2224,6 +2224,7 @@ export async function resumeLocalHostRun(
     registerRunToken(spec.rpcToken, {
       sessionId: spec.osSessionId,
       user: spec.user,
+      humanPrompter: spec.accountUser,
       promptEntryId: spec.promptEntryId,
     });
   }

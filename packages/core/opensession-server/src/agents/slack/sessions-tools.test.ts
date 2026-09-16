@@ -794,10 +794,61 @@ describe("task_status / cancel_task", () => {
 
   it("cancel_task cancels through the registry", async () => {
     const h = makeHarness();
-    expect(await cancelTaskImpl({ taskId: "bks-test-task" }, h.deps)).toContain(
+    expect(
+      await cancelTaskImpl(
+        { taskId: "bks-test-task" },
+        ctx("bks-test-parent"),
+        h.deps,
+      ),
+    ).toContain("Cancelled");
+    expect(h.cancelled).toEqual(["bks-test-task"]);
+  });
+
+  it("cancel_task without isAdmin only reaches the caller's own spawned children", async () => {
+    const h = makeHarness();
+    const parent = `bks-test-parent-${++uniq}`;
+    const child = `bks-test-child-${++uniq}`;
+    const stranger = `bks-test-stranger-${++uniq}`;
+    h.sessions.set(child, {
+      id: child,
+      state: "running",
+      parentSessionId: parent,
+    } as SessionSummary);
+    h.sessions.set(stranger, {
+      id: stranger,
+      state: "running",
+    } as SessionSummary);
+    const scoped = {
+      createdBy: "Michiel",
+      isAdmin: false,
+      humanResume: true,
+      currentSessionId: parent,
+    };
+    // An unrelated session listed by list_sessions is not cancellable: that
+    // would be the withheld cancel_session under another name.
+    expect(
+      await cancelTaskImpl({ taskId: stranger }, scoped, h.deps),
+    ).toContain("not spawned by this session");
+    expect(h.cancelled).toEqual([]);
+    // The caller's own child is.
+    expect(await cancelTaskImpl({ taskId: child }, scoped, h.deps)).toContain(
       "Cancelled",
     );
-    expect(h.cancelled).toEqual(["bks-test-task"]);
+    expect(h.cancelled).toEqual([child]);
+    // A child whose summary is gone still resolves through its session file.
+    const finished = `bks-test-finished-${++uniq}`;
+    h.files.set(finished, { id: finished, parentSessionId: parent });
+    expect(
+      await cancelTaskImpl({ taskId: finished }, scoped, h.deps),
+    ).toContain("Cancelled");
+    // No caller session at all never clears the gate.
+    expect(
+      await cancelTaskImpl(
+        { taskId: child },
+        { isAdmin: false, currentSessionId: undefined },
+        h.deps,
+      ),
+    ).toContain("not spawned by this session");
   });
 });
 

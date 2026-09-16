@@ -412,13 +412,19 @@ set:
   `automation+human-spawn` branch). It carries the session list/get reads and
   `spawn_task`, `task_status`, and `cancel_task` only, never
   `answer_session_question`, `send_to_session`, `cancel_session`, or
-  `create_session`. Children are created for the person who prompted, so they
-  are ordinary interactive sessions in that person's workspaces, depth-guarded
-  like every spawned child. The automation's own ticks never carry it: the
-  human prompter is read from the run's `accountUser`, which is undefined for
-  machine turns, and the run-rpc fallback builder receives the same identity
-  through the run token's `humanPrompter`. Sandboxed descendants (sessions with
-  an `automationDescendantPolicy`) are excluded. The turn keeps the
+  `create_session`. Without `isAdmin`, `cancel_task` cancels only children
+  this session started with `spawn_task` (persisted `parentSessionId`), so it
+  is not `cancel_session` under another name. Children are created for the
+  person who prompted, so they are ordinary interactive sessions in that
+  person's workspaces, depth-guarded like every spawned child. The
+  automation's own ticks never carry it: the human prompter is read from the
+  run's `accountUser`, which is undefined for machine turns, and the run-rpc
+  fallback builder receives the same identity through the run token's
+  `humanPrompter`, registered on launch and on every reattachment (local host,
+  Runner, sandbox). Runner and sandbox turns proxy the same automation-bar
+  set over run-rpc that the in-process and hosted paths mount; run-session
+  computes it once before choosing a backend. Sandboxed descendants (sessions
+  with an `automationDescendantPolicy`) are excluded. The turn keeps the
   automation's MCP allowlist, denials, and dropped `user`.
 
 A self-improving automation's runs and thread-reply resumes receive session

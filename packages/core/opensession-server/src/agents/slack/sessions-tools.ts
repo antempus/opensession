@@ -645,11 +645,31 @@ export async function taskStatusImpl(
   return parts.join("\n");
 }
 
+/** Whether `taskId` is a child spawned by `caller` (its persisted
+ *  parentSessionId), read from the live summary or the session file. */
+function spawnedByCaller(
+  taskId: string,
+  caller: string | undefined,
+  deps: SpawnTaskDeps,
+): boolean {
+  if (!caller) return false;
+  const parent =
+    deps.control.getSession(taskId)?.parentSessionId ??
+    deps.readSessionFile(taskId)?.parentSessionId;
+  return parent === caller;
+}
+
 export async function cancelTaskImpl(
   args: { taskId: string },
+  ctx: Pick<SessionsToolContext, "isAdmin" | "currentSessionId">,
   deps: SpawnTaskDeps = defaultSpawnDeps(),
   requestId?: string,
 ): Promise<string> {
+  // Without isAdmin (automationSelf, humanResume) this is not cancel_session
+  // in disguise: only the caller's own spawned children may be cancelled,
+  // however many other sessions list_sessions shows.
+  if (!ctx.isAdmin && !spawnedByCaller(args.taskId, ctx.currentSessionId, deps))
+    return `\`${args.taskId}\` was not spawned by this session; cancel_task only cancels tasks this session started with spawn_task.`;
   const ok = await deps.control.cancelSession(args.taskId, { requestId });
   return ok
     ? `Cancelled task \`${args.taskId}\`.`
@@ -1496,7 +1516,10 @@ export function createSessionsMcpServer(
       ),
       tool(
         "cancel_task",
-        "Cancel a spawned task's in-flight run (drops queued messages too). Only runs this server owns.",
+        "Cancel a spawned task's in-flight run (drops queued messages too). Only runs this server owns" +
+          (ctx.isAdmin
+            ? "."
+            : ", and only tasks this session started with spawn_task."),
         {
           taskId: z
             .string()
@@ -1506,6 +1529,7 @@ export function createSessionsMcpServer(
           text(
             await cancelTaskImpl(
               args,
+              ctx,
               undefined,
               durableToolRequestId(ctx, "cancel_task", extra, args),
             ),

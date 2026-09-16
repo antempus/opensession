@@ -52,6 +52,9 @@ export const INLINE_IMAGE_EXTENSIONS: Record<string, string> = {
 };
 
 export type StagedAttachment = { name: string; path: string };
+/** What a remote host made of the turn's shipped files: the copies it wrote,
+ *  and the names it received without bytes (or could not write). */
+export type StagedFiles = { staged: StagedAttachment[]; omitted: string[] };
 
 /** Keep a user-supplied filename to a safe basename (no traversal, no exotic chars). */
 export function sanitizeAttachmentName(name: string): string {
@@ -121,25 +124,32 @@ export async function stagePromptImages(
 
 /** Stage the non-image attachments a remote host received inline. The
  *  digest prefix keeps two different files with the same name apart and
- *  makes a redelivery land on the file already there. */
+ *  makes a redelivery land on the file already there. A file that arrived
+ *  without bytes, or could not be written, is reported by name so the note
+ *  can say its host path is not an alternative. */
 export async function stagePromptFiles(
   scratchDir: string | undefined,
   files?: PromptFile[],
-): Promise<StagedAttachment[]> {
-  if (!scratchDir || !files?.length) return [];
-  const staged: StagedAttachment[] = [];
+): Promise<StagedFiles> {
+  const result: StagedFiles = { staged: [], omitted: [] };
+  if (!files?.length) return result;
   for (const file of files) {
-    const bytes = Buffer.from(file.data, "base64");
-    if (!bytes.length || bytes.length > MAX_SHIPPED_ATTACHMENT_BYTES) continue;
     const name = sanitizeAttachmentName(file.name);
-    const path = await stageBytes(
-      scratchDir,
-      `${await digestOf(bytes)}-${name}`,
-      bytes,
-    );
-    if (path) staged.push({ name: file.name || name, path });
+    const shown = file.name || name;
+    const bytes =
+      file.data === undefined ? undefined : Buffer.from(file.data, "base64");
+    const path =
+      scratchDir && bytes && bytes.length <= MAX_SHIPPED_ATTACHMENT_BYTES
+        ? await stageBytes(
+            scratchDir,
+            `${await digestOf(bytes)}-${name}`,
+            bytes,
+          )
+        : undefined;
+    if (path) result.staged.push({ name: shown, path });
+    else result.omitted.push(shown);
   }
-  return staged;
+  return result;
 }
 
 /** Fenced, so the transcript keeps only the person's message; appending the
@@ -178,20 +188,29 @@ export function withImagesNote(
  * A remote host's copy of the turn's file attachments. The plain uploads
  * note above it still names the Open Session host paths, because the
  * transcript UI reads that note to draw the attachment chips; this one tells
- * the model which paths are real from where it runs.
+ * the model which paths are real from where it runs. Present whenever the
+ * server shipped anything, copies or not: a turn whose only attachment was
+ * too large still needs the model told that the host path is out of reach.
  */
 export function withFilesNote(
   prompt: string,
-  staged: StagedAttachment[],
+  { staged, omitted }: StagedFiles,
 ): string {
-  if (!staged.length) return prompt;
+  if (!staged.length && !omitted.length) return prompt;
+  const copies = staged.length
+    ? `Copies of these files are in your scratch dir; read them from these paths ` +
+      `instead:\n${pathLines(staged)}\n`
+    : "";
+  const missing = omitted.length
+    ? `These attachments could not be shipped here (too large for one turn) and ` +
+      `cannot be read from this machine:\n${omitted.map((n) => `- ${n}`).join("\n")}\n`
+    : "";
   return withNote(
     prompt,
     `This run does not execute on the Open Session host, so the attachment paths ` +
-      `listed above are not reachable from here. Copies of the same files are in your ` +
-      `scratch dir; read them from these paths instead:\n${pathLines(staged)}\n` +
-      `An attachment missing from this list was too large to ship. Chat attachments ` +
-      `never appear in the session's Assets tab and the person cannot upload there; ` +
-      `if you need one you cannot read, ask them to send it again in chat.`,
+      `listed above are not reachable from here. ${copies}${missing}` +
+      `Chat attachments never appear in the session's Assets tab and the person ` +
+      `cannot upload there; if you need one you cannot read, say so and ask them ` +
+      `to send a smaller file or a link in chat.`,
   );
 }

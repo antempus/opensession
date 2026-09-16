@@ -534,8 +534,10 @@ export function withUploadsNote(
 /**
  * Read staged attachments back for a host on another machine (a Runner, a
  * remote Sandbox), which cannot open the uploads dir the note names. Bounded
- * as one payload: the spec is a single JSON document on the wire. Files past
- * the cap are left out, and the in-host note tells the model so.
+ * as one payload: the spec is a single JSON document on the wire. Every
+ * attachment gets an entry; one past the cap (or unreadable) ships without
+ * bytes so the in-host note can still tell the model its host path is out
+ * of reach, instead of leaving the plain note's path as the only word.
  */
 export async function readPromptFiles(
   staged?: StagedAttachment[],
@@ -552,19 +554,20 @@ export async function readPromptFiles(
         `[uploads] Could not read ${name} for a remote host:`,
         error,
       );
+      files.push({ name });
       continue;
     }
-    if (!bytes.length) continue;
     if (total + bytes.length > MAX_SHIPPED_ATTACHMENT_BYTES) {
       console.warn(
         `[uploads] ${name} (${bytes.length} bytes) stays host-only: remote payload cap reached`,
       );
+      files.push({ name });
       continue;
     }
     total += bytes.length;
     files.push({ name, data: bytes.toString("base64") });
   }
-  return files.length ? files : undefined;
+  return files;
 }
 
 /** Parse + stage composer file attachments in one step; returns the prompt note-augmenter. */

@@ -62,46 +62,67 @@ describe("stagePromptImages", () => {
 
 describe("stagePromptFiles", () => {
   test("keeps the person's name, fenced by a content digest", async () => {
-    const [staged] = await stagePromptFiles(SCRATCH, [brief]);
-    expect(staged.name).toBe("brief.pdf");
-    expect(staged.path).toMatch(
+    const { staged, omitted } = await stagePromptFiles(SCRATCH, [brief]);
+    expect(omitted).toEqual([]);
+    expect(staged[0].name).toBe("brief.pdf");
+    expect(staged[0].path).toMatch(
       new RegExp(`^${SCRATCH}/attachments/[0-9a-f]{16}-brief\\.pdf$`),
     );
-    expect(readFileSync(staged.path, "utf8")).toBe("%PDF-1.4");
+    expect(readFileSync(staged[0].path, "utf8")).toBe("%PDF-1.4");
     // Same bytes, same file: a redelivery lands where the first one did.
-    expect((await stagePromptFiles(SCRATCH, [brief]))[0].path).toBe(
-      staged.path,
+    expect((await stagePromptFiles(SCRATCH, [brief])).staged[0].path).toBe(
+      staged[0].path,
     );
     // Different bytes under the same name stay apart.
     const other = await stagePromptFiles(SCRATCH, [
       { name: "brief.pdf", data: Buffer.from("%PDF-1.7").toString("base64") },
     ]);
-    expect(other[0].path).not.toBe(staged.path);
+    expect(other.staged[0].path).not.toBe(staged[0].path);
   });
 
-  test("sanitizes the on-disk name and drops what it cannot store", async () => {
-    const [staged] = await stagePromptFiles(SCRATCH, [
+  test("sanitizes the on-disk name and reports what it could not store", async () => {
+    const { staged } = await stagePromptFiles(SCRATCH, [
       {
         name: "../../etc/pass wd?.txt",
         data: Buffer.from("x").toString("base64"),
       },
     ]);
-    expect(staged.name).toBe("../../etc/pass wd?.txt");
-    expect(staged.path).toMatch(/\/attachments\/[0-9a-f]{16}-pass wd_\.txt$/);
-    expect(await stagePromptFiles(undefined, [brief])).toEqual([]);
-    expect(
-      await stagePromptFiles(SCRATCH, [{ name: "empty", data: "" }]),
-    ).toEqual([]);
+    expect(staged[0].name).toBe("../../etc/pass wd?.txt");
+    expect(staged[0].path).toMatch(
+      /\/attachments\/[0-9a-f]{16}-pass wd_\.txt$/,
+    );
+    // An empty file is still a file the person sent.
+    const empty = await stagePromptFiles(SCRATCH, [
+      { name: "empty", data: "" },
+    ]);
+    expect(empty.staged.map((s) => s.name)).toEqual(["empty"]);
+    expect(readFileSync(empty.staged[0].path)).toHaveLength(0);
+    // No bytes (the server left them out), too many bytes, or nowhere to
+    // write: the name is reported so the note can say the host path is not
+    // an alternative.
+    expect(await stagePromptFiles(undefined, [brief])).toEqual({
+      staged: [],
+      omitted: ["brief.pdf"],
+    });
     expect(
       await stagePromptFiles(SCRATCH, [
+        { name: "big.pdf" },
         {
           name: "huge.bin",
           data: Buffer.alloc(MAX_SHIPPED_ATTACHMENT_BYTES + 1).toString(
             "base64",
           ),
         },
+        brief,
       ]),
-    ).toEqual([]);
+    ).toMatchObject({
+      staged: [{ name: "brief.pdf" }],
+      omitted: ["big.pdf", "huge.bin"],
+    });
+    expect(await stagePromptFiles(SCRATCH, [])).toEqual({
+      staged: [],
+      omitted: [],
+    });
   });
 });
 
@@ -127,18 +148,37 @@ describe("withImagesNote", () => {
 });
 
 describe("withFilesNote", () => {
+  const hostNote =
+    "[The user attached 1 file(s), saved to disk — read them with your file tools if relevant:\n- brief.pdf: /srv/uploads/os-1/brief.pdf\n]";
+
   test("points the model at the scratch copies and past the host paths", async () => {
-    const staged = await stagePromptFiles(SCRATCH, [brief]);
-    const hostNote =
-      "[The user attached 1 file(s), saved to disk — read them with your file tools if relevant:\n- brief.pdf: /srv/uploads/os-1/brief.pdf\n]";
-    const prompt = withFilesNote(`Summarize this\n\n${hostNote}`, staged);
+    const files = await stagePromptFiles(SCRATCH, [brief]);
+    const prompt = withFilesNote(`Summarize this\n\n${hostNote}`, files);
     expect(prompt).toContain("not reachable from here");
-    expect(prompt).toContain(`- brief.pdf: ${staged[0].path}`);
+    expect(prompt).toContain(`- brief.pdf: ${files.staged[0].path}`);
+    expect(prompt).not.toContain("could not be shipped");
     expect(prompt).toContain("cannot upload there");
     // The host note stays as the person's message: the transcript UI reads
     // it for the attachment chips.
     expect(stripContext(prompt).trim()).toBe(`Summarize this\n\n${hostNote}`);
-    expect(withFilesNote("plain", [])).toBe("plain");
-    expect(withFilesNote(prompt, staged)).toBe(prompt);
+    expect(withFilesNote("plain", { staged: [], omitted: [] })).toBe("plain");
+    expect(withFilesNote(prompt, files)).toBe(prompt);
+  });
+
+  // A 20 MiB PDF is over the per-turn shipping cap, so a Runner receives its
+  // name and no bytes. The model must still hear that the host path in the
+  // plain note is out of reach; silence would leave that path as the only
+  // word on the subject.
+  test("still warns when every attachment was left behind", () => {
+    const prompt = withFilesNote(`Summarize this\n\n${hostNote}`, {
+      staged: [],
+      omitted: ["brief.pdf"],
+    });
+    expect(prompt).toContain("not reachable from here");
+    expect(prompt).not.toContain("Copies of these files");
+    expect(prompt).toContain("could not be shipped here");
+    expect(prompt).toContain("\n- brief.pdf\n");
+    expect(prompt).toContain("send a smaller file or a link");
+    expect(stripContext(prompt).trim()).toBe(`Summarize this\n\n${hostNote}`);
   });
 });

@@ -191,7 +191,7 @@ describe("staging images for a note", () => {
 // the launcher ships the bytes in the spec. One JSON document on the wire, so
 // the payload is capped and anything past the cap keeps its host-only path.
 describe("readPromptFiles", () => {
-  test("returns base64 bodies for staged files and skips what it cannot ship", async () => {
+  test("returns base64 bodies for staged files and names what it cannot ship", async () => {
     const dir = `${UPLOADS_DIR}/os-remote`;
     mkdirSync(dir, { recursive: true });
     writeFileSync(`${dir}/notes.txt`, "hello");
@@ -201,14 +201,18 @@ describe("readPromptFiles", () => {
       { name: "empty.bin", path: `${dir}/empty.bin` },
       { name: "gone.pdf", path: `${dir}/gone.pdf` },
     ]);
+    // An unreadable file still gets an entry, without bytes, so the host
+    // can tell the model its path is out of reach rather than say nothing.
     expect(files).toEqual([
       { name: "notes.txt", data: Buffer.from("hello").toString("base64") },
+      { name: "empty.bin", data: "" },
+      { name: "gone.pdf" },
     ]);
     expect(await readPromptFiles([])).toBeUndefined();
     expect(await readPromptFiles(undefined)).toBeUndefined();
   });
 
-  test("leaves out a file that would push the turn past the payload cap", async () => {
+  test("ships a file past the payload cap by name only", async () => {
     const dir = `${UPLOADS_DIR}/os-remote-cap`;
     mkdirSync(dir, { recursive: true });
     writeFileSync(
@@ -221,6 +225,9 @@ describe("readPromptFiles", () => {
       { name: "small.txt", path: `${dir}/small.txt` },
     ]);
     // The first file fits on its own; the second would cross the cap.
-    expect(files?.map((f) => f.name)).toEqual(["big.bin"]);
+    expect(files?.map((f) => [f.name, f.data !== undefined])).toEqual([
+      ["big.bin", true],
+      ["small.txt", false],
+    ]);
   });
 });

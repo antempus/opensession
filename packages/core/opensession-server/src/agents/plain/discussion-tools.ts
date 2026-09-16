@@ -18,6 +18,7 @@ import {
 } from "./discussion-api";
 import {
   awaitApproval,
+  beginDiscussionAction,
   resolveApproval,
   type ApprovalOutcome,
 } from "./discussions";
@@ -32,6 +33,17 @@ interface GateContext {
   discussionId: string;
   toolCallId: string;
   heading: string;
+}
+
+/** A Stop that landed after the approval, while the action was executing. */
+class StoppedError extends Error {
+  constructor() {
+    super("The teammate stopped the turn.");
+  }
+}
+
+function throwIfStopped(signal: AbortSignal): void {
+  if (signal.aborted) throw new StoppedError();
 }
 
 async function openGate(
@@ -141,15 +153,23 @@ export function createPlainDiscussionMcpServer(ctx: {
             toolCallId: `reply-${crypto.randomUUID()}`,
             heading: `Send a reply to the customer on ${threadId}`,
           };
+          const action = beginDiscussionAction(
+            ctx.discussionId,
+            gate.toolCallId,
+          );
           try {
             const outcome = await openGate(gate, args.text);
             if (outcome.status !== "APPROVED")
               return text(await explainNoGo(gate, outcome));
             const { getThreadWithMessages, sendCustomerReply, plain } =
               await import("./api");
+            throwIfStopped(action.signal);
             const thread = await getThreadWithMessages(threadId);
             const customerId: string | undefined = thread?.customer?.id;
             if (!customerId) throw new Error(`No customer on ${threadId}`);
+            // Last check before the write: a Stop during the thread lookup
+            // must not send.
+            throwIfStopped(action.signal);
             const sent = await sendCustomerReply(
               threadId,
               customerId,
@@ -171,7 +191,13 @@ export function createPlainDiscussionMcpServer(ctx: {
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             await closeGate(gate, "ERROR", message);
+            if (e instanceof StoppedError)
+              return text(
+                "The teammate stopped the turn before the reply went out. Nothing was sent.",
+              );
             return text(`Sending the reply failed: ${message}`);
+          } finally {
+            action.release();
           }
         },
       ),
@@ -193,6 +219,10 @@ export function createPlainDiscussionMcpServer(ctx: {
             toolCallId: `stripe-${crypto.randomUUID()}`,
             heading: "Run a Stripe refund/cancellation",
           };
+          const action = beginDiscussionAction(
+            ctx.discussionId,
+            gate.toolCallId,
+          );
           try {
             const outcome = await openGate(gate, args.proposal);
             if (outcome.status !== "APPROVED")
@@ -208,11 +238,21 @@ export function createPlainDiscussionMcpServer(ctx: {
               );
             }
             const { executeApprovedStripeAction } = await import("./handlers");
+            // Last check before the execution turn starts; once it runs, a
+            // Stop aborts it through the engine's own cancel path.
+            throwIfStopped(action.signal);
             const result = await executeApprovedStripeAction(
               args.proposal,
               threadContext,
               "discussion",
+              action.signal,
             );
+            if (action.signal.aborted) {
+              await closeGate(gate, "ERROR", "The teammate stopped the turn.");
+              return text(
+                `The teammate stopped the turn while the Stripe execution was running; it was aborted. Verify in Stripe whether anything went through before telling the customer.\n\n${result}`,
+              );
+            }
             const failed = /^error\b/i.test(result.trim());
             await closeGate(
               gate,
@@ -225,9 +265,15 @@ export function createPlainDiscussionMcpServer(ctx: {
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             await closeGate(gate, "ERROR", message);
+            if (e instanceof StoppedError)
+              return text(
+                "The teammate stopped the turn before the Stripe execution started. Nothing was done.",
+              );
             return text(
               `The Stripe execution failed: ${message}. No money moved if Stripe was not reached — verify in Stripe.`,
             );
+          } finally {
+            action.release();
           }
         },
       ),

@@ -154,6 +154,44 @@ export function pendingApprovalCount(): number {
   return pendingApprovals.size;
 }
 
+// --- Active actions --------------------------------------------------------
+
+interface ActiveAction {
+  discussionId: string;
+  controller: AbortController;
+}
+
+const activeActions = new Map<string, ActiveAction>();
+
+/** Register a gated tool call for the whole of its life, so a Stop can still
+ *  reach it after the teammate approves: the approval waiter is gone by then,
+ *  and the customer reply or the Stripe execution turn runs outside the
+ *  parent run's cancel. Registered before the card is published, so there is
+ *  no window between the decision and the action where a Stop finds nothing. */
+export function beginDiscussionAction(
+  discussionId: string,
+  toolCallId: string,
+): { signal: AbortSignal; release: () => void } {
+  const controller = new AbortController();
+  activeActions.set(toolCallId, { discussionId, controller });
+  return {
+    signal: controller.signal,
+    release: () => {
+      activeActions.delete(toolCallId);
+    },
+  };
+}
+
+export function abortDiscussionActions(discussionId: string): number {
+  let n = 0;
+  for (const action of activeActions.values()) {
+    if (action.discussionId !== discussionId) continue;
+    action.controller.abort();
+    n++;
+  }
+  return n;
+}
+
 // --- Session mapping -------------------------------------------------------
 
 async function findDiscussionSession(discussionId: string) {
@@ -285,10 +323,13 @@ async function onTurnStopRequested(
   const { discussion } = payload;
   const me = await agentMachineUserId();
   if (discussion.agent?.id !== me) return;
-  // A waiting approval card is released right away; the session cancel
-  // queues behind any creation or delivery still in flight for this
-  // discussion, so a Stop during creation reaches the announced session.
+  // A waiting approval card is released right away, and an approved action
+  // still executing (a customer reply, a Stripe execution turn) is aborted;
+  // the session cancel queues behind any creation or delivery still in
+  // flight for this discussion, so a Stop during creation reaches the
+  // announced session.
   const cancelledApprovals = cancelApprovalsFor(discussion.id);
+  const abortedActions = abortDiscussionActions(discussion.id);
   await withMessageOrder(discussion.id, async () => {
     const session = await findDiscussionSession(discussion.id);
     const { getSessionControl } = await import("../../server/session-control");
@@ -296,7 +337,7 @@ async function onTurnStopRequested(
       ? await getSessionControl().cancelSession(session.id)
       : false;
     console.log(
-      `[plain] Stop on discussion ${discussion.id}: session ${session?.id ?? "none"}, cancelled=${cancelled}, approvals=${cancelledApprovals}`,
+      `[plain] Stop on discussion ${discussion.id}: session ${session?.id ?? "none"}, cancelled=${cancelled}, approvals=${cancelledApprovals}, actions=${abortedActions}`,
     );
     // A cancelled run ends its turn and the mirror reports IDLE; with nothing
     // running the status has to be settled here.

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
+  abortDiscussionActions,
   awaitApproval,
+  beginDiscussionAction,
   cancelApprovalsFor,
   discussionOpeningPrompt,
   resolveApproval,
@@ -114,6 +116,19 @@ describe("approval registry", () => {
       resolveApproval("b", { status: "APPROVED", reviewerNote: null }),
     ).toBe(true);
     expect((await other).status).toBe("APPROVED");
+  });
+
+  it("aborts an approved action still executing for a stopped discussion, and only those", () => {
+    const mine = beginDiscussionAction("disc_stop", "stripe-1");
+    const other = beginDiscussionAction("disc_other", "stripe-2");
+    expect(abortDiscussionActions("disc_stop")).toBe(1);
+    expect(mine.signal.aborted).toBe(true);
+    expect(other.signal.aborted).toBe(false);
+    mine.release();
+    other.release();
+    // A finished action is out of reach; a Stop then has nothing to abort.
+    expect(abortDiscussionActions("disc_other")).toBe(0);
+    expect(other.signal.aborted).toBe(false);
   });
 });
 

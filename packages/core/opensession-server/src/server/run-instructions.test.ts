@@ -140,7 +140,7 @@ describe("buildRunInstructions", () => {
     // The Media section names every block form the transcript renders live,
     // and New sessions names suggest_task: the two things a run cannot learn
     // from a skill or from mcp_search without already knowing they exist.
-    expect(prompt.length).toBeLessThan(2_200);
+    expect(prompt.length).toBeLessThan(2_400);
   });
 
   test("tells a sandboxed run where it is, in one shared paragraph", () => {

@@ -167,10 +167,13 @@ export function buildRunInstructions(input: {
     // suggest_task sits behind mcp_search like every MCP tool, so a run only
     // learns it exists from this line. The trigger names what runs already do
     // with such findings (mention them in the reply) so the tool replaces
-    // that habit rather than competing with it.
+    // that habit rather than competing with it. create_session is admin-only;
+    // the humanResume and automationSelf shapes mount spawn_task instead, and
+    // this prefix is shared across shapes, so the line names both.
     parts.push(
-      "## New sessions\nA request for a new session means `create_session`, not an " +
-        "in-process worker. A well-scoped follow-up you notice outside the request (a bug " +
+      "## New sessions\nA request for a new session means `create_session` (or `spawn_task` " +
+        "where that is the only one offered), not an in-process worker. A well-scoped " +
+        "follow-up you notice outside the request (a bug " +
         "on the way, a missing tool or test) goes to `suggest_task`, not a line in your " +
         "reply, and you do not start it.",
     );

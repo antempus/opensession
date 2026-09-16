@@ -3,8 +3,10 @@ import {
   IconArchive,
   IconChart,
   IconFeed,
+  IconDatabase,
   IconFile,
   IconInbox,
+  IconIssue,
   IconListCircles,
   IconMail,
   IconPullRequest,
@@ -36,6 +38,7 @@ interface SidebarToolsModelOptions {
   navigation: NavigationActions;
   feedActive: boolean;
   prsActive: boolean;
+  issuesActive: boolean;
   tasksActive: boolean;
   taskCount: number;
   plainActive: boolean;
@@ -43,6 +46,7 @@ interface SidebarToolsModelOptions {
   catchUpCount: number;
   supportTinderActive: boolean;
   reportsActive: boolean;
+  databasesActive: boolean;
   analyticsActive: boolean;
   isPhone: boolean;
   toolOrder: SidebarToolId[];
@@ -58,6 +62,7 @@ export function createSidebarToolsModel({
   navigation,
   feedActive,
   prsActive,
+  issuesActive,
   tasksActive,
   taskCount,
   plainActive,
@@ -65,6 +70,7 @@ export function createSidebarToolsModel({
   catchUpCount,
   supportTinderActive,
   reportsActive,
+  databasesActive,
   analyticsActive,
   isPhone,
   toolOrder,
@@ -97,6 +103,14 @@ export function createSidebarToolsModel({
       active: prsActive,
       onClick: navigation.openPrs,
       title: "Pull request worktrees",
+    },
+    {
+      id: "issues",
+      label: SIDEBAR_TOOL_LABELS.issues,
+      icon: <IconIssue />,
+      active: issuesActive,
+      onClick: navigation.openIssues,
+      title: "Open GitHub issues",
     },
     {
       id: "tasks",
@@ -141,6 +155,14 @@ export function createSidebarToolsModel({
       // automation's own report row below passes the one it names.
       onClick: () => navigation.openReports(),
       title: "Recurring automation reports",
+    },
+    {
+      id: "databases",
+      label: SIDEBAR_TOOL_LABELS.databases,
+      icon: <IconDatabase />,
+      active: databasesActive,
+      onClick: () => navigation.openDatabases(),
+      title: "Databases sessions and automations keep",
     },
     {
       id: "analytics",

@@ -17,6 +17,7 @@ import {
   IconCopy,
   IconDesk,
   IconFeed,
+  IconDatabase,
   IconFile,
   IconGear,
   IconInbox,
@@ -24,6 +25,7 @@ import {
   IconMail,
   IconMoon,
   IconPlus,
+  IconIssue,
   IconPullRequest,
   IconSidebarLeft,
   IconStack,
@@ -121,9 +123,8 @@ export function buildAppCommandActions({
             ? [
                 {
                   id: "next-unread-workspace",
-                  label: "Next chat",
-                  description:
-                    "Open the next chat, prioritizing work that needs attention",
+                  label: "Next unread",
+                  description: "Open the next unread session",
                   category: "Navigate" as const,
                   keywords: ["next", "unread", "ready", "attention"],
                   shortcut:
@@ -276,6 +277,15 @@ export function buildAppCommandActions({
       run: () => navigate({ view: "prs" }),
     },
     {
+      id: "issues",
+      label: "Issues",
+      description: "Open the GitHub issue list",
+      category: "Navigate",
+      keywords: ["github", "issue"],
+      icon: <IconIssue size={18} />,
+      run: () => navigate({ view: "issues" }),
+    },
+    {
       id: "feed",
       label: "Feed",
       description: "Open what the team has been shipping",
@@ -327,6 +337,15 @@ export function buildAppCommandActions({
       category: "Navigate",
       icon: <IconFile size={18} />,
       run: () => navigate({ view: "reports" }),
+    },
+    {
+      id: "databases",
+      label: "Databases",
+      description: "Browse the databases sessions keep",
+      category: "Navigate",
+      keywords: ["sqlite", "tables", "sql"],
+      icon: <IconDatabase size={18} />,
+      run: () => navigate({ view: "databases" }),
     },
     {
       id: "analytics",

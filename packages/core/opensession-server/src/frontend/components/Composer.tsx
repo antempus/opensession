@@ -58,12 +58,14 @@ import {
   IconArrowUp,
   IconReturn,
   IconPaperclip,
+  IconChecklist,
   IconCrosshair,
   IconEye,
   IconNote,
   IconStopSquare,
   IconPencil,
   IconTrash,
+  IconCall,
 } from "./icons";
 import {
   composerBox,
@@ -145,6 +147,8 @@ interface Props {
   actions: ComposerActions;
   /** Content visually attached to the composer above the draft field. */
   attached?: React.ReactNode;
+  /** A compact tab attached to the top-right edge, above any full-width flaps. */
+  attachedAction?: React.ReactNode;
   /** Extra row for the "+" menu, below the built-in ones. Same shape as
    * `sendMenu`: render a `composerMenuItem` button and call `close()` when it
    * is picked. */
@@ -181,12 +185,14 @@ export function Composer({
     defaultModel,
     model,
     modelDisabled,
+    modelPillDisabled,
     modelTitle,
     effort,
     fastMode,
     accounts,
     accountId,
     goal,
+    pstackMode,
     usage,
     prefill,
     hint,
@@ -200,6 +206,7 @@ export function Composer({
     noteMode,
     askMode,
     askExitPending,
+    call,
   },
   actions: {
     onSend,
@@ -209,6 +216,7 @@ export function Composer({
     onFastModeChange,
     onAccountChange,
     onSetGoal,
+    onPstackModeChange,
     onImagesChange,
     onFilesChange,
     onAddAttachments,
@@ -220,9 +228,11 @@ export function Composer({
     skillsFetch,
     onNoteModeChange,
     onAskModeExit,
+    onToggleCall,
   },
   menuExtra,
   attached,
+  attachedAction,
   sendMenu,
 }: Props) {
   const internalRef = useRef<HTMLTextAreaElement>(null);
@@ -400,10 +410,22 @@ export function Composer({
       sendOptions.pastedTexts = pastedTexts.map(
         (attachment) => attachment.text,
       );
-    const consumed = handler(overrideText ?? text, sendOptions);
+    const draftAtSend = text;
+    const sentText = overrideText ?? text;
+    const consumed = handler(sentText, sendOptions);
     if (consumed instanceof Promise) {
+      // The handler answers later; the draft may have moved on by then.
+      // Clear only what was sent: a field the user has since retyped keeps
+      // its new text. (The dictation override commits to state after this
+      // call, so the field may legitimately hold either snapshot.)
       void consumed.then((result) => {
-        if (result === true) consume();
+        if (result !== true) return;
+        const now = textRef.current;
+        if (isControlled || now === draftAtSend || now === sentText) consume();
+        else
+          setPastedTexts((current) =>
+            current.filter((attachment) => !sentPastedIds.has(attachment.id)),
+          );
       });
     } else if (consumed === true) {
       consume();
@@ -451,7 +473,12 @@ export function Composer({
   // Whether the "+" has anything to show. Images keep the attachment row
   // available in note mode, while the mode row remains the way back out.
   const hasAddMenu =
-    canAttach || !!onSetGoal || !!onNoteModeChange || !!menuExtra || !!sendMenu;
+    canAttach ||
+    !!onSetGoal ||
+    !!onNoteModeChange ||
+    !!onPstackModeChange ||
+    !!menuExtra ||
+    !!sendMenu;
 
   // Phones get a ChatGPT-style resting state: while the field is empty and
   // unfocused, the composer collapses to a single-row pill ("+ · placeholder ·
@@ -465,7 +492,7 @@ export function Composer({
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [dictating, setDictating] = useState(false);
   const [dictationClipping, setDictationClipping] = useState(false);
-  const hasAttached = !!attached;
+  const hasAttached = !!attached || !!attachedAction;
   const hasContent =
     !!text.trim() ||
     imgs.length > 0 ||
@@ -651,6 +678,22 @@ export function Composer({
               keywords: ["target", "objective"],
               icon: <IconCrosshair size={16} />,
               run: () => setMenu("goal"),
+            },
+          ]
+        : []),
+      ...(onPstackModeChange
+        ? [
+            {
+              id: "pstack-mode",
+              label: pstackMode
+                ? "Turn off pstack mode"
+                : "Turn on pstack mode",
+              description: pstackMode
+                ? "Stop loading the pstack playbooks and skills"
+                : "Load the pstack playbooks and skills for every turn",
+              keywords: ["pstack", "poteto", "playbook", "rigorous"],
+              icon: <IconChecklist size={16} />,
+              run: () => onPstackModeChange(!pstackMode),
             },
           ]
         : []),
@@ -1259,7 +1302,12 @@ export function Composer({
     <div className="mx-auto w-full max-w-[calc(var(--session-col)+40px)]">
       {/* Queued/steered messages fold out from behind the composer box —
           a sibling flap tucked under its top edge, not a box-in-box. */}
-      {attached}
+      {attachedAction && (
+        <div className="-mb-3.5 flex justify-end px-3">{attachedAction}</div>
+      )}
+      {/* Keep the compact action outside the full-width stack so the first
+          flap retains its top corners, even when the action is present. */}
+      {attached && <div className="flex flex-col">{attached}</div>}
       <motion.div
         layout
         // `layout` here is for ONE move: the phone pill morphing to and from the
@@ -1291,19 +1339,18 @@ export function Composer({
         // otherwise Motion animates from the stylesheet value on load, a
         // visible radius morph.
         //
-        // With a flap attached the two are ONE control rather than a pill
-        // parked on a panel: the flap keeps the rounded top, this keeps the
-        // rounded bottom, and the seam where they meet squares off.
+        // Full-width flaps share a squared seam with the composer. A compact
+        // action instead tucks behind its rounded top edge with a small inset.
         initial={false}
         animate={{
           borderTopLeftRadius: minimized
             ? 999
-            : hasAttached
+            : attached
               ? 0
               : composerRadius(),
           borderTopRightRadius: minimized
             ? 999
-            : hasAttached
+            : attached
               ? 0
               : composerRadius(),
           borderBottomLeftRadius: minimized ? 999 : composerRadius(),
@@ -1666,6 +1713,8 @@ export function Composer({
               noteMode={noteMode}
               onNoteModeChange={onNoteModeChange}
               onSetGoal={onSetGoal}
+              pstackMode={pstackMode}
+              onPstackModeChange={onPstackModeChange}
               menuExtra={menuExtra}
               sendMenu={sendMenu}
               outgoingText={outgoingText}
@@ -1715,7 +1764,7 @@ export function Composer({
             accountId={accountId}
             onAccountChange={onAccountChange}
             usage={usage}
-            disabled={disabled}
+            disabled={disabled || modelPillDisabled}
             effortDownLabel={effortDownLabel}
             effortUpLabel={effortUpLabel}
             onOpenChange={setModelMenuOpen}
@@ -1737,6 +1786,42 @@ export function Composer({
             onActiveChange={handleDictationActive}
             disabled={disabled}
           />
+
+          {onToggleCall && (
+            <motion.div
+              layout="position"
+              transition={composerMorph}
+              layoutDependency={minimized}
+              className={cn(
+                "inline-flex shrink-0 items-center",
+                // Sits right after the dictation mic in the resting pill.
+                minimized && "order-3",
+              )}
+            >
+              <Tooltip
+                label={
+                  call?.active
+                    ? `End call${call.status ? ` (${call.status})` : ""}`
+                    : "Start a voice call"
+                }
+              >
+                <button
+                  type="button"
+                  className={cn(
+                    composerIconButtonClass,
+                    // A live call reads as the universal red handset.
+                    call?.active && "text-red hover:text-red",
+                  )}
+                  onClick={onToggleCall}
+                  disabled={disabled}
+                  aria-pressed={!!call?.active}
+                  aria-label={call?.active ? "End call" : "Start a voice call"}
+                >
+                  <IconCall size={22} />
+                </button>
+              </Tooltip>
+            </motion.div>
+          )}
 
           {busy && onStop && (
             <Tooltip
@@ -1811,6 +1896,7 @@ export function Composer({
                   }
                 >
                   <ContextMenu.Trigger
+                    longPressDelay={800}
                     render={
                       <ComposerPressButton
                         className={cn(

@@ -10,7 +10,8 @@ import {
   INFO_SECTION_CLASS,
 } from "../lib/session-viewer-classes";
 import { cn } from "../ui/cn";
-import { IconArrowUpRight } from "./icons";
+import { Button } from "../ui/button";
+import { IconArrowUpRight, IconPin } from "./icons";
 import { PanelPageHeader } from "./PanelPageHeader";
 
 /** A plain divided list. Portal rows do not need a shared grey plate around
@@ -23,14 +24,40 @@ function statusLabel(
   target: PortalTarget | null,
   active: boolean,
 ): string {
+  if (service.state === "sleeping") return "Sleeping · opens on demand";
+  if (service.state === "waking") return "Waking";
   if (target) return active ? "Open" : "Running";
   if (service.running) {
     if (service.state === "starting") return "Starting";
-    if (service.state === "sleeping") return "Sleeping";
-    if (service.state === "waking") return "Waking";
     return "Unavailable";
   }
   return service.state === "failed" ? "Failed" : `Port ${service.port}`;
+}
+
+function providerName(id: string): string {
+  if (id === "daytona") return "Daytona";
+  if (id === "box") return "Box";
+  return id;
+}
+
+/** One line on where a host session's Portals run when the project sends
+ * them to a Sandbox of their own, and how that machine is doing. */
+function portalSandboxNote(
+  portalSandbox: NonNullable<PreviewStatus["portalSandbox"]>,
+): string {
+  const name = providerName(portalSandbox.provider);
+  switch (portalSandbox.lifecycle) {
+    case "preparing":
+      return `Preparing a ${name} Sandbox for this project's Portals…`;
+    case "waking":
+      return `Waking the ${name} Sandbox that runs this project's Portals…`;
+    case "sleeping":
+      return `Portals run in a ${name} Sandbox, asleep now. Starting one wakes it.`;
+    case "needs_attention":
+      return `The ${name} Sandbox for this project's Portals needs attention${portalSandbox.error ? `: ${portalSandbox.error}` : "."} Start a Portal to try again.`;
+    default:
+      return `Portals run in a ${name} Sandbox, refreshed after every turn.`;
+  }
 }
 
 function DiscoveringRow() {
@@ -54,6 +81,7 @@ export function PortalsPage({
   onBack,
   hideHeader = false,
   onOpenPortal,
+  onPinPortal,
   onStartPortal,
   onPortalAction,
 }: {
@@ -63,6 +91,7 @@ export function PortalsPage({
   onBack: () => void;
   hideHeader?: boolean;
   onOpenPortal?: (target: PortalTarget) => void;
+  onPinPortal?: (target: PortalTarget) => void;
   onStartPortal?: (recipe: PreviewPortalRecipe) => Promise<void>;
   onPortalAction?: (name: string, action: "stop" | "restart") => Promise<void>;
 }) {
@@ -104,6 +133,11 @@ export function PortalsPage({
           <DiscoveringRow />
         ) : (
           <>
+            {status.portalSandbox ? (
+              <div className="px-2 text-label text-dim">
+                {portalSandboxNote(status.portalSandbox)}
+              </div>
+            ) : null}
             {recipes.length ? (
               <div className={INFO_SECTION_CLASS}>
                 <div className={INFO_LABEL_CLASS}>Start a portal</div>
@@ -183,7 +217,7 @@ export function PortalsPage({
                       <div
                         key={service.key}
                         className={cn(
-                          "group flex min-h-11 min-w-0 items-center gap-1 rounded-control pr-1 transition-colors",
+                          "group flex min-h-11 min-w-0 flex-wrap items-center gap-1 rounded-control pr-1 transition-colors",
                           active ? "bg-hover" : "hover:bg-hover",
                         )}
                       >
@@ -200,13 +234,25 @@ export function PortalsPage({
                             )}
                             aria-hidden="true"
                           />
-                          <span className="min-w-0 flex-1 truncate text-label text-fg">
-                            {service.name}
-                          </span>
-                          <span className="shrink-0 truncate text-label text-faint">
-                            {statusLabel(service, target, active)}
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-label text-fg">
+                              {service.name}
+                            </span>
+                            <span className="block truncate text-supporting text-faint">
+                              {statusLabel(service, target, active)}
+                            </span>
                           </span>
                         </button>
+                        {target && onPinPortal ? (
+                          <Button
+                            variant="ghost"
+                            icon={<IconPin size={14} />}
+                            onClick={() => onPinPortal(target)}
+                            className="size-11 shrink-0 text-faint hover:text-fg"
+                            aria-label={`Pin ${service.name} beside the conversation`}
+                            title="Pin beside conversation"
+                          />
+                        ) : null}
                         {target ? (
                           <a
                             href={target.url}
@@ -220,7 +266,7 @@ export function PortalsPage({
                           </a>
                         ) : null}
                         {service.managed && onPortalAction ? (
-                          <div className="flex shrink-0 items-center opacity-0 transition-opacity phone:opacity-100 group-hover:opacity-100 focus-within:opacity-100">
+                          <div className="flex basis-full items-center justify-end gap-1 pb-1">
                             <button
                               type="button"
                               disabled={working === service.name}

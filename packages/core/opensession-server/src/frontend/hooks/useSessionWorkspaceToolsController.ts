@@ -32,6 +32,7 @@ interface WorkspaceToolsRuntime {
 interface WorkspaceToolsRelations {
   subagents: SessionSubagentSnapshot[];
   sessionReportCount: number;
+  sessionDatabaseCount: number;
 }
 
 export function useSessionWorkspaceToolsController({
@@ -66,7 +67,8 @@ export function useSessionWorkspaceToolsController({
       hasPlain ||
       workflowController.workflowRuns.length > 0 ||
       relations.subagents.length > 0 ||
-      relations.sessionReportCount > 0);
+      relations.sessionReportCount > 0 ||
+      relations.sessionDatabaseCount > 0);
   const liveSubagents = useMemo(() => {
     const map = new Map<string, LiveSubagent>();
     for (const subagent of relations.subagents)
@@ -86,7 +88,6 @@ export function useSessionWorkspaceToolsController({
   });
   const archiveShortcutLabel = useShortcutLabel("session-archive");
   const copyTranscriptLabel = useShortcutLabel("session-copy-transcript");
-  const nextChatKeys = useShortcutKeys("workspace-next-unread");
   const newSiblingKeys = useShortcutKeys("session-new-sibling");
   const transcriptDownKeys = useShortcutKeys("transcript-down");
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -151,7 +152,6 @@ export function useSessionWorkspaceToolsController({
     shortcuts: {
       archiveShortcutLabel,
       copyTranscriptLabel,
-      nextChatKeys,
       newSiblingKeys,
       transcriptDownKeys,
       composerRef,

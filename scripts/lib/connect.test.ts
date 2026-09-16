@@ -7,6 +7,7 @@ import {
   runnerExecCommand,
   runnerLaunchdPlist,
   runnerScheduledTaskXml,
+  scheduledTaskStartBoundary,
   runnerSystemdUnit,
   serializeRunnerPortalRegistry,
   windowsPowerShellPath,
@@ -34,16 +35,53 @@ describe("Runner service definitions", () => {
     expect(unit).not.toContain("Token=");
   });
 
+  test("the compiled binary re-invokes itself without a script argument", () => {
+    // A `bun build --compile` binary reports `/$bunfs/root/opensession` as
+    // argv[1]; passing that along made every service start exit with
+    // `unknown command` and loop under Restart=always.
+    const exe = "/home/michael/.opensession/bin/opensession";
+    expect(runnerSystemdUnit("", exe)).toContain(
+      `ExecStart=${exe} runner run\n`,
+    );
+    expect(runnerLaunchdPlist("", exe)).toContain(
+      `<array><string>${exe}</string><string>runner</string><string>run</string></array>`,
+    );
+    const xml = runnerScheduledTaskXml(
+      "",
+      "C:\\Users\\o'brien\\.opensession\\bin\\opensession.exe",
+      "OFFICE\\owner",
+    );
+    expect(xml).toContain(
+      "&amp; 'C:\\Users\\o''brien\\.opensession\\bin\\opensession.exe' runner run *&gt;&gt;",
+    );
+    for (const rendered of [
+      runnerSystemdUnit("", exe),
+      runnerLaunchdPlist("", exe),
+      xml,
+    ])
+      expect(rendered).not.toContain("$bunfs");
+  });
+
   test("the Windows scheduled task reconnects hidden without embedding a credential", () => {
     const xml = runnerScheduledTaskXml(
       "C:\\Users\\o'brien\\.opensession\\src\\scripts\\cli.ts",
       "C:\\Users\\o'brien\\.bun\\bin\\bun.exe",
       "OFFICE\\owner",
+      undefined,
+      scheduledTaskStartBoundary(new Date(2026, 8, 14, 15, 3, 46)),
     );
     expect(xml).toContain("runner run");
     expect(xml).toContain("-WindowStyle Hidden");
+    expect(xml).toContain("$env:OPENSESSION_RUNNER_SUPERVISED = '1';");
     expect(xml).toContain("<UserId>OFFICE\\owner</UserId>");
     expect(xml).toContain("<RestartOnFailure>");
+    // Supervision: a repeating time trigger relaunches a dead Runner, and the
+    // boundary is local wall-clock time without an offset, as schtasks wants.
+    expect(xml).toContain("<StartBoundary>2026-09-14T15:03:46</StartBoundary>");
+    expect(xml).toContain("<Interval>PT5M</Interval>");
+    expect(xml).toContain(
+      "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+    );
     expect(xml).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
     expect(xml).toContain("<RunLevel>LeastPrivilege</RunLevel>");
     // A quote in the profile path must not break the PowerShell action.

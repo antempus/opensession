@@ -32,9 +32,11 @@ import {
   WorkspaceSetup,
   ConversationLoading,
   BusyInline,
+  TranscriptSyncing,
   WorkspaceWaiting,
 } from "./busy-indicators";
 import { Button } from "../../ui/button";
+import { NextUnreadButton } from "../NextUnreadButton";
 import { TranscriptView } from "../session/TranscriptView";
 import { SessionSafetyNotice } from "../SessionSafetyNotice";
 import { AskCard } from "../AskCard";
@@ -82,7 +84,6 @@ import {
   VIEWER_REVIEW_MAIN,
   VIEWER_SUGGESTIONS,
   VIEWER_SUGGESTIONS_ROW,
-  VIEWER_SUGGESTIONS_ROW_INLINE,
   VIEWER_SUMMARY_STEP,
 } from "../../lib/session-viewer-classes";
 import type { UnifiedSession, SessionNote } from "../../lib/types";
@@ -218,7 +219,10 @@ interface TranscriptContent {
   transcriptIndexExpected: boolean;
   historyTruncated: boolean;
   atTop: boolean;
+  /** Older rows are on the wire: a legacy page walk or indexed ranges. */
   loadingHistory: boolean;
+  /** Cached entries are on screen while the watch handshake catches them up. */
+  syncing: boolean;
 }
 
 interface TranscriptActions {
@@ -291,13 +295,10 @@ interface ActionBandRegion {
   replySuggestions: ReplySuggestion[];
   pickReplySuggestion: (text: string) => void;
   transcriptDownKeys: string[] | null;
-  nextChatKeys: string[] | null;
-  openNextChat?: () => void;
   archiving: boolean;
   handleArchive: () => void | Promise<void>;
   setMobileActionMenuEl: (node: HTMLDivElement | null) => void;
   openNewWorkspace?: () => void;
-  showNextChatButton: boolean | undefined;
 }
 
 interface ComposerState {
@@ -313,6 +314,12 @@ interface ComposerState {
   isAsk: boolean;
 }
 
+/** Standing context every turn carries: the pinned goal and pstack mode. */
+interface ComposerStanding {
+  goal: string | null;
+  pstackMode: boolean;
+}
+
 interface ComposerConfiguration {
   stopRequestedAt: number | null;
   stopRequest: number;
@@ -324,7 +331,7 @@ interface ComposerConfiguration {
   fastMode: boolean;
   accounts: NonNullable<ComposerProps["config"]["accounts"]>;
   accountId: string;
-  currentGoal: string | null;
+  standing: ComposerStanding;
   usage: ComposerProps["config"]["usage"];
   composerRef: RefObject<HTMLTextAreaElement | null>;
   noteMode: boolean;
@@ -356,6 +363,9 @@ interface ComposerActions {
 interface ComposerMoreActions {
   handleAccountChange: NonNullable<ComposerProps["actions"]["onAccountChange"]>;
   handleSetGoal: NonNullable<ComposerProps["actions"]["onSetGoal"]>;
+  handlePstackModeChange: NonNullable<
+    ComposerProps["actions"]["onPstackModeChange"]
+  >;
 }
 
 interface LayoutRegion {
@@ -492,6 +502,7 @@ export function SessionViewerMainRegion({
     historyTruncated,
     atTop,
     loadingHistory,
+    syncing,
   } = transcript.content;
   const {
     openAssetFromTranscript,
@@ -549,13 +560,10 @@ export function SessionViewerMainRegion({
     replySuggestions,
     pickReplySuggestion,
     transcriptDownKeys,
-    nextChatKeys,
-    openNextChat,
     archiving,
     handleArchive,
     setMobileActionMenuEl,
     openNewWorkspace,
-    showNextChatButton,
   } = actionBand;
   const {
     forkFrom,
@@ -580,7 +588,7 @@ export function SessionViewerMainRegion({
     fastMode,
     accounts,
     accountId,
-    currentGoal,
+    standing,
     usage,
     composerRef,
     noteMode,
@@ -603,7 +611,8 @@ export function SessionViewerMainRegion({
     setEffort,
     setFastMode,
   } = composer.actions;
-  const { handleAccountChange, handleSetGoal } = composer.moreActions;
+  const { handleAccountChange, handleSetGoal, handlePstackModeChange } =
+    composer.moreActions;
   const {
     actionClearance,
     summaryStep,
@@ -1087,6 +1096,12 @@ export function SessionViewerMainRegion({
                 </div>
               )}
 
+            <AnimatePresence initial={false}>
+              {syncing && !loading && !settingUpWorkspace && (
+                <TranscriptSyncing key="transcript-syncing" />
+              )}
+            </AnimatePresence>
+
             {scrollAction && isPhone && (
               /* Phone keeps this above its stacked action rows. Desktop
 								   places the same control inside the shared row below. */
@@ -1147,9 +1162,8 @@ export function SessionViewerMainRegion({
                     </button>
                   </div>
                 )}
-                {/* Session actions float above the composer. Desktop pairs quick
-								    replies with Next. Phone centers the visible actions, with quick
-								    replies on their own row when present. */}
+                {/* Reading and reply actions float above the composer. The
+                    unread destination belongs to the attached composer flaps. */}
                 {hasActionBand && (
                   <div className={VIEWER_SUGGESTIONS}>
                     <div
@@ -1161,9 +1175,7 @@ export function SessionViewerMainRegion({
                       {quickReplies && (
                         <ReplySuggestions
                           className={cn(
-                            nextAction && !isPhone
-                              ? VIEWER_SUGGESTIONS_ROW_INLINE
-                              : VIEWER_SUGGESTIONS_ROW,
+                            VIEWER_SUGGESTIONS_ROW,
                             "desktop:col-start-1 desktop:row-start-1 desktop:w-full",
                             isPhone && "w-full flex-none self-stretch",
                           )}
@@ -1192,26 +1204,6 @@ export function SessionViewerMainRegion({
                                 aria-hidden
                               />
                             </button>
-                          </Tooltip>
-                        </div>
-                      )}
-                      {nextAction && !isPhone && (
-                        <div className="pointer-events-auto col-start-3 row-start-1 shrink-0 justify-self-end">
-                          <Tooltip
-                            label="Next chat"
-                            shortcut={nextChatKeys ?? undefined}
-                          >
-                            <Button
-                              size="lg"
-                              className="min-h-10 shrink-0 border-divider hover:border-line"
-                              trailing={
-                                <IconChevronRight size={18} aria-hidden />
-                              }
-                              aria-label="Next chat"
-                              onClick={openNextChat}
-                            >
-                              Next
-                            </Button>
                           </Tooltip>
                         </div>
                       )}
@@ -1250,17 +1242,6 @@ export function SessionViewerMainRegion({
                             disabled={!openNewWorkspace}
                             onClick={openNewWorkspace}
                           />
-                          {showNextChatButton && (
-                            <Button
-                              variant="ghost"
-                              size="lg"
-                              className="size-11 min-h-11 rounded-control [corner-shape:squircle]"
-                              icon={<IconArrowRight size={22} aria-hidden />}
-                              aria-label="Next chat"
-                              disabled={!openNextChat}
-                              onClick={openNextChat}
-                            />
-                          )}
                         </div>
                       )}
                     </div>
@@ -1336,7 +1317,8 @@ export function SessionViewerMainRegion({
                     accounts:
                       session.source === "opensession" ? accounts : undefined,
                     accountId,
-                    goal: currentGoal,
+                    goal: standing.goal,
+                    pstackMode: standing.pstackMode,
                     usage,
                     textareaRef: composerRef,
                   }}
@@ -1364,6 +1346,10 @@ export function SessionViewerMainRegion({
                     onSetGoal:
                       session.source === "opensession"
                         ? handleSetGoal
+                        : undefined,
+                    onPstackModeChange:
+                      session.source === "opensession"
+                        ? handlePstackModeChange
                         : undefined,
                     mentionFetch: (query) =>
                       fetchFileMentions(query, session.id),
@@ -1416,6 +1402,11 @@ export function SessionViewerMainRegion({
                     </>
                   )}
                   attached={attachedComposer}
+                  attachedAction={
+                    nextAction ? (
+                      <NextUnreadButton key={session.id} phone={isPhone} />
+                    ) : null
+                  }
                   sendMenu={
                     session.source === "opensession"
                       ? ({ text, disabled, onScheduled }) => (

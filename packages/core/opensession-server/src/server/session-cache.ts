@@ -4,16 +4,19 @@
  * in opensession.ts now calls invalidateSessionsCache().
  */
 
-import { existsSync, readFileSync } from "fs";
+import { readFile } from "fs/promises";
 import { OPENSESSION_SESSIONS_DIR } from "./paths";
 import {
   engineSessionIdFor,
   getAllSessions,
+  isAgentSessionId,
+  isNativeSessionId,
   getAllSessionsAsync,
   nativeSessionDetailFromData,
+  nativeSessionListRowFromData,
   nativeSessionRow,
+  readAgentSessionListRowAsync,
   readNativeSession,
-  readNativeSessionListRow,
   readSlackSession,
   type SessionArchiveSlice,
 } from "./sessions";
@@ -43,7 +46,7 @@ import {
 } from "./agent-runner";
 import { audit } from "./audit";
 import { getDefaultModel, SESSION_EFFORTS as MODEL_EFFORTS } from "./models";
-import { writeJsonAtomic } from "./shared/atomic-write";
+import { writeJsonAtomicAsync } from "./shared/atomic-write";
 import type { UnifiedSession, NativeSessionFile } from "./types";
 import {
   publicSessionSafety,
@@ -134,40 +137,70 @@ export function invalidateSessionsCache(): void {
  * stale and publish the row. Nothing tells every client to refetch.
  */
 export function publishSessionChange(sessionId: string): Promise<void> {
-  const indexed = targetedSessionListRow(sessionId);
-  let written: Promise<void> = Promise.resolve();
-  if (indexed) {
-    enrichSessionRuntime([indexed]);
-    // Posted before the row publish below, so the coalesced flush reads the
-    // row this write produced: the index answers requests in order. Callers
-    // that need the row durable in the index await the returned promise.
-    written = upsertIndexedSession(indexed).catch((error) => {
-      console.warn(
-        `[session-cache] index write failed for ${sessionId}:`,
-        error instanceof Error ? error.message : error,
-      );
-    });
-  }
-  markSessionListStale();
-  publishSessionRow(indexed?.id ?? sessionId);
-  return written;
+  const identity = knownSessionIdentity(sessionId);
+  // Reading the file now yields. Share the canonical row's projection lock
+  // with metadata writes so a delayed read cannot overwrite a newer commit.
+  return withSessionMutationLock(identity.id, async () => {
+    const indexed = await targetedSessionListRow(identity);
+    if (indexed) {
+      enrichSessionRuntime([indexed]);
+      await upsertIndexedSession(indexed);
+    }
+    markSessionListStale();
+    publishSessionRow(indexed?.id ?? sessionId);
+  }).catch((error) => {
+    // Most callers intentionally fire and forget. Do not publish a stale or
+    // removed row when the read/index failed; a later refresh can retry it.
+    console.warn(
+      `[session-cache] row refresh failed for ${sessionId}:`,
+      error instanceof Error ? error.message : error,
+    );
+  });
 }
 
 /**
  * The list row a targeted publish writes for `sessionId`, or undefined when
- * it names no native session. The id may be a historical Slack/Linear alias
+ * no session file owns it. The id may be a historical Slack/Linear alias
  * (a rename or review request can be stored under one): the row is then the
  * canonical session the last list assembly merged it into. The aliases come
  * from the memory snapshot because only the full assembly discovers them; a
  * single document read would otherwise drop them and the overlays keyed
  * under them from the index until the next rebuild.
+ *
+ * A Slack or Linear id that no native session absorbed reads its own file.
+ * The index learns rows only from these publishes and from full rebuilds, so
+ * without this a Slack thread created after boot never reached the list: it
+ * was missing from the sidebar and from the worktree reaper's session
+ * snapshot, which reaped its fresh checkout as done work (2026-09-10).
  */
-function targetedSessionListRow(sessionId: string): UnifiedSession | undefined {
+async function targetedSessionListRow(
+  identity: SessionIdentity,
+): Promise<UnifiedSession | undefined> {
+  const { id } = identity;
+  if (!isNativeSessionId(id) && !isAgentSessionId(id)) return undefined;
+  // External publishers still observe the file, including legacy writes
+  // outside the metadata facade, rather than replacing it with a catalog read.
+  const doc = await readSessionFileAsync(`${SESSIONS_DIR}/${id}.json`);
+  return committedSessionListRow(id, doc, identity);
+}
+
+/** The row a session id resolves to: the canonical id the last list assembly
+ * merged it into (itself, unless it was deduped under another session) and
+ * the aliases merged into that row. */
+type SessionIdentity = {
+  id: string;
+  aliasIds: readonly string[] | undefined;
+};
+
+/** The identity the last list assembly recorded for `sessionId`, which may
+ * itself be one of the aliases. Falls back to the id alone for a session the
+ * memory snapshot has not observed yet. */
+function knownSessionIdentity(sessionId: string): SessionIdentity {
   const known = peekCachedSessions().find(
     (session) =>
       session.id === sessionId || session.aliasIds?.includes(sessionId),
   );
-  return readNativeSessionListRow(known?.id ?? sessionId, known?.aliasIds);
+  return { id: known?.id ?? sessionId, aliasIds: known?.aliasIds };
 }
 
 /**
@@ -787,11 +820,11 @@ function sessionActivityMs(data: NativeSessionFile): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-export function updateSessionFile(
+export async function updateSessionFile(
   sessionId: string,
   mutator: SessionFileMutator,
 ): Promise<void> {
-  return withSessionMutationLock(sessionId, async () => {
+  const deferred = await withSessionMutationLock(sessionId, async () => {
     const path = `${SESSIONS_DIR}/${sessionId}.json`;
     let stored = await sessionMetadata({ op: "get", sessionId });
     for (let attempt = 1; ; attempt++) {
@@ -799,9 +832,7 @@ export function updateSessionFile(
       // file on the first write. From then on the file is derived.
       const current: NativeSessionFile = stored
         ? JSON.parse(stored.doc)
-        : existsSync(path)
-          ? JSON.parse(readFileSync(path, "utf-8"))
-          : ({} as NativeSessionFile);
+        : ((await readSessionFileAsync(path)) ?? ({} as NativeSessionFile));
       const next = mutator(current) ?? current;
       const rev = (stored ? stored.rev : sessionFileRev(current)) + 1;
       (next as { rev?: number }).rev = rev;
@@ -825,32 +856,153 @@ export function updateSessionFile(
         stored = result.current;
         continue;
       }
-      writeJsonAtomic(path, next);
-      void afterSessionMetadataExport(sessionId, result.rev).catch((error) =>
+      // The file lands before the lock is released, so the next writer's
+      // file cannot leapfrog this one; the projection follows under the
+      // lock that orders its row (see projectCommittedRevision).
+      await writeJsonAtomicAsync(path, next);
+      return projectCommittedRevision(sessionId, next, result.rev);
+    }
+  });
+  if (deferred)
+    await withSessionMutationLock(deferred.canonicalId, deferred.run);
+}
+
+/** A session file read without blocking; undefined when there is none. */
+async function readSessionFileAsync(
+  path: string,
+): Promise<NativeSessionFile | undefined> {
+  try {
+    return JSON.parse(await readFile(path, "utf-8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/**
+ * The document currently stored under `sessionId`: the catalog's committed
+ * copy, or the legacy file of a session the catalog has not seen. Undefined
+ * when there is neither. The caller has already held the id to the rule of
+ * the reader that would open its file.
+ */
+async function currentSessionDocument(
+  sessionId: string,
+): Promise<NativeSessionFile | undefined> {
+  const stored = await sessionMetadata({ op: "get", sessionId });
+  if (stored) return JSON.parse(stored.doc);
+  return readSessionFileAsync(`${SESSIONS_DIR}/${sessionId}.json`);
+}
+
+/**
+ * The list row a committed document projects to, resolved as the targeted
+ * publish resolves it but without a synchronous read anywhere:
+ *
+ * - A native document that names its own session is its row: `doc` is
+ *   exactly what the actor accepted, so the row is built from it directly,
+ *   with the Slack/Linear aliases the last full assembly merged into it
+ *   (which the document itself cannot know) and the overlays keyed under
+ *   them.
+ * - A Slack/Linear id's document is a sidecar, the natively owned extras
+ *   (walkthrough, workspace, thread links) stored under that id with no `id`
+ *   of its own. The row is the agent-owned source file, read asynchronously,
+ *   with the committed sidecar overlaid; the source keeps its own title,
+ *   engine ids, model and activity.
+ * - A write under a merged alias (an id the last assembly deduped into
+ *   another session) projects that canonical row from the canonical
+ *   session's current document, catalog copy or legacy file, by the same two
+ *   rules.
+ *
+ * The id rules of those readers apply first, before any lookup: a native row
+ * needs a native id, and only a valid Slack/Linear key reaches the agent
+ * reader. An id that satisfies neither, whatever the memory snapshot says,
+ * owns no row and is looked up nowhere.
+ */
+async function committedSessionListRow(
+  sessionId: string,
+  doc: NativeSessionFile | undefined,
+  { id, aliasIds }: SessionIdentity,
+): Promise<UnifiedSession | undefined> {
+  const native = isNativeSessionId(id);
+  if (!native && !isAgentSessionId(id)) return undefined;
+  const data = id === sessionId ? doc : await currentSessionDocument(id);
+  if (native && data?.id === id)
+    return nativeSessionListRowFromData(data, aliasIds);
+  return readAgentSessionListRowAsync(id, aliasIds, data);
+}
+
+/** A projection that still has to run under the lock of the row it writes. */
+type DeferredProjection = { canonicalId: string; run: () => Promise<void> };
+
+/**
+ * Finish exporting one committed revision from inside `sessionId`'s lock
+ * section, after its file was written: project the row, publish it and send
+ * the export receipt.
+ *
+ * A row's writes are ordered by the lock of the session that owns the row.
+ * When `sessionId` is its own canonical row, that is the lock held now and
+ * the projection runs inline: the file, the index row and the receipt for
+ * this revision all land before the next commit to the session starts. When
+ * the write targets a merged alias, the row belongs to the canonical session
+ * and the projection is handed back to run under that session's lock once
+ * the caller has released its own, so the two locks never nest and cannot
+ * invert. Either way a projection that reads the canonical document cannot
+ * interleave with that session's commits, so an alias projection delayed
+ * past a newer canonical commit can never overwrite the newer row.
+ *
+ * The commit stands even when the projection fails: the warning is logged,
+ * the receipt is withheld, and the session stays in the bounded
+ * pending-exports work index for reconcileSessionMetadataExports.
+ */
+async function projectCommittedRevision(
+  sessionId: string,
+  doc: NativeSessionFile,
+  rev: number,
+): Promise<DeferredProjection | undefined> {
+  const identity = knownSessionIdentity(sessionId);
+  const run = () =>
+    projectExportedSessionMetadata(sessionId, doc, rev, identity).catch(
+      (error) =>
         console.warn(
           `[session-metadata] export receipt failed for ${sessionId}:`,
           error instanceof Error ? error.message : error,
         ),
-      );
-      return;
-    }
-  });
+    );
+  if (identity.id !== sessionId) return { canonicalId: identity.id, run };
+  await run();
+  return undefined;
 }
 
-/** The file changed: refresh the list projection, publish the row, and tell
- * the catalog which revision the export now carries. */
-async function afterSessionMetadataExport(
+/**
+ * The committed document reached the file: project it into the list index,
+ * publish the row, and tell the catalog which revision the export carries.
+ *
+ * The row comes from committedSessionListRow: the committed document itself,
+ * never a read of the file just written. Nothing here touches the
+ * filesystem synchronously.
+ *
+ * Ordering: projectCommittedRevision runs this under the lock of the session
+ * whose row it writes, so an earlier revision can never overwrite a later
+ * row. The stale mark, row publish and export receipt wait for the index
+ * write, so a failed write publishes nothing and withholds the receipt. The
+ * receipt names only this revision and the catalog keeps the marker
+ * monotonic, so a replayed older receipt is a no-op, and a withheld one
+ * leaves the session in the bounded pending-exports work index for
+ * reconcileSessionMetadataExports to re-project at the next boot.
+ */
+async function projectExportedSessionMetadata(
   sessionId: string,
+  doc: NativeSessionFile,
   rev: number,
+  identity: SessionIdentity,
 ): Promise<void> {
-  const indexed = targetedSessionListRow(sessionId);
+  const indexed = await committedSessionListRow(sessionId, doc, identity);
   if (indexed) {
     enrichSessionRuntime([indexed]);
     await upsertIndexedSession(indexed);
   }
   markSessionListStale();
-  publishSessionRow(sessionId);
-  return sessionMetadata({ op: "exported", sessionId, rev });
+  publishSessionRow(indexed?.id ?? sessionId);
+  await sessionMetadata({ op: "exported", sessionId, rev });
 }
 
 const SESSION_METADATA_CATALOG_PAGE = 500;
@@ -952,7 +1104,8 @@ export const SESSION_METADATA_EXPORT_REPAIR_LIMIT = 500;
 export async function reconcileSessionMetadataExports(
   limit = SESSION_METADATA_EXPORT_REPAIR_LIMIT,
 ): Promise<number> {
-  if (!sessionKernelActorActive()) return 0;
+  // Tests run the facade on the in-process compatibility store.
+  if (!sessionKernelActorActive() && process.env.NODE_ENV !== "test") return 0;
   let repaired = 0;
   const pageSize = Math.min(100, Math.max(1, limit));
   while (repaired < limit) {
@@ -962,20 +1115,26 @@ export async function reconcileSessionMetadataExports(
     });
     if (pending.length === 0) break;
     for (const item of pending) {
-      await withSessionMutationLock(item.sessionId, async () => {
-        const stored = await sessionMetadata({
-          op: "get",
-          sessionId: item.sessionId,
-        });
-        // The catalog can trail a clear or delete; a missing document has no
-        // file to write and the next settle drops the row.
-        if (!stored) return;
-        writeJsonAtomic(
-          `${SESSIONS_DIR}/${item.sessionId}.json`,
-          JSON.parse(stored.doc),
-        );
-        await afterSessionMetadataExport(item.sessionId, stored.rev);
-      });
+      const deferred = await withSessionMutationLock(
+        item.sessionId,
+        async () => {
+          const stored = await sessionMetadata({
+            op: "get",
+            sessionId: item.sessionId,
+          });
+          // The catalog can trail a clear or delete; a missing document has
+          // no file to write and the next settle drops the row.
+          if (!stored) return undefined;
+          const doc = JSON.parse(stored.doc) as NativeSessionFile;
+          await writeJsonAtomicAsync(
+            `${SESSIONS_DIR}/${item.sessionId}.json`,
+            doc,
+          );
+          return projectCommittedRevision(item.sessionId, doc, stored.rev);
+        },
+      );
+      if (deferred)
+        await withSessionMutationLock(deferred.canonicalId, deferred.run);
       repaired++;
     }
     if (pending.length < pageSize) break;
@@ -1081,29 +1240,47 @@ export interface AutoFallbackRetry {
   by: string;
 }
 
+const AUTO_FALLBACK_RETRY_COOLDOWN_MS = 60 * 60 * 1000;
+
+function autoFallbackCoolingDown(data: NativeSessionFile): boolean {
+  // The fallback marker and history entry are persisted together. Reuse the
+  // latest switch time so cooldowns survive restarts and cover existing sessions.
+  // Legacy markers without a valid timestamp remain eligible for one retry.
+  const switchedAt = Date.parse(data.modelHistory?.at(-1)?.at ?? "");
+  return Date.now() < switchedAt + AUTO_FALLBACK_RETRY_COOLDOWN_MS;
+}
+
 /**
- * Retry the selection displaced by the previous turn's automatic usage
- * fallback. The compare-and-swap includes both fields observed before the
- * serialized write, so a concurrent explicit /model always wins.
+ * Retry the displaced selection on the first prompt after a one-hour cooldown.
+ * No timer starts a run by itself. A failed retry persists another fallback,
+ * restarting the cooldown. The compare-and-swap preserves explicit /model
+ * choices, and rechecking the cooldown protects a newer fallback write.
  */
 export async function retryAutoFallbackModel(
   sessionId: string,
 ): Promise<AutoFallbackRetry | undefined> {
-  const path = `${SESSIONS_DIR}/${sessionId}.json`;
-  let observed: NativeSessionFile;
+  if (!isNativeSessionId(sessionId) && !isAgentSessionId(sessionId))
+    return undefined;
+  let observed: NativeSessionFile | undefined;
   try {
-    if (!existsSync(path)) return undefined;
-    observed = JSON.parse(readFileSync(path, "utf-8"));
+    observed = await currentSessionDocument(sessionId);
   } catch {
     return undefined;
   }
-  if (observed.autoFallbackModel === undefined) return undefined;
+  if (
+    observed?.autoFallbackModel === undefined ||
+    autoFallbackCoolingDown(observed)
+  )
+    return undefined;
 
   let retry: AutoFallbackRetry | undefined;
   await updateSessionFile(sessionId, (data) => {
+    // A CAS conflict re-runs this mutator. Report only the attempt that commits.
+    retry = undefined;
     if (
       data.model !== observed.model ||
-      data.autoFallbackModel !== observed.autoFallbackModel
+      data.autoFallbackModel !== observed.autoFallbackModel ||
+      autoFallbackCoolingDown(data)
     )
       return data;
 

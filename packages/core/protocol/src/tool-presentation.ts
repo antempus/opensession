@@ -370,6 +370,83 @@ export function assetToolPath(rawName: string, rawInput: unknown): string {
   return toolInputString(input as Record<string, unknown>, "path");
 }
 
+/**
+ * The session an `opensession-sessions` call is about, if it names one.
+ *
+ * A get, send, answer, cancel or status call carries the target id in its
+ * arguments under one of three names; the row that names a session is the one
+ * place a reader can be offered a way into it, so the id comes out here rather
+ * than being re-parsed from the summary line. Creation calls name their
+ * session only in the result, and are not covered.
+ */
+export function sessionToolId(rawName: string, rawInput: unknown): string {
+  const { toolName, input } = unwrapMcpDispatcher(rawName, rawInput);
+  if (!input || typeof input !== "object") return "";
+  const mcp = parseMcpTool(toolName);
+  if (mcp?.server !== "opensession-sessions") return "";
+  return toolInputString(
+    input as Record<string, unknown>,
+    "id",
+    "sessionId",
+    "taskId",
+  );
+}
+
+/**
+ * A follow-up the agent proposed with `suggest_task`: work it judged worth
+ * doing but out of scope for the current request. The call carries the whole
+ * proposal in its input, so a client renders the card from the call alone and
+ * never needs the result; nothing runs until a person starts it.
+ */
+export interface SuggestedTask {
+  title: string;
+  description: string;
+  /** The complete prompt the new session starts on. */
+  instructions: string;
+  repo?: string;
+  mode?: "ask" | "code";
+  branch?: string;
+}
+
+export function suggestedTaskOf(
+  rawName: string,
+  rawInput: unknown,
+): SuggestedTask | null {
+  const { toolName, input } = unwrapMcpDispatcher(rawName, rawInput);
+  const mcp = parseMcpTool(toolName);
+  if (mcp?.server !== "opensession-sessions" || mcp.tool !== "suggest_task")
+    return null;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const inp = input as Record<string, unknown>;
+  const title = toolInputString(inp, "title").trim();
+  const instructions = toolInputString(inp, "instructions", "prompt").trim();
+  if (!title || !instructions) return null;
+  const task: SuggestedTask = {
+    title,
+    description: toolInputString(inp, "description").trim(),
+    instructions,
+  };
+  const repo = toolInputString(inp, "repo").trim();
+  if (repo) task.repo = repo;
+  if (inp.mode === "ask" || inp.mode === "code") task.mode = inp.mode;
+  const branch = toolInputString(inp, "branch").trim();
+  if (branch) task.branch = branch;
+  return task;
+}
+
+/**
+ * The root-relative `/new` link that opens the composer prefilled with a
+ * suggested task. The server prefixes its public base URL for Slack and tool
+ * results; the web client prefixes BASE_PATH and opens it in place.
+ */
+export function suggestedTaskLink(task: SuggestedTask): string {
+  const params = new URLSearchParams({ prompt: task.instructions });
+  if (task.repo) params.set("repo", task.repo);
+  if (task.mode) params.set("mode", task.mode);
+  if (task.branch) params.set("branch", task.branch);
+  return `/new?${params.toString()}`;
+}
+
 /** Internal plumbing that shouldn't show up in a summary or the input JSON. */
 const HIDDEN_INPUT_KEYS = new Set(["__bks_oc_session"]);
 
@@ -523,6 +600,10 @@ export function toolDetail(toolName: string, input: unknown): ToolDetail {
       return text ? { kind: "text", text } : { kind: "none" };
     }
     default: {
+      // A suggested task is addressed to the reader and renders as its own
+      // card; its row only needs to say which suggestion it was.
+      const suggestion = suggestedTaskOf(toolName, inp);
+      if (suggestion) return { kind: "text", text: suggestion.title };
       // An assets write carries the whole artifact in `content`, so the
       // generic render below spends the row on a truncated file body. The
       // path is the part worth reading, and the part a client can open.

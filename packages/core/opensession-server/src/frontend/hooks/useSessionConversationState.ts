@@ -38,6 +38,7 @@ import {
 } from "../lib/session-viewer-actions";
 import { safetyContinuationPrompt } from "../lib/session-safety";
 import { CONTINUE_AFTER_FAILURE_PROMPT } from "../lib/continue-run";
+import { sessionIdFromTranscriptClick } from "../lib/transcript-session-click";
 import { getCurrentUser } from "../components/UserPicker";
 import { toast } from "../ui/toast";
 import { useConfirm } from "../ui/confirm";
@@ -373,16 +374,8 @@ export function useSessionConversationActions({
         openAsset(assetPath);
         return;
       }
-      const sessionCandidate = target.closest("[data-session-id]");
-      const sessionEl =
-        sessionCandidate instanceof HTMLElement ? sessionCandidate : null;
-      const id = sessionEl?.dataset.sessionId;
+      const id = sessionIdFromTranscriptClick(e);
       if (!id || !openSession) return;
-      if (
-        (e.metaKey || e.ctrlKey || e.shiftKey) &&
-        sessionEl?.getAttribute("href")
-      )
-        return;
       e.preventDefault();
       openSession(id);
     },
@@ -722,6 +715,7 @@ interface HeaderActionModel {
   setAccountId: Dispatch<SetStateAction<string>>;
   setFastMode: Dispatch<SetStateAction<boolean>>;
   setGoalOverride: Dispatch<SetStateAction<string | null | undefined>>;
+  setPstackOverride: Dispatch<SetStateAction<boolean | undefined>>;
 }
 interface HeaderActionSetters {
   renameDraft: string | null;
@@ -828,6 +822,15 @@ export function useSessionHeaderActions({
       user: getCurrentUser(),
     });
   }
+  function handlePstackModeChange(on: boolean) {
+    model.setPstackOverride(on);
+    runtime.send({
+      type: "prompt",
+      sessionId: identity.session.id,
+      content: on ? "/pstack on" : "/pstack off",
+      user: getCurrentUser(),
+    });
+  }
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [confirm, confirmDialog] = useConfirm();
   const [deleting, setDeleting] = useState(false);
@@ -843,6 +846,7 @@ export function useSessionHeaderActions({
       handleModelChange,
       handleAccountChange,
       handleSetGoal,
+      handlePstackModeChange,
     },
     deleteState: {
       showDeleteConfirm,

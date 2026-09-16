@@ -57,6 +57,14 @@ configuration for the run.
   deny-by-default on journal kind: interactive kinds
   (prompt/goal/create/linear/slack), unattended kinds
   (automation/plain/action/security-scan/github-*), everything else refused.
+- A Plain Ask Sidekick discussion session (`plainDiscussionId`,
+  `docs/setup/plain.md`) is prompted by a teammate but reads the same untrusted
+  ticket text, so every one of its turns carries the automation deny-set plus
+  the Plain customer-facing writes and the Stripe money movers, passes no
+  user, gets no AWS credentials, and mounts only `opensession-plain-discussion`
+  (the Approve/Deny-gated customer reply and Stripe execution) in place of the
+  interactive set. The run-rpc fallback builder serves that same set, so a
+  hosted or sandboxed turn cannot ask for more.
 - `mode` is per automation. Ask has guarded read/find/grep/ls/bash tools but
   no Write/Edit. For an unsandboxed ordinary repository it uses a stable,
   shared detached worktree pinned to `origin/<defaultBranch>`; only a
@@ -71,9 +79,9 @@ configuration for the run.
   launcher-supplied token, so nothing they can be injected into holds write
   capability. Only a code turn a connected person started holds that
   person's token instead. What that token may do to
-  the default branch is a ruleset decision on GitHub; the command policy
-  refuses merges, approving reviews, and default-branch pushes in every run
-  as a tripwire. Every other scope still applies: MCP allowlist, denied
+  the default branch is a ruleset decision on GitHub. Interactive code runs
+  follow the repository's publication workflow; automation descendants retain
+  their server-enforced publication policy. Every other scope still applies: MCP allowlist, denied
   writes, IMDS blocking, and the explicit environment.
 - A sandboxed automation runs in a fresh disposable Daytona Executor. Open
   Session admits it only after Daytona has passed qualification, including a
@@ -144,6 +152,19 @@ addresses, GitHub logins, and Slack ids resolve to the configured person.
   resumes explicitly drop both identities, so an `allowedUsers`-restricted
   server remains invisible even if the automation's `mcpServers` allowlist
   names it.
+- Provider account selection is the one place a person's identity survives an
+  automation-owned session: `accountUser` (session-run-inputs.ts) names the
+  human who sent the prompt, so their personal Claude subscription is tried
+  before the shared pool when they take over an automation's session. A
+  machine sender (the automation's own tick, a review handoff, auto-continue)
+  resolves to no account user and stays pool-only. `accountUser` never feeds
+  the MCP gate, GitHub credentials, or the trust profile. It is journaled
+  with the run so restart recovery keeps the same routing. In a remote
+  sandbox the same identity scopes which subscriptions are uploaded. On every
+  launch path (host, detached pi host, Runner, sandbox) a person's takeover
+  turn carries no automation pin (`runAccountSpec`, `remoteRunAccountPolicy`),
+  because account selection tries a pin before personal accounts; the
+  automation's own turns keep their pin.
 - Manage it from the Connections UI (the Add-MCP form has an "Allowed users"
   field; each server card has a Restrict/Edit-access button →
   `PUT /api/connections/mcp/:name` with `{allowedUsers}`), or via
@@ -216,10 +237,14 @@ human repository administrator changes GitHub's PR creation policy to allow all
 users, operators must qualify the Daytona provider, enable the review
 automation, and keep fork-origin GitHub Actions disabled or approval-gated. The
 shipped PR workflows additionally skip every job whose head repository differs
-from the base repository. The GitHub App intentionally has no repository
-Administration permission; changing
-and auditing those GitHub settings is a one-time human-admin task, not runtime
-authority.
+from the base repository. Ordinary App installation tokens exclude repository Administration.
+The App grant includes it for the admin-only private repository creation
+route, which mints a separate uncached token. Connected-user tokens inherit
+the widened grant intersected with the person's permissions, including in
+interactive code runs; they cannot be narrowed by the installation-token
+mint sets. Changing and auditing public-intake settings remains a one-time
+human-admin task. See [GitHub authority](github-authority.md) for the
+connected-user and host-private-key implications.
 
 ## GitHub credential scoping (out-of-org writes fail server-side)
 
@@ -247,24 +272,29 @@ at `~/.opensession/github-app.pem` (or the path in
 `OPENSESSION_GITHUB_APP_KEY`). Environment App identity values win over config.
 Enabling `userPrAuth` activates both halves below:
 
-- **PRs as the session owner** (packages/core/opensession-server/src/server/github-auth.ts,
-  pull-request-mcp.ts): teammates connect their GitHub account via the OAuth
+- **PRs as the prompting person** (packages/core/opensession-server/src/server/github-auth.ts): teammates connect their GitHub account via the OAuth
   _device flow_ (Connections UI card, or implicitly by signing in). Tokens
   live per-login in `~/.opensession/github-auth.json` (0600, never returned
   by any API). A code turn a connected person started holds their token in
   its shell (pi-runner `runGithubEnv`, the sandbox launcher's projected auth
   file), so its pushes and any PR it opens are theirs; the gateway uses the
-  same token for the UI's PR routes (merge, close, review, comment) and the
-  `opensession-pull-requests` tools (`open_pull_request`,
-  `edit_pull_request`) mounted on such a turn. Ask runs, unattended runs,
-  and machine senders hold an App token and never a person's
-  (`docs/setup/github.md`). A review handoff, worker report, or automation
-  sender is nobody and gets no such tools. The run user resolves
-  to a login through the SAME identity table as commit attribution, so the
-  mapping is config (identity.team[].github), not code. The PR-attribution
-  instructions swap the `--assignee` bot wording for "opened under their
-  account" when the tools are mounted. Merge is never a tool: `propose_merge`
-  posts a notice and the person merges from the PR panel.
+  same token for the UI's PR routes (merge, close, review, comment). Agents
+  use `gh` directly rather than dedicated PR MCP tools. Ask runs, unattended
+  runs, and machine senders hold an App token and never a person's
+  (`docs/setup/github.md`). The run user resolves to a login through the same
+  identity table as commit attribution, so the mapping is config
+  (identity.team[].github), not code. Person-authored PRs need no bot-attribution
+  assignee. Repository instructions, GitHub permissions, and rulesets govern
+  interactive publication; automation and ask-mode restrictions remain enforced.
+  A person-started code turn in the registered repository's main checkout may
+  follow its direct-push workflow even without a connected personal token: the
+  base-branch command guard is omitted there, but PR merge and approval guards
+  remain. This exception follows the actual working directory, not the repo's
+  default checkout mode, so isolated worktrees on the same project keep their
+  base-branch guard. Ask, unattended, and machine-authored turns retain the full
+  guard in either checkout mode. Credential selection is unchanged: this grants
+  no token or ambient-login fallback, and GitHub still enforces permissions and
+  rulesets.
 - **GitHub web sign-in** (packages/core/opensession-server/src/server/web-auth.ts + routes/auth.ts): when
   active, the UI's name picker is replaced by a real sign-in (UserGate →
   device flow → HttpOnly `opensession_auth` cookie; sessions in
@@ -316,38 +346,33 @@ locks out a whole instance at once.
 
 ## Self-management tools (Slack + interactive Open Session sessions)
 
-The `opensession-admin` in-process MCP server
-(packages/core/opensession-server/src/agents/slack/admin-tools.ts) lets the agent manage its own setup from
-Slack: channel memory (remember/list_memory/forget) and — gated to the trusted
-user (`isAdmin` = no `ALLOWED_SLACK_USER_ID` set, or sender matches it) —
-automations (list/create/update/delete/run) and MCP connections
-(list/add/remove). It is wired ONLY into interactive Slack runs (handlers.ts
-`processMessage`); automation runs never go through there, so they never
-receive these tools. Do not add `opensession-admin` to automation/`runAgent`
-paths — that would let untrusted ticket text reconfigure the agent. Channel
-memory is scoped in packages/core/opensession-server/src/agents/slack/memory.ts (public channel → shared
-`workspace` store; private channel/DM → isolated, with read-only workspace
-view) and auto-injected into the system prompt each run.
+Slack is an ingress to regular native Open Session sessions, not a separate
+agent runner. After the existing DM/channel admission checks, `processMessage`
+uses `SessionControl.createSession` or `deliverToSession`. Questions also get a
+session-owned code workspace (their prompt forbids unsolicited edits), so runtime
+verification can use the same Sandboxes and Portals as a web-created session.
+Repository and personal Sandbox defaults apply normally. Legacy threads carry
+forward a transcript handoff; an existing owned worktree stays on its host so
+uncommitted work is not lost. Slack records and old transcripts remain intact.
 
-Both `opensession-admin` and `opensession-sessions` are ALSO available inside
-**interactive Open Session sessions** (web UI + loops), not just Slack:
-`interactiveMcpServers(user, sessionId)` (packages/core/opensession-server/src/server/interactive-mcp.ts)
-builds them and they are passed as `inProcessMcp` from the interactive run
-paths (`runSessionPrompt`, both `create_session` paths). This unrestricted
-interactive set is withheld from automation runs **and** from interactive
-resumes of automation-owned sessions (gated on `!isAutomationSession`, the same
-gate as `deniedTools`). Automation-owned runs instead receive only the explicit
-set documented below. Untrusted ticket text must never reach the interactive
-set. Open Session is network- and team-gated and already exposes all of this
-through its UI, so interactive
-users are treated as `isAdmin: true` there. The in-process servers are built
-with `packages/core/opensession-server/src/server/inprocess-mcp.ts` (a thin @modelcontextprotocol/sdk wrapper)
-and reach pi runs as stdio MCP proxies that forward to the in-process
-tools through the run-RPC socket; the Slack loop registers its own
-slack-context server set per run via `registerSessionMcpServers` (run-rpc.ts)
-so those proxies execute the right context. The runner adds a short "Managing
-<persona.name>" context block when these tools are present so the session
-knows they exist.
+The shared `interactiveMcpServers(user, sessionId)` builder supplies the entire
+interactive tool set, including `opensession-admin`, `opensession-sessions`,
+Portals, Repositories, Assets and Workflows. Admitted interactive teammates have
+the same tool authority as web users (`isAdmin: true`); there is no second Slack
+MCP allowlist or per-run override. Verified Slack-to-GitHub identity is stamped
+at creation, not accepted from model input. Per-user connector grants still
+apply to the normal session runner. Channel-scoped memory is included in the
+opening context; subsequent turns use the regular session's memory machinery.
+
+Replies in automation-owned or Plain discussion threads continue through their
+existing session and its restricted run-input policy. They never create a new
+unrestricted session. Automation descendants retain their inherited restrictions.
+Do not mount the interactive builder on automation paths: untrusted ticket text
+must never receive session-control or configuration tools. The in-process MCPs
+reach detached/remote runners through the same run-RPC proxies as web sessions.
+Slack-specific code handles admission, attachments, thread links and reply
+presentation only. Native session admission, cancellation, recovery and tool
+selection remain the authority after a message has been accepted.
 
 The `opensession-sessions` in-process MCP (packages/core/opensession-server/src/agents/slack/sessions-tools.ts)
 is a sibling, wired in its unrestricted shape only to interactive runs. The
@@ -375,9 +400,16 @@ Automations never receive `opensession-admin` or the unrestricted interactive
 set:
 
 - Every automation receives `opensession-report`, `opensession-turn`,
-  `opensession-health`, and `opensession-audit`. The latter two expose aggregate
-  host metrics and a bounded daily audit digest, not arbitrary filesystem or
-  command access.
+  `opensession-databases`, `opensession-health`, and `opensession-audit`. The
+  latter two expose aggregate host metrics and a bounded daily audit digest,
+  not arbitrary filesystem or command access.
+- `opensession-databases` is scoped the way `opensession-report` is: a run only
+  sees databases tagged with its own automation id, and the ones it creates
+  carry that tag. Every statement is screened before it reaches SQLite
+  (`database-sql-guard.ts` refuses `ATTACH`, `DETACH`, `VACUUM INTO`,
+  `load_extension` and every non-schema `PRAGMA`), reads run on a read-only
+  connection, and all SQLite work runs on the databases worker, so untrusted
+  ticket text can fill or drop the automation's own tables and nothing else.
 - `opensession-papercuts` is mounted when the repository toggle is enabled
   (default on; Settings → Papercuts). It can append a papercut and list at most
   50 recent entries, using 14 days by default and at most 120 days. Reads include
@@ -389,6 +421,29 @@ set:
   and `AUTOMATION_DENIED_TOOLS` policy.
 - The scoped `opensession-sessions`/`opensession-self` pair is mounted only when
   a human enables `automation.selfImprove`.
+- `opensession-sessions` in its `humanResume` shape is mounted on a turn a
+  person sends to an automation-owned session (a thread reply or a message in
+  the web UI; `resolveSessionRunInputs` reports it as the
+  `automation+human-spawn` branch). It carries the session list/get reads and
+  `spawn_task`, `task_status`, and `cancel_task` only, never
+  `answer_session_question`, `send_to_session`, `cancel_session`, or
+  `create_session`. Without `isAdmin`, `cancel_task` cancels only children
+  this session started with `spawn_task` (persisted `parentSessionId`), so it
+  is not `cancel_session` under another name. Children are created for the
+  person who prompted, so they are ordinary interactive sessions in that
+  person's workspaces, depth-guarded like every spawned child. The
+  automation's own ticks never carry it, and neither does a scheduled `/loop`
+  tick sent in a person's name (`"Kent (loop)"`, `loopActor`): the prompter
+  is `interactivePrompter(user)` (`RunInputs.humanPrompter`), undefined for
+  every machine actor and every scheduled actor, while `accountUser` keeps
+  the name for billing. `automationSessionMcp` applies the same classifier at
+  the mount, so a reattachment (local host, Runner, sandbox) that registers
+  the persisted account user on the run token's `humanPrompter` still fails
+  closed. Runner and sandbox turns proxy the same automation-bar
+  set over run-rpc that the in-process and hosted paths mount; run-session
+  computes it once before choosing a backend. Sandboxed descendants (sessions
+  with an `automationDescendantPolicy`) are excluded. The turn keeps the
+  automation's MCP allowlist, denials, and dropped `user`.
 
 A self-improving automation's runs and thread-reply resumes receive session
 list/get reads plus `spawn_task`, `task_status`, and `cancel_task`; the direct

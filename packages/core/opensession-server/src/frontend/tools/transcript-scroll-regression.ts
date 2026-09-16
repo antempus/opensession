@@ -16,8 +16,12 @@
  * The target server must serve the current frontend bundle. Without
  * OPENSESSION_URL an isolated fixture server starts on an ephemeral port.
  *
- * usage: OPENSESSION_URL=http://127.0.0.1:3850 bun packages/core/opensession-server/src/frontend/tools/transcript-scroll-regression.ts
+ * usage: bun run test:transcript-scroll
+ * OPENSESSION_SCROLL_REDUCED_MOTION=1 also exercises reduced-motion behavior.
+ * OPENSESSION_SCROLL_PROOF_DIR saves viewport screenshots and accessibility trees.
  */
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   acquireCdpBrowser,
   cdpSender,
@@ -52,6 +56,7 @@ type Snapshot = {
 
 type ViewportResult = {
   width: number;
+  userAgent: "chrome" | "ios";
   viewportHeight: number;
   followingSteps: number;
   readerSteps: number;
@@ -63,6 +68,13 @@ type ViewportResult = {
   maxAnchorDrift: number;
   fling: { travel: number; growth: number; correction: number } | null;
 };
+
+// TanStack Virtual keys a deferral path on iOS WebKit's user agent: while the
+// reader touches or scrolls it holds its own scrollTop writes back. Chrome
+// with an iPhone user agent takes that path too, so the phone viewport runs
+// twice and the second pass covers what only a device would otherwise show.
+const IPHONE_USER_AGENT =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1";
 
 let app = process.env.OPENSESSION_URL;
 let fixtureServer: ReturnType<typeof Bun.spawn> | undefined;
@@ -99,6 +111,8 @@ if (!app) {
   app = match[1];
 }
 const APP = app;
+const reducedMotion = process.env.OPENSESSION_SCROLL_REDUCED_MOTION === "1";
+const proofDir = process.env.OPENSESSION_SCROLL_PROOF_DIR;
 const lease = await acquireCdpBrowser();
 const results: ViewportResult[] = [];
 
@@ -162,8 +176,15 @@ function expectNoWrites(window: ProbeWindow, phase: string) {
 
 try {
   for (const viewport of [
-    { width: 1_440, height: 900, scale: 1, mobile: false },
-    { width: 390, height: 844, scale: 3, mobile: true },
+    { width: 1_440, height: 900, scale: 1, mobile: false, userAgent: null },
+    { width: 390, height: 844, scale: 3, mobile: true, userAgent: null },
+    {
+      width: 390,
+      height: 844,
+      scale: 3,
+      mobile: true,
+      userAgent: IPHONE_USER_AGENT,
+    },
   ]) {
     const target = await fetch(
       `http://127.0.0.1:${lease.port}/json/new?url=about:blank`,
@@ -262,6 +283,10 @@ try {
       await send("Page.enable");
       await send("Network.enable");
       await send("Runtime.enable");
+      if (reducedMotion)
+        await send("Emulation.setEmulatedMedia", {
+          features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+        });
       await send("Page.addScriptToEvaluateOnNewDocument", {
         source: TRANSCRIPT_SCROLL_PROBE_SOURCE,
       });
@@ -278,7 +303,12 @@ try {
           enabled: true,
           maxTouchPoints: 1,
         });
-      const token = localAutomationToken();
+      if (viewport.userAgent)
+        await send("Emulation.setUserAgentOverride", {
+          userAgent: viewport.userAgent,
+          platform: "iPhone",
+        });
+      const token = fixtureServer ? undefined : localAutomationToken();
       if (token)
         await send("Network.setCookie", {
           name: "opensession_auth",
@@ -328,8 +358,15 @@ try {
 
       // Partial-prefix growth and two keyed prepends while following.
       await probe.phase("following");
+      // Keyboard probes pause the automatic timeline while geometry settles.
+      // A transcript render must not replace that pause with a fresh control.
+      await evaluate<void>(`window.__transcriptMotionControl.paused = true`);
       for (let index = 0; index < 3; index++) {
         current = await step();
+        assert(
+          await evaluate<boolean>(`window.__transcriptMotionControl.paused`),
+          "fixture pause reset by a transcript render",
+        );
         assert(
           current.clientHeight === fixedViewportHeight,
           `viewport height changed during prepend: ${fixedViewportHeight} -> ${current.clientHeight}`,
@@ -339,6 +376,7 @@ try {
           `following ended ${current.bottomGap}px from the end`,
         );
       }
+      await evaluate<void>(`window.__transcriptMotionControl.paused = false`);
       const followingSteps = current.event;
       const following = await probe.take();
       const followingGlides = findRowGeometryTransitions(following);
@@ -385,12 +423,61 @@ try {
       expectNoWrites(leave, "leave");
       expectQuietFrames(leave, "leave");
 
-      // History hydrates above a parked reader: a partial opening prefix,
-      // keyed prepends, and a tall row whose estimate misses by a screen.
-      await probe.phase("history");
       let maxAnchorDrift = 0;
       let prependGrowth = 0;
       let readerSteps = 0;
+      // Phone: the first keyed prepend lands under a held finger. It brings
+      // the tall row, whose real height only measures after the commit, so
+      // the correction has to wait for the finger and then cover both the
+      // prepend and that late growth. Rows move under the finger meanwhile,
+      // which is the accepted touch tradeoff, so this window is not held to
+      // the quiet-frame invariants of the wheel-driven history below.
+      if (viewport.mobile) {
+        await probe.phase("hold");
+        const before = current;
+        assert(before.anchorId, "no reader anchor before the held prepend");
+        const x = Math.round(point.x);
+        const y = Math.round(point.y);
+        await send("Input.dispatchTouchEvent", {
+          type: "touchStart",
+          touchPoints: [{ x, y }],
+        });
+        for (let index = 1; index <= 3; index++) {
+          await send("Input.dispatchTouchEvent", {
+            type: "touchMove",
+            touchPoints: [{ x, y: y + index * 20 }],
+          });
+          await Bun.sleep(16);
+        }
+        await settle();
+        const held = await snapshot();
+        assert(held.anchorId, "no reader anchor under the held finger");
+        await step(held.anchorId);
+        await Bun.sleep(300);
+        const premature = findPrematureTouchWrites(await probe.take());
+        assert(
+          premature.length === 0,
+          `hold: a correction landed under the finger: ${JSON.stringify(premature.slice(0, 3))}`,
+        );
+        await send("Input.dispatchTouchEvent", {
+          type: "touchEnd",
+          touchPoints: [],
+        });
+        await Bun.sleep(400);
+        await settle();
+        current = await snapshot(held.anchorId);
+        prependGrowth += Math.max(0, current.scrollHeight - held.scrollHeight);
+        readerSteps++;
+        assert(
+          held.anchorId === current.anchorId && drift(held, current) <= 1.5,
+          `hold: the reader moved ${drift(held, current).toFixed(1)}px once the finger lifted:\n${describeWrites(unscriptedWrites(await probe.take()))}\n${JSON.stringify({ held, after: current })}`,
+        );
+        await probe.take();
+      }
+
+      // History hydrates above a parked reader: a partial opening prefix,
+      // keyed prepends, and a tall row whose estimate misses by a screen.
+      await probe.phase("history");
       while (current.event < totalEvents - 1) {
         const before = current;
         current = await step(before.anchorId);
@@ -408,10 +495,12 @@ try {
           before.anchorId === current.anchorId,
           `visible anchor changed during prepend: ${before.anchorId} -> ${current.anchorId}`,
         );
-        assert(
-          drift(before, current) <= 1.5,
-          `visible anchor drifted ${drift(before, current).toFixed(1)}px during prepend at ${viewport.width}px: ${JSON.stringify({ before, after: current })}`,
-        );
+        if (drift(before, current) > 1.5) {
+          const writes = unscriptedWrites(await probe.take());
+          throw new Error(
+            `visible anchor drifted ${drift(before, current).toFixed(1)}px during prepend at ${viewport.width}px: ${JSON.stringify({ before, after: current })}\n${describeWrites(writes)}`,
+          );
+        }
       }
       assert(
         prependGrowth > fixedViewportHeight,
@@ -631,8 +720,26 @@ try {
         fling = { travel, growth, correction };
       }
 
+      if (proofDir) {
+        await mkdir(proofDir, { recursive: true });
+        const name = `${viewport.width}-${viewport.userAgent ? "ios" : "chrome"}${reducedMotion ? "-reduced" : ""}`;
+        const screenshot = await send("Page.captureScreenshot", {
+          format: "png",
+        });
+        await Bun.write(
+          join(proofDir, `${name}.png`),
+          Buffer.from(screenshot.data, "base64"),
+        );
+        const accessibility = await send("Accessibility.getFullAXTree");
+        await Bun.write(
+          join(proofDir, `${name}.aria.json`),
+          JSON.stringify(accessibility, null, 2),
+        );
+      }
+
       results.push({
         width: viewport.width,
+        userAgent: viewport.userAgent ? "ios" : "chrome",
         viewportHeight: fixedViewportHeight,
         followingSteps,
         readerSteps,
@@ -657,4 +764,4 @@ try {
   }
 }
 
-console.log(JSON.stringify({ passed: true, results }, null, 2));
+console.log(JSON.stringify({ passed: true, reducedMotion, results }, null, 2));

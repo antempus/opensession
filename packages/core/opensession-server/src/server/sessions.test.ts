@@ -136,6 +136,46 @@ describe("removeTombstonedSessionArtifacts", () => {
   });
 });
 
+describe("nativeSessionRow", () => {
+  it("carries the Sandbox checkpoint and Portal Sandbox records through", async () => {
+    const { nativeSessionRow } = await import("./sessions");
+    const checkpoint = {
+      ref: "refs/opensession/checkpoints/os-row",
+      commit: "c".repeat(40),
+      head: "h".repeat(40),
+      tree: "t".repeat(40),
+      branch: "feature",
+      at: "2026-09-16T00:00:00.000Z",
+    };
+    const row = nativeSessionRow({
+      id: "os-row",
+      branch: "feature",
+      worktreeDir: "/tmp/os-row",
+      mode: "code",
+      createdAt: "2026-09-16T00:00:00.000Z",
+      sandboxCheckpoint: checkpoint,
+      portalSandbox: { provider: "daytona", sandboxId: "sb-portals" },
+      slackOrigin: {
+        sessionKey: "C1-123.1",
+        channel: "C1",
+        threadTs: "123.1",
+        messageTs: "123.1",
+      },
+    } as never);
+    expect(row.sandboxCheckpoint).toEqual(checkpoint);
+    expect(row.slackOrigin).toEqual({
+      sessionKey: "C1-123.1",
+      channel: "C1",
+      threadTs: "123.1",
+      messageTs: "123.1",
+    });
+    expect(row.portalSandbox).toEqual({
+      provider: "daytona",
+      sandboxId: "sb-portals",
+    });
+  });
+});
+
 describe("getAllSessions", () => {
   it("resolves an exact Slack deep link directly from its owning file", async () => {
     const key = `C123-${Date.now()}.123456`;
@@ -162,6 +202,59 @@ describe("getAllSessions", () => {
       slackThread: { channel: "C123", threadTs: key.slice("C123-".length) },
     });
     expect(readSlackSession("slack-../message-queue")).toBeNull();
+  });
+
+  it("reads a Slack or Linear list row for a targeted index write", async () => {
+    const key = `C123-${Date.now()}.654321`;
+    writeSlackSession(key, {
+      channel: "C123",
+      threadTs: key.slice("C123-".length),
+      userId: "Alex Example",
+      claudeSessionId: "engine-slack-row",
+      worktreeDir: "/tmp/slack-row",
+      branch: "fix-slack-row",
+      title: "Fix Slack row",
+      createdAt: "2026-09-10T16:09:40.000Z",
+      lastActivity: "2026-09-10T16:47:08.000Z",
+    });
+    mkdirSync(join(home, ".linear-sessions"), { recursive: true });
+    writeFileSync(
+      join(home, ".linear-sessions", "eng-42-fix-row.json"),
+      JSON.stringify({
+        branch: "eng-42-fix-row",
+        worktreeDir: "/tmp/linear-row",
+        claudeSessionId: "engine-linear-row",
+        issueIdentifier: "ENG-42",
+        issueTitle: "Fix row",
+        updatedAt: "2026-09-10T16:47:08.000Z",
+      }),
+    );
+
+    const { readAgentSessionListRow } = await import(
+      `./sessions.ts?agent-row=${crypto.randomUUID()}`
+    );
+    expect(
+      readAgentSessionListRow(`slack-${key}`, ["os-merged-alias"]),
+    ).toMatchObject({
+      id: `slack-${key}`,
+      source: "slack",
+      worktreeDir: "/tmp/slack-row",
+      branch: "fix-slack-row",
+      lastActivity: "2026-09-10T16:47:08.000Z",
+      aliasIds: ["os-merged-alias"],
+      transcriptPath: null,
+    });
+    expect(readAgentSessionListRow("linear-eng-42-fix-row")).toMatchObject({
+      id: "linear-eng-42-fix-row",
+      source: "linear",
+      worktreeDir: "/tmp/linear-row",
+      title: "ENG-42: Fix row",
+      lastActivity: "2026-09-10T16:47:08.000Z",
+    });
+    expect(readAgentSessionListRow("slack-../message-queue")).toBeUndefined();
+    expect(readAgentSessionListRow("slack-")).toBeUndefined();
+    expect(readAgentSessionListRow("linear-missing")).toBeUndefined();
+    expect(readAgentSessionListRow("os-native")).toBeUndefined();
   });
 
   it("refreshes the legacy transcript index without blocking sync reads", async () => {

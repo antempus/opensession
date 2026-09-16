@@ -23,7 +23,7 @@
  * there the transcript is NOT host-visible, so a flaky link would otherwise
  * lose mid-run events for good.
  */
-import type { StreamEvent, ImageInput } from "./events";
+import type { StreamEvent, ImageInput, PromptFile } from "./events";
 import type { GitIdentity } from "./identity";
 import type { TranscriptEntry } from "./session";
 
@@ -74,6 +74,10 @@ export interface RunHostSpec {
   selectedModel?: string;
   transientFallback?: boolean;
   images?: ImageInput[];
+  /** Non-image attachments for this turn, bytes inline. Only set when the
+   *  host runs on another machine: the in-host runner stages them into the
+   *  session scratch dir and tells the model where (prompt-attachments.ts). */
+  files?: PromptFile[];
   forkSession?: boolean;
   resumeSessionAt?: string;
   /** MCP scope for the run: an allowlist, [] for none, or "all". Optional
@@ -107,6 +111,9 @@ export interface RunHostSpec {
   codexCliEnv?: boolean;
   author?: GitIdentity | null;
   user?: string;
+  /** Person whose personal provider subscription may serve the run when it
+   *  differs from `user` (see agent-runner RunAgentOpts). */
+  accountUser?: string;
   fallbackModel?: string;
   /** Stable provider-account affinity for internal fan-out workers. */
   accountAffinityKey?: string;
@@ -114,6 +121,8 @@ export interface RunHostSpec {
   effort?: string;
   /** OpenAI priority service tier for ChatGPT OAuth Codex runs. */
   fastMode?: boolean;
+  /** Pstack mode: the pstack skill family is visible to the model. */
+  pstackMode?: boolean;
   /** Pinned account in the active model provider's pool; pool fallback applies. */
   accountId?: string;
   /** Hard accountId pin — never rotate into the shared pool (cost cap). */

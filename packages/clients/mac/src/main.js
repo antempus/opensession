@@ -28,6 +28,9 @@ const {
 } = require("./account-navigation");
 const packageConfig = require("../package.json").opensession || {};
 const nativeDictation = new NativeDictation();
+const { profileId } = require("./tailscale");
+const { TailnetWindows, fromLocalPage } = require("./tailnet-ui");
+let tailnetWindows = null;
 
 // AppKit can show its persistent-window crash-recovery prompt before Electron
 // finishes launching. On macOS 26 that modal can trap the browser process and
@@ -204,6 +207,7 @@ function readStoredAccounts() {
             label: String(account.label || new URL(url).host),
             url,
             lastUrl: resumableAccountUrl(url, account.lastUrl),
+            tailscaleProfileId: profileId(account.tailscaleProfileId),
           },
         ];
       });
@@ -421,6 +425,14 @@ function showSetup(
       mode: addingAccount ? "add" : currentURL ? "change" : "first-run",
     },
   });
+}
+
+function showServerPicker(target) {
+  if (!target || target.isDestroyed()) return;
+  const data = windowData.get(target);
+  if (data) data.setupReturnDestination = "status";
+  clearStallGuard(target);
+  target.loadFile(path.join(__dirname, "server-picker.html"));
 }
 
 // ---- Auto-update ------------------------------------------------------------
@@ -1203,12 +1215,43 @@ function syncBackgroundAccountWindows() {
   }
 }
 
-function switchAccount(id, targetURL = null, target = activeWindow()) {
-  if (!target || target.isDestroyed()) return;
+async function switchAccount(
+  id,
+  targetURL = null,
+  target = activeWindow(),
+  switchNetwork = false,
+) {
+  if (
+    !target ||
+    target.isDestroyed() ||
+    tailnetWindows?.switching ||
+    tailnetWindows?.settingsWindow
+  )
+    return;
+  const requested = readStoredAccounts().accounts.find(
+    (account) => account.id === id,
+  );
+  if (!requested) return;
+  // Only explicit picker/menu/recovery actions opt in. Launch, focus, deep links
+  // and notifications must never change the Mac's network in the background.
+  if (switchNetwork && requested.tailscaleProfileId) {
+    rememberWindowAccountUrl(target);
+    if (
+      !(await tailnetWindows.connect(target, requested)) ||
+      target.isDestroyed()
+    )
+      return;
+  }
   const stored = readStoredAccounts();
   const account = stored.accounts.find((candidate) => candidate.id === id);
   const current = accountForWindow(target, stored);
-  if (!account || account.id === current?.id) return;
+  if (
+    !account ||
+    (!switchNetwork && account.id === current?.id) ||
+    account.url !== requested.url ||
+    account.tailscaleProfileId !== requested.tailscaleProfileId
+  )
+    return;
 
   // Keep each organization at its exact in-app URL. Loading the account root
   // delegated this to the web app's generic cold-start fallback, which could
@@ -1252,7 +1295,7 @@ function organizationAccountMenuItems(stored = readStoredAccounts()) {
     type: "radio",
     checked: account.id === selectedID,
     accelerator: index < 9 ? `CommandOrControl+Shift+${index + 1}` : undefined,
-    click: () => switchAccount(account.id),
+    click: () => switchAccount(account.id, null, activeWindow(), true),
   }));
 }
 
@@ -1279,6 +1322,13 @@ function buildAppMenu() {
                 click: () => {
                   const target = showWindow();
                   showSetup("app", target, true);
+                },
+              },
+              {
+                label: "Tailscale profiles…",
+                click: () => {
+                  const target = showWindow();
+                  tailnetWindows.settings(target, accountForWindow(target)?.id);
                 },
               },
               {
@@ -1358,6 +1408,20 @@ app.whenReady().then(async () => {
     },
   );
 
+  tailnetWindows = new TailnetWindows({
+    readAccounts: readStoredAccounts,
+    writeAccounts: writeStoredAccounts,
+    probe: probeServer,
+    connectAccount: (id, target) => void switchAccount(id, null, target, true),
+    isQuitting: () => quitting,
+  });
+  tailnetWindows.register();
+  ipcMain.on("os1:tailnet-choose", (event) => {
+    const target = eventWindow(event);
+    if (!fromLocalPage(event, target, "offline.html")) return;
+    tailnetWindows.settings(target, accountForWindow(target)?.id);
+  });
+
   ipcMain.on("os1:set-badge", (e, count) => {
     const source = e.senderFrame?.url ?? "";
     if (!inWindow(source)) return;
@@ -1404,8 +1468,13 @@ app.whenReady().then(async () => {
     const target = eventWindow(e);
     return !!target && inActiveWindow(source, target);
   };
+  // The offline organization picker is a packaged local page. Give it the
+  // same list/add/switch operations, not edit/remove or a generic file:// grant.
+  const fromOrganizationPicker = (e) =>
+    fromActiveOrganizationPicker(e) ||
+    fromLocalPage(e, eventWindow(e), "server-picker.html");
   ipcMain.handle("os1:organizations-list", (e) => {
-    if (!fromActiveOrganizationPicker(e)) return null;
+    if (!fromOrganizationPicker(e)) return null;
     const stored = readStoredAccounts();
     return {
       activeId: accountForWindow(eventWindow(e), stored)?.id || stored.activeId,
@@ -1419,18 +1488,27 @@ app.whenReady().then(async () => {
     };
   });
   ipcMain.on("os1:organizations-switch", (e, id) => {
-    if (fromActiveOrganizationPicker(e) && typeof id === "string") {
-      switchAccount(id, null, eventWindow(e));
+    const target = eventWindow(e);
+    if (
+      fromOrganizationPicker(e) &&
+      typeof id === "string" &&
+      target?.isFocused() &&
+      e.senderFrame === target.webContents.mainFrame
+    ) {
+      void switchAccount(id, null, target, true);
     }
   });
   ipcMain.handle(
     "os1:organizations-add",
     async (e, raw, check = true, activate = true) => {
-      if (!fromActiveOrganizationPicker(e)) return { ok: false };
+      if (!fromOrganizationPicker(e)) return { ok: false };
       const normalized = normalizeServerUrl(raw);
       const resolved = check
         ? await resolveServer(raw)
         : { ok: !!normalized, url: normalized };
+      // A cancelled local picker must not add or activate an organization
+      // after its in-flight server probe finishes.
+      if (!fromOrganizationPicker(e)) return { ok: false };
       if (!resolved.ok || !resolved.url) {
         return {
           ok: false,
@@ -1546,7 +1624,8 @@ app.whenReady().then(async () => {
   const fromShellPage = (e) => (e.senderFrame?.url ?? "").startsWith("file://");
 
   ipcMain.on("os1:server-open", (e) => {
-    if (fromShellPage(e)) showSetup("status", eventWindow(e));
+    const target = eventWindow(e);
+    if (fromLocalPage(e, target, "offline.html")) showServerPicker(target);
   });
   ipcMain.on("os1:server-cancel", (e) => {
     if (!fromShellPage(e)) return;

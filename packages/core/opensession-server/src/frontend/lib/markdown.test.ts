@@ -1,5 +1,7 @@
+import { sessionAgentName } from "./markdown";
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import {
+  markdownAffordable,
   renderMarkdown,
   renderPrCommentMarkdown,
   onSessionTitleResolutionRequested,
@@ -112,7 +114,7 @@ describe("renderMarkdown session links", () => {
     expect(html).not.toContain("target=");
   });
 
-  it("labels a pasted (auto-linked) session URL with just the session id", () => {
+  it("labels a pasted session URL with the agent name", () => {
     const url =
       "http://127.0.0.1:3850/workspace/ws-28712580-a369-4d58-996b-f8c23e523ed1/session/bks-019f9608-ab20-7000-b98e-4de52d5fe436";
     const html = renderMarkdown(`${url} shows no right sidebar.`);
@@ -121,7 +123,7 @@ describe("renderMarkdown session links", () => {
     );
     // the ~90-char URL is the href, never the chip's (nowrap) label
     expect(html).toContain(
-      '<span class="session-link-label">bks-019f9608…</span>',
+      `<span class="session-link-label">${sessionAgentName("bks-019f9608-ab20-7000-b98e-4de52d5fe436")}</span>`,
     );
     expect(html).toContain(`href="${url}"`);
     expect(html).not.toContain(`>${url}</a>`);
@@ -204,8 +206,8 @@ describe("session chip labels", () => {
       '<span class="session-link-label">Fix the sidebar hover states</span>',
     );
     expect(html).toContain(`data-session-id="${id}"`);
-    // the full id stays reachable in the tooltip
-    expect(html).toContain(`title="Open Fix the sidebar hover states (${id})"`);
+    // Human labels stay readable; the target retains the canonical ID.
+    expect(html).toContain(`title="Open Fix the sidebar hover states"`);
     expect(html).not.toContain("data-session-label");
   });
 
@@ -247,10 +249,10 @@ describe("session chip labels", () => {
     );
     expect(html).toContain("data-session-archived");
     expect(html).toContain('<rect x="4" y="4.75" width="16" height="4"');
-    expect(html).toContain(`(${id}) · archived`);
+    expect(html).toContain(` · archived`);
   });
 
-  it("keeps the id fallback when the referenced session was deleted", async () => {
+  it("keeps the agent name when the referenced session was deleted", async () => {
     setResolvedSessionTitles([{ requestedId: id, title: null }]);
     const requested: string[][] = [];
     const unsubscribe = onSessionTitleResolutionRequested((ids) =>
@@ -260,7 +262,7 @@ describe("session chip labels", () => {
       const html = renderMarkdown(`Delegated to \`${id}\`.`);
       await Promise.resolve();
       expect(html).toContain(
-        '<span class="session-link-label">bks-019f24b5…</span>',
+        `<span class="session-link-label">${sessionAgentName(id)}</span>`,
       );
       expect(requested).toEqual([]);
     } finally {
@@ -288,7 +290,7 @@ describe("session chip labels", () => {
       setSessionTitles([[id, "Fix the sidebar hover states"]]);
       expect(label.textContent).toBe("Fix the sidebar hover states");
       expect(anchor.dataset.sessionLabel).toBeUndefined();
-      expect(anchor.title).toBe(`Open Fix the sidebar hover states (${id})`);
+      expect(anchor.title).toBe("Open Fix the sidebar hover states");
     } finally {
       if (previousDocument)
         Object.defineProperty(globalThis, "document", previousDocument);
@@ -312,7 +314,7 @@ describe("session chip labels", () => {
       '<span class="session-link-label">Ship the movavi comparison page</span>',
     );
     expect(html).toContain(
-      `title="Open Ship the movavi comparison page · Alternatives (${id})"`,
+      `title="Open Ship the movavi comparison page · Alternatives"`,
     );
   });
 
@@ -326,32 +328,32 @@ describe("session chip labels", () => {
       ],
     ]);
     expect(renderMarkdown(`Delegated to \`${id}\`.`)).toContain(
-      `title="Open Fix the sidebar hover states (${id})"`,
+      `title="Open Fix the sidebar hover states"`,
     );
   });
 
-  it("falls back to a shortened id, marked for monospace", () => {
+  it("falls back to an agent name without monospace styling", () => {
     const html = renderMarkdown(`Delegated to \`${id}\`.`);
     expect(html).toContain(
-      '<span class="session-link-label">bks-019f24b5…</span>',
+      `<span class="session-link-label">${sessionAgentName(id)}</span>`,
     );
-    expect(html).toContain('data-session-label="id"');
-    expect(html).toContain(`title="Open session ${id}"`);
+    expect(html).not.toContain('data-session-label="id"');
+    expect(html).toContain(`title="Open ${sessionAgentName(id)}"`);
   });
 
-  it("cuts an `os-` id on a segment boundary, not mid-separator", () => {
+  it("names a current session ID", () => {
     const html = renderMarkdown(
       "Delegated to `os-019fd30a-785b-7000-ad89-9c2fb5b74a19`.",
     );
     expect(html).toContain(
-      '<span class="session-link-label">os-019fd30a…</span>',
+      `<span class="session-link-label">${sessionAgentName("os-019fd30a-785b-7000-ad89-9c2fb5b74a19")}</span>`,
     );
   });
 
-  it("keeps short legacy slug ids whole", () => {
+  it("names legacy slug IDs too", () => {
     const html = renderMarkdown("Delegated to `bks-worker-two`.");
     expect(html).toContain(
-      '<span class="session-link-label">bks-worker-two</span>',
+      `<span class="session-link-label">${sessionAgentName("bks-worker-two")}</span>`,
     );
   });
 
@@ -368,7 +370,7 @@ describe("session chip labels", () => {
   it("re-labels already-rendered markdown when titles arrive", () => {
     const src = `Delegated to \`${id}\`.`;
     expect(renderMarkdown(src)).toContain(
-      '<span class="session-link-label">bks-019f24b5…</span>',
+      `<span class="session-link-label">${sessionAgentName(id)}</span>`,
     );
     setSessionTitles([[id, "Late title"]]);
     expect(renderMarkdown(src)).toContain(
@@ -414,13 +416,13 @@ describe("session chip labels", () => {
     );
   });
 
-  it("shortens an id-only link label when no title is known", () => {
+  it("names an id-only link label when no title is known", () => {
     const url = `http://127.0.0.1:3850/session/${id}`;
     const html = renderMarkdown(`Session: [${id}](${url})`);
     expect(html).toContain(
-      '<span class="session-link-label">bks-019f24b5…</span>',
+      `<span class="session-link-label">${sessionAgentName(id)}</span>`,
     );
-    expect(html).toContain('data-session-label="id"');
+    expect(html).not.toContain('data-session-label="id"');
   });
 
   it("ignores blank titles and unrelated sessions", () => {
@@ -429,7 +431,7 @@ describe("session chip labels", () => {
       ["bks-someone-else", "Other"],
     ]);
     expect(renderMarkdown(`Delegated to \`${id}\`.`)).toContain(
-      '<span class="session-link-label">bks-019f24b5…</span>',
+      `<span class="session-link-label">${sessionAgentName(id)}</span>`,
     );
   });
 });
@@ -840,6 +842,87 @@ describe("renderMarkdown PR mentions", () => {
     );
   });
 
+  it("reads an `issue` cue as the issue it names, not a PR", () => {
+    setKnownRepos([
+      { id: "tella-fusion", ghRepo: "tellahq/tella-fusion" },
+      { id: "opensession", ghRepo: "tellahq/opensession" },
+    ]);
+    const html = renderMarkdown("Tracked in issue #12 for now.", fusion);
+    expect(html).toContain('class="issue-ref"');
+    expect(html).toContain(
+      'href="https://github.com/tellahq/tella-fusion/issues/12"',
+    );
+    expect(html).toContain('target="_blank"');
+    // The cue stays prose and the chip carries the number, like `PR #92`.
+    expect(html).toContain("issue <a");
+    expect(html).toContain('<span class="issue-ref-label">#12</span>');
+    expect(html).not.toContain("pr-ref");
+    expect(html).not.toContain("/pr/");
+    // Every spelling of the cue, and a four-digit number that would
+    // otherwise chip as a PR on its digits alone.
+    for (const src of ["Issue #1234", "issues #12 and", "issue#12"]) {
+      const out = renderMarkdown(src, fusion);
+      expect(out).toContain('data-issue-number="12');
+      expect(out).not.toContain("pr-ref");
+    }
+    // A qualifier picks the repo, same as it does for a PR.
+    expect(renderMarkdown("see issue opensession#7", fusion)).toContain(
+      'href="https://github.com/tellahq/opensession/issues/7"',
+    );
+    // Inside an explicit link the mention is that link's text.
+    expect(
+      renderMarkdown("[issue #12](https://example.com/x)", fusion),
+    ).not.toContain("issue-ref");
+  });
+
+  it("leaves an issue mention as text when the repo has no GitHub page", () => {
+    setKnownRepos([{ id: "local" }]);
+    const html = renderMarkdown("issue #1234 is open", { repo: "local" });
+    expect(html).not.toContain("issue-ref");
+    expect(html).not.toContain("pr-ref");
+    expect(html).toContain("issue #1234 is open");
+  });
+
+  it("labels a pasted GitHub issue URL as the issue it is", () => {
+    setKnownRepos([{ id: "tella-fusion", ghRepo: "tellahq/tella-fusion" }]);
+    const url = "https://github.com/tellahq/tella-fusion/issues/12";
+    const bare = renderMarkdown(`Filed ${url}.`, fusion);
+    expect(bare).toContain('class="issue-ref"');
+    expect(bare).toContain('<span class="issue-ref-label">issue #12</span>');
+    expect(bare).not.toContain("pr-ref");
+    // A labelled link keeps its label.
+    const labelled = renderMarkdown(`[the flicker bug](${url})`, fusion);
+    expect(labelled).toContain(
+      '<span class="issue-ref-label">the flicker bug</span>',
+    );
+    // An issue in a repo this instance doesn't serve is an ordinary link.
+    const foreign = renderMarkdown(
+      "https://github.com/vercel/next.js/issues/12",
+      fusion,
+    );
+    expect(foreign).not.toContain("issue-ref");
+  });
+
+  it("collapses an issue written twice on one line to one chip", () => {
+    setKnownRepos([{ id: "tella-fusion", ghRepo: "tellahq/tella-fusion" }]);
+    const url = "https://github.com/tellahq/tella-fusion/issues/12";
+    // The cued mention is kept, as the PR form is.
+    const cued = renderMarkdown(`issue #12 — ${url}`, fusion);
+    expect(cued.match(/class="issue-ref"/g)?.length).toBe(1);
+    expect(cued).toContain("issue <a");
+    // An uncued mention would chip as a PR, so the URL is the form that stays.
+    const uncued = renderMarkdown(
+      `#1234 (${url.replace("12", "1234")})`,
+      fusion,
+    );
+    expect(uncued.match(/class="issue-ref"/g)?.length).toBe(1);
+    expect(uncued).not.toContain("pr-ref");
+    // Cued the other way, both readings show.
+    const contradicted = renderMarkdown(`PR #12 — ${url}`, fusion);
+    expect(contradicted).toContain('class="pr-ref"');
+    expect(contradicted).toContain('class="issue-ref"');
+  });
+
   it("reads mentions as they are actually written in prose", () => {
     // Sentence-final, parenthesised, inside emphasis, at the start of a line,
     // and in a list — all the same reference.
@@ -1212,6 +1295,90 @@ describe("renderPrCommentMarkdown bot markup", () => {
   });
 });
 
+describe("renderMarkdown callouts", () => {
+  it("renders a GitHub admonition as a titled callout", () => {
+    const html = renderMarkdown("> [!NOTE]\n> Body with **bold**.");
+    expect(html).toContain('<div class="md-callout md-callout-note">');
+    expect(html).toContain('<div class="md-callout-title"><svg');
+    expect(html).toContain("</svg>Note</div>");
+    expect(html).toContain("<p>Body with <strong>bold</strong>.</p>");
+    expect(html).not.toContain("[!NOTE]");
+    expect(html).not.toContain("<blockquote>");
+  });
+
+  it("knows every kind, in any case", () => {
+    for (const [marker, kind, title] of [
+      ["[!TIP]", "tip", "Tip"],
+      ["[!IMPORTANT]", "important", "Important"],
+      ["[!Warning]", "warning", "Warning"],
+      ["[!caution]", "caution", "Caution"],
+    ]) {
+      const html = renderMarkdown(`> ${marker}\n> Text`);
+      expect(html).toContain(`md-callout-${kind}"`);
+      expect(html).toContain(`</svg>${title}</div>`);
+      expect(html).toContain("<p>Text</p>");
+    }
+  });
+
+  it("keeps the body as ordinary markdown, lists included", () => {
+    const html = renderMarkdown(
+      "> [!WARNING]\n> First line.\n>\n> - one\n> - two\n>\n> ```ts\n> x\n> ```",
+    );
+    expect(html).toContain("<p>First line.</p>");
+    expect(html).toContain("<li>one</li>");
+    expect(html).toContain('<code class="language-ts">x');
+  });
+
+  it("renders a marker with no body as just the title", () => {
+    const html = renderMarkdown("> [!TIP]");
+    expect(html).toBe(
+      '<div class="md-callout md-callout-tip"><div class="md-callout-title">' +
+        html.slice(
+          html.indexOf("<svg"),
+          html.indexOf("</svg>") + "</svg>".length,
+        ) +
+        "Tip</div></div>\n",
+    );
+  });
+
+  it("renders a body that starts on the marker line with a list", () => {
+    const html = renderMarkdown("> [!NOTE]\n> - a\n> - b");
+    expect(html).toContain("<li>a</li>");
+    expect(html).not.toContain("<p></p>");
+  });
+
+  it("leaves ordinary blockquotes alone", () => {
+    expect(renderMarkdown("> Just a quote")).toBe(
+      "<blockquote>\n<p>Just a quote</p>\n</blockquote>\n",
+    );
+    // The marker has to be the whole first line, as on GitHub.
+    const inline = renderMarkdown("> [!NOTE] inline text\n> more");
+    expect(inline).toContain("<blockquote>");
+    expect(inline).toContain("[!NOTE] inline text");
+    expect(inline).not.toContain("md-callout");
+    // Nor is a marker anywhere but first.
+    const late = renderMarkdown("> Intro\n>\n> [!NOTE]\n> more");
+    expect(late).toContain("<blockquote>");
+    expect(late).not.toContain("md-callout");
+    // An unknown kind is prose.
+    expect(renderMarkdown("> [!DANGER]\n> x")).not.toContain("md-callout");
+  });
+
+  it("renders inside PR prose, with the sanitizer still on the body", () => {
+    const html = renderPrCommentMarkdown(
+      "> [!IMPORTANT]\n> Press <kbd>K</kbd> <script>alert(1)</script>",
+    );
+    expect(html).toContain("md-callout-important");
+    expect(html).toContain("<kbd>K</kbd>");
+    expect(html).not.toContain("<script>");
+  });
+
+  it("escapes raw HTML in a transcript callout", () => {
+    const html = renderMarkdown("> [!CAUTION]\n> <b>x</b>");
+    expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
+  });
+});
+
 describe("renderMarkdown @-mentions", () => {
   // The roster is module state, so publish it once for this block. The
   // renderer's cache is keyed on the source text, and setKnownPeople clears
@@ -1317,5 +1484,185 @@ describe("GitHub user-attachment media", () => {
     const html = renderMarkdown(url, { repo: "opensession" });
     expect(html).not.toContain("<video");
     expect(html).toContain(`<a href="${proxied}"`);
+  });
+});
+
+describe("renderMarkdown hex colour codespans", () => {
+  it("puts a swatch chip before a six or eight digit hex codespan", () => {
+    expect(renderMarkdown("Use `#FF0080` here.")).toContain(
+      '<code><span class="md-color-chip" style="background:#ff0080"></span>#FF0080</code>',
+    );
+    expect(renderMarkdown("`#ff0080cc`")).toContain(
+      'style="background:#ff0080cc"></span>#ff0080cc</code>',
+    );
+  });
+
+  it("leaves short hashes and anything that is not exactly a hex alone", () => {
+    for (const span of [
+      "#123",
+      "#abcd",
+      "#5528",
+      "#ff0080 brand",
+      "#ff0080;",
+      "gg0080",
+      "#ff008",
+    ]) {
+      const html = renderMarkdown(`See \`${span}\`.`);
+      expect(html).not.toContain("md-color-chip");
+      expect(html).toContain(`<code>${span}</code>`);
+    }
+  });
+
+  it("never lets raw span text reach the style attribute", () => {
+    const html = renderMarkdown('`#ff0080" onmouseover="x`');
+    expect(html).not.toContain("md-color-chip");
+    expect(html).not.toContain("style=");
+    expect(html).toContain("<code>#ff0080&quot; onmouseover=&quot;x</code>");
+  });
+});
+
+describe("renderMarkdown math", () => {
+  it("emits an inline placeholder carrying the escaped source", () => {
+    const html = renderMarkdown("The area is $\\pi r^2$ here.");
+    expect(html).toContain(
+      '<span class="md-math" data-math="\\pi r^2">$\\pi r^2$</span>',
+    );
+  });
+
+  it("typesets a one-line $$...$$ as display math", () => {
+    const html = renderMarkdown("Then $$E = mc^2$$ follows.");
+    expect(html).toContain('data-display="" data-math="E = mc^2"');
+  });
+
+  it("turns a $$ block on its own lines into a math fence", () => {
+    const html = renderMarkdown("Before\n$$\n\\sum_{i=1}^n i\n$$\nAfter");
+    expect(html).toContain(
+      '<pre><code class="language-math">\\sum_{i=1}^n i\n</code></pre>',
+    );
+    expect(html).toContain("<p>Before</p>");
+    expect(html).toContain("<p>After</p>");
+    expect(html).not.toContain("md-math");
+  });
+
+  it("leaves a ```math fence as the fence the upgrader claims", () => {
+    const html = renderMarkdown("```math\nx^2\n```");
+    expect(html).toContain('<code class="language-math">x^2\n</code>');
+  });
+
+  it("keeps prices as prose", () => {
+    for (const prose of [
+      "It costs $1.84 today.",
+      "Between $5 to $10 each.",
+      "Pay $5, $10 or $20.",
+      "A range of $5-$10.",
+      "It costs $3",
+      "Roughly $5 and up to $10 more",
+    ]) {
+      const html = renderMarkdown(prose);
+      expect(html).not.toContain("md-math");
+      expect(html).toContain("$");
+    }
+  });
+
+  it("never matches across lines or inside code", () => {
+    expect(renderMarkdown("costs $5\nand $10")).not.toContain("md-math");
+    expect(renderMarkdown("run `echo $x$`")).toContain("<code>echo $x$</code>");
+    expect(renderMarkdown("```sh\necho $x$\n```")).not.toContain("md-math");
+    const fenced = renderMarkdown("```txt\n$$\nx\n$$\n```");
+    expect(fenced).toContain('class="language-txt"');
+    expect(fenced).not.toContain("language-math");
+  });
+
+  it("escapes a dollar written as \\$", () => {
+    const html = renderMarkdown("costs \\$x\\$ now");
+    expect(html).not.toContain("md-math");
+    expect(html).toContain("$x$");
+  });
+});
+
+describe("session media placed in the body", () => {
+  const shot = "/media?path=%2Ftmp%2Fshot.png";
+  const clip = "/media?path=%2Ftmp%2Fclip.mp4";
+
+  it("renders a paragraph that is one /media image as a captioned figure", () => {
+    const html = renderMarkdown(
+      `## Proof\n\n![The login page](${shot})\n\nDone.`,
+    );
+    expect(html).toContain(
+      `<figure class="md-figure"><a href="${shot}" target="_blank" rel="noopener noreferrer" class="md-image-link">` +
+        `<img class="md-image" src="${shot}" alt="The login page" loading="lazy" /></a>` +
+        `<figcaption class="md-figcaption">The login page</figcaption></figure>`,
+    );
+    expect(html).toContain("<p>Done.</p>");
+    expect(html).not.toContain(`<p><a href="${shot}"`);
+  });
+
+  it("leaves the caption off when the alt is empty", () => {
+    const html = renderMarkdown(`![](${shot})`);
+    expect(html).toContain('<figure class="md-figure">');
+    expect(html).not.toContain("figcaption");
+  });
+
+  it("plays a /media video in the figure with an expand button", () => {
+    const html = renderMarkdown(`![The whole flow](${clip})`);
+    expect(html).toContain(
+      `<figure class="md-figure"><div class="md-video-wrap"><video class="md-video" src="${clip}" controls playsinline preload="metadata"></video>` +
+        `<button type="button" class="md-video-expand" data-md-expand="video"`,
+    );
+    expect(html).toContain(
+      '<figcaption class="md-figcaption">The whole flow</figcaption>',
+    );
+  });
+
+  it("keeps any other image, and an image beside text, inline", () => {
+    expect(renderMarkdown("![shot](https://example.com/a.png)")).toContain(
+      '<p><a href="https://example.com/a.png"',
+    );
+    expect(renderMarkdown(`See ![x](${shot})`)).toContain("<p>See <a href");
+  });
+});
+
+describe("markdownAffordable", () => {
+  const fill = (kb: number, piece: string) => {
+    let out = "";
+    while (out.length < kb * 1024) out += piece;
+    return out;
+  };
+
+  it("affords a long report made of short blocks", () => {
+    const table = `| # | Title |\n|---|---|\n${fill(
+      100,
+      "| [#6593](https://github.com/tellahq/tella-fusion/issues/6593) | Popping sound in the **editor** |\n",
+    )}`;
+    expect(markdownAffordable(table)).toBe(true);
+    expect(
+      markdownAffordable(
+        fill(100, "A paragraph with `code` and _emphasis_.\n\n"),
+      ),
+    ).toBe(true);
+  });
+
+  it("affords a giant fenced block", () => {
+    expect(
+      markdownAffordable(
+        `\`\`\`diff\n${fill(400, "+ const x = 1;\n")}\`\`\`\n`,
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses one huge inline run, even hard-wrapped", () => {
+    expect(markdownAffordable(fill(40, "word **bold** `code` "))).toBe(false);
+    expect(markdownAffordable(fill(40, "word **bold** `code`\n"))).toBe(false);
+    expect(markdownAffordable(`Intro.\n\n${fill(40, '{"id":1},')}`)).toBe(
+      false,
+    );
+  });
+
+  it("skips the lexer for anything within one run's budget", () => {
+    expect(markdownAffordable(fill(30, "x"))).toBe(true);
+  });
+
+  it("refuses past the whole-document ceiling", () => {
+    expect(markdownAffordable(fill(600, "- item\n"))).toBe(false);
   });
 });

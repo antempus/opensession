@@ -10,12 +10,10 @@ the only GitHub credentials Open Session accepts.
 For a team install, create one organization-owned GitHub App. A single-user
 simple-mode install may instead use a personal App. The same App provides:
 
-- short-lived, repository-scoped installation tokens for every agent run
-  (branch pushes, comments, replies, resolved threads), for reviews, clones,
-  previews, sandboxes, and trusted GitHub automations;
-- device-flow user tokens so the buttons in the UI (merge, close, review) and
-  the gateway's `open_pull_request` tool act as the signed-in person. These
-  tokens never enter an agent run;
+- short-lived, repository-scoped installation tokens for reviews, clones,
+  previews, trusted GitHub automations, and runs without a connected person;
+- device-flow user tokens so the UI buttons and a connected person's code
+  turns act as that person. Agents use `gh` and HTTPS git directly;
 - the bot identity `<app-slug>[bot]` for self-trigger protection and
   attribution: agent commits are authored by it, with the person as
   `Co-authored-by`.
@@ -69,6 +67,26 @@ canonical permission set used when tokens are minted:
 | Pull requests          | Read and write | reviews, PRs, merges                    |
 | Members (organization) | Read           | roster and attribution                  |
 
+**Repository creation does not need Administration.** From Settings →
+Repositories → Add repository → New, or the New session palette's "New
+repository", Open Session opens `https://github.com/new` with the owner, name,
+private visibility and README option prefilled. Review those choices and
+confirm on GitHub, then return and choose **Connect repository**. If you
+changed the owner or name on GitHub, update them in Open Session too. The
+server uses ordinary remote registration to clone it and save its GitHub
+identity. Personal accounts and organizations are both supported. If the
+App is installed on selected repositories only, grant it access to the new
+repository before connecting.
+
+The App grant and all installation-token permission sets exclude
+Administration. Connected-user tokens inherit the App grant intersected with
+the person's access and are handed to interactive code runs, so adding
+Administration to the App would also broaden agent authority.
+
+**Existing Apps:** if Administration was enabled for the earlier automatic
+creation flow, remove it in the App's GitHub permission settings. Updating
+Open Session does not change the permissions of an existing App on GitHub.
+
 Enable **Device Flow**, generate a client secret and private key, then install
 the App only on the accounts and repositories Open Session should reach. One
 instance can use every installation of that App at the same time. When
@@ -106,7 +124,10 @@ kind is interactive, and the mode is code. When that person is unknown,
 unmapped, or disconnected, the run falls back to the App token below rather
 than running credential-free. In a sandbox the launcher resolves the same
 choice on the host and projects only the chosen token into a private,
-run-scoped file.
+run-scoped file, together with the login of the credential it selected as a
+non-secret marker (the mapped person in operator mode, the sole connected
+account in simple mode) so the guest lifts the merge guard exactly when a
+host run would. An App-token projection carries no login and stays guarded.
 
 Every other run holds a short-lived installation token scoped to its
 repository and never a person's: the code permission set for unattended
@@ -115,13 +136,11 @@ handoff, a worker report, an automation), the read set for every ask run,
 whoever started it, because the review workflows process untrusted PR
 content and can print their environment. Ask runs also ignore any
 launcher-supplied token. The gateway still uses a person's token for the UI
-buttons (merge, close, review, comment) and the `open_pull_request` /
-`edit_pull_request` tools. The merge guard refuses `gh pr merge`, approving
-reviews, and default-branch pushes in every run whichever token it holds,
-and a run never inherits the host operator's `gh` login: its `GH_CONFIG_DIR`
-is run-scoped, so a missing token fails with "not logged in". The longer
-design, and the stricter target this is a rollback from, are in
-[github-authority.md](../github-authority.md).
+buttons (merge, close, review, comment). Agents use `gh` directly, without
+dedicated PR MCP tools. A run never inherits the host operator's `gh` login:
+its `GH_CONFIG_DIR` is run-scoped, so a missing token fails with "not logged in".
+See [github-authority.md](../github-authority.md) for the credential and
+publication boundaries.
 
 A push from a person-started code turn therefore reaches GitHub as that
 person; pushes from every other run reach it as the bot account, and the PR
@@ -140,16 +159,17 @@ leaked one, can merge or push `main`, whatever permissions it holds. A
 ruleset that requires pull requests and status checks should already exist;
 leave it as it is.
 
-The command policy refuses `gh pr merge`, approving reviews, and pushes to
-the default branch in every run, whoever started it. That is a tripwire in
-front of the rulesets so a confused agent gets a clear message instead of a
-403, not the boundary itself.
+Interactive code runs follow the repository's publication instructions,
+including direct pushes where a shared-main workflow permits them. GitHub
+permissions and rulesets remain the credential boundary. Ask-mode read-only
+checks, unattended command policy, and automation-descendant publication
+restrictions still apply; this does not grant automations human authority.
 
 Threat model: agent bash shares the server's uid, so every credential present
 on an Open Session host should be scoped as if the agent will read and use it
-directly. No PAT, SSH key, or `gh` login belongs on the host: the App
-installation token is the only credential in any run's reach, and the
-rulesets bind it. `OPENSESSION_GITHUB_PUSH_TOKEN`, the earlier git-only
+directly. Do not give runs ambient PATs, SSH keys, or host `gh` logins. The
+selected App or user token is the run's GitHub authority, and GitHub permissions
+and rulesets bound it. `OPENSESSION_GITHUB_PUSH_TOKEN`, the earlier git-only
 credential, is no longer read; revoke it and remove the variable.
 
 ## Webhook intake
@@ -173,9 +193,9 @@ App's **General → Webhook** settings, set the public URL to
 `https://<public-origin>/github/webhook`, make it active, and paste the same
 strong secret stored as `GITHUB_WEBHOOK_SECRET` in Settings → Integrations or
 `~/.opensession.env` (for example, generate one with `openssl rand -hex 32`).
-Then under **Permissions & events → Subscribe to events**, select **Issue
-comments**, **Pull request review comments**, **Pull request reviews**, **Pull
-requests**, and **Workflow runs**. The generated Create GitHub App link
+Then under **Permissions & events → Subscribe to events**, select **Issues**,
+**Issue comments**, **Pull request review comments**, **Pull request reviews**,
+**Pull requests**, and **Workflow runs**. The generated Create GitHub App link
 pre-fills the URL and active state, but it cannot fill the secret or event
 subscriptions. Restart Open Session after setting or changing the secret; the
 GitHub-side subscription checkboxes take effect without an Open Session restart.
@@ -183,14 +203,15 @@ GitHub-side subscription checkboxes take effect without an Open Session restart.
 These are the subscribed events the code consumes
 (`packages/core/opensession-server/src/agents/github/webhook.ts`):
 
-| Event                                                               | What happens                                                                                                                                                                                                                                                         |
-| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `issue_comment`, `pull_request_review_comment` (action `created`)   | if the body matches a configured mention handle: intent-classified → whole-PR action (review / autofix / simplify / adversarial) or a conversational reply run in a PR-branch worktree                                                                               |
-| `pull_request` action `labeled`                                     | labels `os-review` / `os-auto-fix` / `os-simplify` / `os-adversarial` trigger the corresponding behavior; create the labels on your repo first. Auto-fix also merges the current base into conflicting PR branches and resolves the conflicts without force-pushing. |
-| `pull_request` `opened`/`reopened`/`synchronize`/`ready_for_review` | auto-review, if the PR is non-draft and either carries `os-review` or the review automation is enabled                                                                                                                                                               |
-| `pull_request` action `closed` + merged                             | notifies linked sessions; fires the docs-sync automation on `github:pr_merged`                                                                                                                                                                                       |
-| `pull_request_review`                                               | refreshes PR state; when the Slack agent is enabled, review → Slack notification                                                                                                                                                                                     |
-| `workflow_run`                                                      | notifies sessions waiting on a merged PR's deploy                                                                                                                                                                                                                    |
+| Event                                                               | What happens                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `issue_comment`, `pull_request_review_comment` (action `created`)   | if the body matches a configured mention handle: on a PR, intent-classified → whole-PR action (review / autofix / simplify / adversarial) or a conversational reply run in a PR-branch worktree; on a plain issue, resumes that issue's session (below)                                                                                                                                                                                                                                                                                  |
+| `issues` action `labeled`                                           | the `os` label starts one code session per issue on branch `issue-<n>` off the default branch; create the label on your repo first. The session comments a link to itself on the issue, answers or implements, opens its own PR (`Closes #<n>`), and reports back. Later @mentions on the issue resume the same session. The sidebar's **Issues** tool (off by default; switch it on in Settings → Preferences) lists the same open issues and its **Start session** button does what the label does, attributed to the signed-in person |
+| `pull_request` action `labeled`                                     | labels `os-review` / `os-auto-fix` / `os-simplify` / `os-adversarial` trigger the corresponding behavior; create the labels on your repo first. Auto-fix also merges the current base into conflicting PR branches and resolves the conflicts without force-pushing.                                                                                                                                                                                                                                                                     |
+| `pull_request` `opened`/`reopened`/`synchronize`/`ready_for_review` | auto-review, if the PR is non-draft and either carries `os-review` or the review automation is enabled                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `pull_request` action `closed` + merged                             | notifies linked sessions; fires the docs-sync automation on `github:pr_merged`                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pull_request_review`                                               | refreshes PR state; when the Slack agent is enabled, review → Slack notification                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `workflow_run`                                                      | notifies sessions waiting on a merged PR's deploy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 An automatic review that ends unsatisfied (blocking findings, or open findings
 below quality 4/5) hands its findings straight into the live session that owns
@@ -241,8 +262,8 @@ Keep public PR creation restricted until every item below is complete:
    write-capable command.
 3. In GitHub repository settings, have a human repository administrator change
    the pull-request creation policy from **Collaborators only** to **All**. The
-   GitHub App does not need Administration permission for normal operation, and
-   should not receive it just for this one-time setting.
+   ordinary App installation tokens exclude Administration. This one-time
+   setting stays a human's job on github.com.
 4. In **Settings → Actions → General**, keep workflows from fork PRs disabled or
    require maintainer approval before they run. This is separate from Open
    Session review and complements the same-repository job gates in the shipped
@@ -253,9 +274,9 @@ Keep public PR creation restricted until every item below is complete:
    path, contains no private session URL, and leaves autofix, commands, pushes,
    handoffs and GitHub Actions unavailable.
 
-Changing the PR creation policy is the only step above that requires repository
-Administration authority. Runtime checkout, review and result posting continue
-to use the narrower App permissions documented in this guide.
+Changing the PR creation policy is the only step above that requires a human
+with repository Administration authority. Runtime checkout, review and result
+posting continue to use the narrower token sets documented in this guide.
 
 **Multi-repo**: the App webhook covers every repository on which the App is
 installed. A repo joins the PR agent when it is also in the config registry

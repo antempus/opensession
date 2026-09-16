@@ -29,6 +29,22 @@ Connect cannot install a service, it says why;
 The Runner connects outbound over the tailnet. Open Session never dials into
 the machine.
 
+## ChromeOS Runners
+
+A Chromebook's Linux container (Crostini, a Debian VM) is an ordinary Linux
+Runner: install and pair from the Terminal app with the commands above. The
+container enables lingering on its own, so the user service starts with the
+container. Three host-side limits apply:
+
+- ChromeOS does not start the container after a reboot or OS update. Open the
+  Terminal app once and the service reconnects on its own.
+- A sleeping Chromebook suspends the container. In **Settings → Device →
+  Power**, turn off **Sleep when lid is closed** and set the idle action on
+  both charger and battery to keep or turn off the display rather than sleep.
+  Keep it on the charger: ChromeOS sleeps on low battery regardless.
+- Leave `tailscaled` inside the container stopped. The ChromeOS Tailscale app
+  carries the traffic, and the Runner reports the host's tailnet address.
+
 ## Windows Runners
 
 Windows machines are supported as Runners. The Open Session server itself
@@ -79,14 +95,25 @@ tools such as `where.exe` and PowerShell/WMI components without changing the
 machine PATH. Third-party tools such as Git must still be installed and present
 on the inherited PATH.
 
-Two behaviours of the task decide how an always-on box has to be set up:
+Three behaviours of the task decide how an always-on box has to be set up:
 
-- The trigger is a **LogonTrigger** running with an `InteractiveToken`. The
-  Runner starts when the user signs in, not at boot. A headless machine needs
+- The task runs with an `InteractiveToken` from a **LogonTrigger**. The Runner
+  starts when the user signs in, not at boot. A headless machine needs
   autologon to come back on its own after a reboot.
+- A second, repeating **TimeTrigger** fires every five minutes for ever. That
+  is the supervisor: `RestartOnFailure` is set as well but did nothing for a
+  Runner that exited with `STATUS_CONTROL_C_EXIT` (`0xC000013A`, Last Result
+  `-1073741510`), which is what Bun returns when a stray Ctrl+C or Ctrl+Break
+  reaches the task's hidden console. The task's action also sets
+  `OPENSESSION_RUNNER_SUPERVISED=1`, and a Runner started that way logs
+  `ignored SIGINT on the hidden console` instead of dying, since nothing on
+  a hidden console is a person. A Runner that still dies is back within five
+  minutes.
 - `MultipleInstancesPolicy` is `IgnoreNew`. If `opensession runner run` is
   already going in a console window, the task's launch is ignored without
-  comment. Close the foreground one first.
+  comment. Close the foreground one first, and disable the task while a
+  foreground Runner is meant to hold the channel, or the repeating trigger
+  starts a second instance within five minutes.
 
 ### Elevation, and running exactly one instance
 
@@ -114,6 +141,7 @@ driven from a Runner that was started elevated. Start one from an
 instance holds the channel:
 
 ```powershell
+schtasks /Change /TN OpenSessionRunner /DISABLE
 schtasks /End /TN OpenSessionRunner
 $runnerProcesses = Get-CimInstance Win32_Process -Filter "Name='bun.exe'" |
   Where-Object { $_.CommandLine -match '(?i)[\\/]scripts[\\/]cli\.ts"?\s+runner\s+run(?:\s|$)' }
@@ -121,7 +149,8 @@ $runnerProcesses | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 opensession runner run
 ```
 
-When the machine-wide work is finished, close that window and
+When the machine-wide work is finished, close that window, then
+`schtasks /Change /TN OpenSessionRunner /ENABLE` and
 `schtasks /Run /TN OpenSessionRunner` to hand the channel back to the ordinary
 per-user task. A Runner left permanently elevated gives every delegated command
 administrator rights it does not need.

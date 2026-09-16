@@ -101,6 +101,7 @@ import {
   sessionStartContext,
 } from "./context-log";
 import { wrapContext } from "./prompt-context";
+import { stagePromptImages, withImagesNote } from "./prompt-attachments";
 import {
   EMPTY_REPLY_RETRY_PROMPT,
   githubCredentialUser,
@@ -124,16 +125,17 @@ import {
 import { transcript } from "./actor-transcript";
 import { transcriptForwarder } from "./transcript-forward";
 import { gitIdentityEnv, type GitIdentity } from "./shared/user-mappings";
-import { isMachineActor, providerAccountUser } from "./session-actors";
+import { humanPrompter, providerAccountUser } from "./session-actors";
 import {
   GITHUB_RUN_AUTH_FILE_ENV,
-  githubUserLoginForRun,
+  githubRunOwnerLogin,
   githubUserRunEnv,
   projectedGithubRunEnv,
 } from "./github-auth";
 import { ensureAgentAwsCredsFile } from "./aws-creds";
 import { buildEngineSwitchHandoffNote } from "./fork-handoff";
 import { piAnthropicTransport, piEngineEnabled } from "./pi-config";
+import { assistantProseFields } from "./transcript-media";
 import { buildPiAnthropicProvider } from "./pi-anthropic-provider";
 import {
   createPiRuntimeBinding,
@@ -158,7 +160,11 @@ import {
   toPiModel,
 } from "./models";
 import { resolveWorkspaceModelPreset } from "./workspace-model-presets";
-import { expandSkillCommand, skillSearchPaths } from "./skill-paths";
+import {
+  expandSkillCommand,
+  gatePstackSkills,
+  skillSearchPaths,
+} from "./skill-paths";
 import type { ResolvedWorkspaceModelPreset } from "./workspace-model-presets";
 import type { TranscriptEntry } from "./types";
 import type { RunAgentOpts } from "./agent-runner";
@@ -229,6 +235,24 @@ export async function runGithubEnv(input: {
   if (input.githubKindRun && input.launcherEnv?.GH_TOKEN)
     return input.launcherEnv;
   return githubCodeRunEnv(input.cwd);
+}
+
+/** Person-started code turns follow the live checkout's direct-push workflow.
+ * Without personal GitHub authority they still cannot merge or approve PRs.
+ * Ask, unattended, and machine-authored runs retain the full guard. */
+export function runGithubMergeGuard(input: {
+  isCode: boolean;
+  ownerTurn: boolean;
+  ownerLogin: string | null;
+  baseBranch: string;
+  /** The run is in the registered repo's main checkout, not an isolated worktree. */
+  sharedCheckout: boolean;
+}): MergeGuard | undefined {
+  if (input.isCode && input.ownerTurn) {
+    if (input.ownerLogin) return undefined;
+    if (input.sharedCheckout) return {};
+  }
+  return { baseBranch: input.baseBranch };
 }
 
 /** Child-env name carrying the `Co-authored-by` trailer an agent run must put
@@ -324,10 +348,10 @@ export function piAssistantTranscriptEntries(
       entries.push({
         id: proseIndex === 0 ? messageId : `${messageId}-b${proseIndex}`,
         type: "assistant",
-        content: prose,
         timestamp,
         model,
         ...(isReasoning ? { isReasoning: true } : {}),
+        ...assistantProseFields(prose),
       });
       proseIndex++;
     } else if (block.type === "toolCall" && block.id) {
@@ -1508,8 +1532,7 @@ export function makePiBashTool(input: {
   sessionId?: string;
   runKind?: string;
   publicationPolicy?: PublicationPolicy;
-  /** Every run: no merge, no approve, no base-branch update
-   *  (mergeGuardDenyReason). */
+  /** Runs without a connected person's code authority cannot merge or approve. */
   mergeGuard?: MergeGuard;
   /** Immutable Open Session run cancellation. Kept separate from Pi's tool
    * signal because AgentSession.abort() can leave an active tool signal live. */
@@ -1746,12 +1769,14 @@ interface PiAccountWalk {
   /** The first attempt's user-line uuid, reused by every replay so the
    *  transcript row upserts instead of duplicating the person's message. */
   promptEntryId?: string;
+  /** Resume completed messages and tool results instead of replaying the prompt. */
+  continuation?: AgentSession["sessionManager"];
+  cancelled?: boolean;
 }
 
-/** An init can repeat, and a live usage snapshot is replaced by the next
- * attempt. Everything else has user-visible or durable meaning and makes
- * replay unsafe. Exported so the in-band usage-limit regression stays pinned. */
-export function piStreamEventBlocksAccountRotation(
+/** Bookkeeping can repeat, but output or tool activity requires continuing the
+ * native conversation rather than replaying the original prompt. */
+export function piStreamEventRequiresAccountContinuation(
   event: Pick<StreamEvent, "type">,
 ): boolean {
   return event.type !== "init" && event.type !== "usage_snapshot";
@@ -1772,19 +1797,44 @@ export function piStreamEventBlocksAccountRotation(
  * pi/openai picks once at bind time (the seeded credential is built before
  * the SDK is even imported), so there is no per-request catch to rotate from
  * and the loop belongs here. Both sides share one contract: an exclusion set
- * threaded into the picker, rotation only while
- * nothing has streamed, and a strict pin that refuses rather than moving onto
- * an account the person did not choose.
+ * threaded into the picker and a strict pin that refuses rather than moving
+ * onto an account the person did not choose. Once output has streamed, retain
+ * the native session and ask it to continue instead of replaying the prompt.
  */
 export async function* runPi(
   opts: RunAgentOpts,
   model: string,
 ): AsyncGenerator<StreamEvent> {
   const walk: PiAccountWalk = { excluded: new Set(), rotate: false };
+  let priorUsage: TurnUsage | undefined;
   for (;;) {
     walk.rotate = false;
-    yield* runPiAttempt(opts, model, walk);
-    if (!walk.rotate) return;
+    let latestUsage = priorUsage;
+    for await (const event of runPiAttempt(opts, model, walk)) {
+      if (event.usage) {
+        const usage = event.usage;
+        latestUsage = {
+          ...usage,
+          inputTokens: (priorUsage?.inputTokens || 0) + usage.inputTokens,
+          outputTokens: (priorUsage?.outputTokens || 0) + usage.outputTokens,
+          cacheReadTokens:
+            (priorUsage?.cacheReadTokens || 0) + usage.cacheReadTokens,
+          cacheCreationTokens:
+            (priorUsage?.cacheCreationTokens || 0) + usage.cacheCreationTokens,
+          costUsd: (priorUsage?.costUsd || 0) + (usage.costUsd || 0),
+        };
+        yield { ...event, usage: latestUsage };
+      } else if (
+        priorUsage &&
+        (event.type === "error" || event.type === "done")
+      ) {
+        yield { ...event, usage: priorUsage };
+      } else {
+        yield event;
+      }
+    }
+    if (!walk.rotate || walk.cancelled) return;
+    priorUsage = latestUsage;
   }
 }
 
@@ -1859,8 +1909,13 @@ async function* runPiAttempt(
     opts;
   // `user` remains the exact prompt sender for MCP/GitHub policy and audit.
   // Provider accounts are different: synthetic continuation senders inherit
-  // the interactive session owner's personal subscription.
-  const accountUser = providerAccountUser(user, opts.mcpGrantUser);
+  // the interactive session owner's personal subscription, and a person who
+  // prompts an automation-owned session (which passes no `user`) still
+  // spends their own subscription through `accountUser`.
+  const accountUser = providerAccountUser(
+    opts.accountUser ?? user,
+    opts.mcpGrantUser,
+  );
   const isAsk = mode === "ask";
   const isScratch = mode === "scratch";
 
@@ -1970,8 +2025,8 @@ async function* runPiAttempt(
       markCodexExhausted(account.id, parsed.modelID);
     else markXaiExhausted(account.id, parsed.modelID);
   };
-  // Has the reader seen replay-unsafe output yet? A rotation replays the whole
-  // attempt, so it may only run before model text or tool activity has escaped.
+  // Has the reader seen replay-unsafe output yet? After text or tool activity
+  // escapes, rotation must continue the native session, not replay this prompt.
   // `usage_snapshot` does NOT close the walk: Pi emits a zero-token snapshot
   // with an in-band usage-limit terminal, and treating that bookkeeping event
   // as model output strands the rest of the account pool. (The Anthropic side's
@@ -2015,9 +2070,10 @@ async function* runPiAttempt(
 
   /** Take the rotation, or return false and let the caller surface the
    *  failure. Records the burn, audits the switch and closes this attempt's
-   *  audit; runPi replays the attempt on the next account. */
+   *  audit; runPi resumes or replays the attempt on the next account. */
   const takeAccountRotation = (errorText: string): boolean => {
-    if (sawStreamedOutput || !pickedAccount) return false;
+    if (!pickedAccount || (sawStreamedOutput && !session?.sessionManager))
+      return false;
     const next = nextPoolAccount();
     if (!next) return false;
     console.warn(
@@ -2031,10 +2087,17 @@ async function* runPiAttempt(
       account: pickedAccount.masked,
       account_switch_to: next.masked,
     });
+    if (sawStreamedOutput && session)
+      walk.continuation = session.sessionManager;
     walk.excluded.add(pickedAccount.id);
     walk.rotate = true;
     reachedTerminal = true;
-    endTurn({ ok: false, pi_session_id: piSessionId, error: errorText });
+    endTurn({
+      ok: false,
+      pi_session_id: piSessionId,
+      ...usageAuditFields(),
+      error: errorText,
+    });
     return true;
   };
 
@@ -2072,6 +2135,7 @@ async function* runPiAttempt(
           model,
           effort: opts.effort,
           fastMode: opts.fastMode,
+          pstackMode: opts.pstackMode,
           accountId: opts.accountId,
           accountStrict: opts.accountStrict,
           usageCredits: opts.usageCredits,
@@ -2095,31 +2159,38 @@ async function* runPiAttempt(
     // The repo owning this run's cwd, or undefined for a repo-less one (a
     // scratch dir, a repo-less ask session). Dynamic import to avoid a static
     // module-init cycle through "./worktree".
-    const cwdRepo = await (async () => {
+    const { cwdRepo, sharedCheckout } = await (async () => {
       try {
-        return (await import("./worktree")).repoForPathOrNull(cwd);
+        const { repoForPathOrNull, canonicalPath } = await import("./worktree");
+        const cwdRepo = repoForPathOrNull(cwd);
+        return {
+          cwdRepo,
+          // Use the actual checkout, not the repo's default for NEW sessions:
+          // a shared-checkout repo can also have isolated worktree sessions.
+          sharedCheckout:
+            !!cwdRepo && canonicalPath(cwd) === canonicalPath(cwdRepo.repo),
+        };
       } catch {
-        return undefined;
+        return { cwdRepo: undefined, sharedCheckout: false };
       }
     })();
     // The person this turn acts for, if any: the sender, unless it is the
     // synthetic auto-continue driver, in which case the author fallback
     // names the session owner (#322). A machine sender (a review handoff, a
-    // worker report, an automation) is nobody. An owner turn mounts the
-    // gateway's owner-identity tools, describes PR authorship as theirs in
-    // the session context, and in code mode puts their connected token in
-    // the shell (runGithubEnv); every other run holds an App token.
+    // worker report, an automation) is nobody. In code mode an owner turn
+    // puts their connected token in the shell (runGithubEnv) and describes
+    // PR authorship as theirs; every other run holds an App token.
     const githubUser = githubCredentialUser(user, author?.name);
     const ownerTurn =
       !policy.unattended &&
       INTERACTIVE_KINDS.has(baseJournalKind(journal?.kind)) &&
-      !isMachineActor(githubUser);
-    const githubUserLogin = ownerTurn
-      ? githubUserLoginForRun(githubUser)
-      : null;
-    // What the shell credential may do to the default branch is GitHub's
-    // ruleset decision; the merge guard below is the tripwire in front of
-    // it and applies whichever token the run holds.
+      humanPrompter(githubUser) !== null;
+    // On a remote host this reads the launcher's projected marker, not the
+    // person store, so a sandboxed owner turn drops the guard exactly when
+    // a host run would.
+    const githubUserLogin = ownerTurn ? githubRunOwnerLogin(githubUser) : null;
+    // GitHub permissions and repository rulesets bound the chosen credential.
+    // Ask, unattended, and publication-policy command gates still apply.
     const githubKindRun = baseJournalKind(journal?.kind).startsWith("github-");
     const githubEnv = await runGithubEnv({
       isCode: mode === "code",
@@ -2130,23 +2201,13 @@ async function* runPiAttempt(
       cwd,
     });
     const agentGitEnv = await agentGitIdentityEnv(author);
-    // A run INSIDE a shared self-development checkout pushes its base branch
-    // by design (AGENTS.md); there the rulesets alone decide, and only merge
-    // and approve are refused. Everywhere else, a worktree of that same
-    // repository included, the base branch is off limits.
-    const inSharedCheckout =
-      !!cwdRepo?.sharedCheckout && resolve(cwd) === resolve(cwdRepo.repo);
-    const mergeGuard: MergeGuard = {
-      ...(inSharedCheckout
-        ? {}
-        : { baseBranch: cwdRepo?.defaultBranch || "main" }),
-      ...(ownerTurn &&
-      opts.inProcessMcp &&
-      "opensession-pull-requests" in opts.inProcessMcp
-        ? { proposeTool: "propose_merge" }
-        : {}),
-    };
-
+    const mergeGuard = runGithubMergeGuard({
+      isCode: mode === "code",
+      ownerTurn,
+      ownerLogin: githubUserLogin,
+      baseBranch: cwdRepo?.defaultBranch || "main",
+      sharedCheckout,
+    });
     const binding = await createPiRuntimeBinding({
       providerID: parsed.providerID,
       modelID: parsed.modelID,
@@ -2543,6 +2604,12 @@ async function* runPiAttempt(
       // shipped skill dead in the product.
       noSkills: true,
       additionalSkillPaths: skillSearchPaths(cwd),
+      // The pstack family stays loaded but invisible to the model until the
+      // session turns pstack mode on (composer toggle or /pstack).
+      skillsOverride: (base) => ({
+        ...base,
+        skills: gatePstackSkills(base.skills, opts.pstackMode),
+      }),
       noPromptTemplates: true,
       noThemes: true,
       // Pi's context-file discovery walks every ancestor of cwd up to /
@@ -2579,9 +2646,10 @@ async function* runPiAttempt(
     // Cross-engine handoff notes ride the prompt. A detached host also gets a
     // server-read seed snapshot for the resume-miss case because it must never
     // open transcripts.db itself.
-    const resumePath = opts.sessionId
-      ? findPiSessionFile(sessionDir, opts.sessionId)
-      : null;
+    const resumePath =
+      !walk.continuation && opts.sessionId
+        ? findPiSessionFile(sessionDir, opts.sessionId)
+        : null;
     // Resume-miss bridge: pi's SessionManager buffers a session's jsonl until
     // its first ASSISTANT message, so a turn that died before any assistant
     // output (bridge 429 pre-token, instant cancel) journaled a piSessionId
@@ -2589,7 +2657,12 @@ async function* runPiAttempt(
     // a silently-fresh session would drop the model's context while the store
     // still shows the turns. Bridge it from the store ourselves.
     let resumeMissNote: string | null = null;
-    if (opts.sessionId && !resumePath && unifiedSessionId) {
+    if (
+      !walk.continuation &&
+      opts.sessionId &&
+      !resumePath &&
+      unifiedSessionId
+    ) {
       try {
         const tail = (
           transcriptForwarder()
@@ -2614,9 +2687,11 @@ async function* runPiAttempt(
         console.warn("[pi-runner] resume-miss handoff build failed:", e);
       }
     }
-    const sessionManager = resumePath
-      ? sdk.SessionManager.open(resumePath, sessionDir)
-      : sdk.SessionManager.create(cwd, sessionDir);
+    const sessionManager =
+      walk.continuation ??
+      (resumePath
+        ? sdk.SessionManager.open(resumePath, sessionDir)
+        : sdk.SessionManager.create(cwd, sessionDir));
 
     // Preset effort override (workspace preset's pin first, then the built-in
     // preset's) falls back to the session's own effort.
@@ -2662,7 +2737,7 @@ async function* runPiAttempt(
     // tool guidance. Record it once for the collapsed transcript-start audit
     // row. Later turns can change ambient memory, but this row deliberately
     // answers what preceded the session's initial message.
-    if (!opts.sessionId) {
+    if (!opts.sessionId && !walk.continuation) {
       const activeToolNames = new Set(session.getActiveToolNames());
       await logStandingContext({
         sessionId: unifiedSessionId,
@@ -2708,6 +2783,7 @@ async function* runPiAttempt(
           model,
           effort: opts.effort,
           fastMode: opts.fastMode,
+          pstackMode: opts.pstackMode,
           accountId: opts.accountId,
           accountStrict: opts.accountStrict,
           usageCredits: opts.usageCredits,
@@ -2735,16 +2811,53 @@ async function* runPiAttempt(
       images?: ImageInput[];
       steerId?: string;
     }> = [];
+    // Every touch of pi's queue goes through this chain, in call order. The
+    // bookkeeping above it (pending entry, boundary flag, the caller's
+    // receipt) stays synchronous; only the engine enqueue waits, because
+    // staging an attachment is async and an in-process run shares the
+    // gateway's event loop. Ordering the retraction rebuild on the same
+    // chain means a steer still being staged is never enqueued twice, and a
+    // steer retracted mid-staging is never enqueued at all.
+    let engineQueue: Promise<void> = Promise.resolve();
+    // Steps still to run or running. The pump below reads it before trusting
+    // pi's pendingMessageCount: a steer accepted just before the prompt
+    // settled may not have reached pi's queue yet.
+    let engineQueueDepth = 0;
+    const onEngineQueue = (step: () => Promise<void>, what: string) => {
+      engineQueueDepth++;
+      engineQueue = engineQueue
+        .then(step)
+        .catch((e) => {
+          console.warn(`[pi-runner] ${what} failed:`, e);
+        })
+        .finally(() => {
+          engineQueueDepth--;
+        });
+    };
     handle.steer = (text, images, steerId) => {
       // Same skill expansion as the prompt path. The queue holds the expanded
       // text so the delivery match stays exact; the audit line below still
       // records what the person typed.
-      const steerText = expandSkillCommand(text, loader.getSkills().skills);
+      const entry = {
+        text: expandSkillCommand(text, loader.getSkills().skills),
+        images,
+        steerId,
+      };
       steeringBoundaryPending = true;
-      pendingSteers.push({ text: steerText, images, steerId });
-      void liveSession.steer(steerText, piImages(images)).catch((e) => {
-        console.warn("[pi-runner] steer failed:", e);
-      });
+      pendingSteers.push(entry);
+      onEngineQueue(async () => {
+        // Attached images are staged into this run's scratch dir, in this
+        // process, so the note names paths the engine's tools can read (see
+        // prompt-attachments.ts). The pending entry holds the noted text
+        // before pi ever sees it: delivery matches pi's echo against it, and
+        // a retraction replays it verbatim.
+        entry.text = withImagesNote(
+          entry.text,
+          await stagePromptImages(opts.scratchDir, images),
+        );
+        if (!pendingSteers.includes(entry)) return; // retracted meanwhile
+        await liveSession.steer(entry.text, piImages(images));
+      }, "steer");
       audit({
         ...auditBase,
         direction: "in",
@@ -2756,16 +2869,17 @@ async function* runPiAttempt(
       retractPendingSteer(pendingSteers, steerId, (remaining) => {
         // Pi exposes exact delivery identity only in our wrapper. Rebuild its
         // whole queue from our richer copy so duplicate text and images keep
-        // their original order while the selected id disappears.
+        // their original order while the selected id disappears. The entries
+        // are read when the step runs, so one still being staged replays with
+        // its final (noted) text.
         steeringBoundaryPending = remaining.length > 0;
-        liveSession.clearQueue();
-        for (const steer of remaining) {
-          void liveSession
-            .steer(steer.text, piImages(steer.images))
-            .catch((e) => {
-              console.warn("[pi-runner] steer replay failed:", e);
-            });
-        }
+        onEngineQueue(async () => {
+          liveSession.clearQueue();
+          for (const steer of remaining) {
+            if (!pendingSteers.includes(steer)) continue; // delivered or retracted since
+            await liveSession.steer(steer.text, piImages(steer.images));
+          }
+        }, "steer replay");
         audit({
           ...auditBase,
           direction: "in",
@@ -2785,7 +2899,8 @@ async function* runPiAttempt(
     const queue: StreamEvent[] = [];
     let wake: (() => void) | null = null;
     const push = (ev: StreamEvent) => {
-      if (piStreamEventBlocksAccountRotation(ev)) sawStreamedOutput = true;
+      if (piStreamEventRequiresAccountContinuation(ev))
+        sawStreamedOutput = true;
       queue.push(ev);
       const w = wake;
       wake = null;
@@ -2827,7 +2942,12 @@ async function* runPiAttempt(
     const promptForEngine = [
       wrapContext(sessionContext, "session"),
       ...(resumeMissNote ? [wrapContext(resumeMissNote, "handoff")] : []),
-      promptWithSkill,
+      walk.continuation
+        ? wrapContext(
+            "The previous account reached its usage limit. Continue the unfinished task from the existing conversation and completed tool results. Do not restart the task or repeat completed actions. Finish with a reply to the user.",
+            "auto-continue",
+          )
+        : promptWithSkill,
     ].join("\n\n");
     // Injected BELOW runOnModel's choke point, so that call never saw this
     // payload — log it here, exactly as the previous runner runner does for its own
@@ -3099,7 +3219,7 @@ async function* runPiAttempt(
     } else {
       void session
         .prompt(promptForEngine, {
-          images: piImages(opts.images),
+          images: walk.continuation ? undefined : piImages(opts.images),
           expandPromptTemplates: false,
         })
         .then(
@@ -3123,6 +3243,14 @@ async function* runPiAttempt(
     while (true) {
       while (queue.length) yield queue.shift()!;
       if (promptOutcome) {
+        if (engineQueueDepth > 0) {
+          // An accepted steer is still being staged, so pi's queue count is
+          // not final yet. steerPiRun already told the caller "accepted";
+          // finishing now would drop it silently. Wait for the chain, then
+          // re-read everything (more steers may have joined meanwhile).
+          await engineQueue;
+          continue;
+        }
         if (
           promptOutcome.ok &&
           !abort.signal.aborted &&
@@ -3266,9 +3394,8 @@ async function* runPiAttempt(
     // Rotate rather than end the turn. This is the COMMON half of the walk:
     // a provider usage limit normally arrives as an in-band terminal (pi's
     // own error result), not as a throw, so without this the openai walk
-    // would only ever engage on pre-init failures. takeAccountRotation is a
-    // no-op once anything has streamed, so a limit that lands mid-answer
-    // still surfaces here instead of replaying what the reader already saw.
+    // would only ever engage on pre-init failures. A mid-turn limit retains
+    // the native session so the next account continues completed work.
     if (terminalUsageLimit && takeAccountRotation(String(terminal.content))) {
       return;
     }
@@ -3349,6 +3476,7 @@ async function* runPiAttempt(
         session.dispose();
       } catch {}
     }
+    walk.cancelled ||= abort.signal.aborted;
     for (const key of registeredKeys) {
       if (activeRuns.get(key) === handle) activeRuns.delete(key);
     }

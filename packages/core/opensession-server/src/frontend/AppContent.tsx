@@ -24,12 +24,15 @@ import { refWebPanel } from "./components/FeedWebPane";
 import { FirstMile } from "./components/FirstMile";
 import { Goals } from "./components/Goals";
 import { IconDesk, IconSidebarLeft } from "./components/icons";
+import { BlockExpandHost } from "./components/BlockExpandDialog";
 import { MediaLightboxHost } from "./components/MediaLightbox";
 import { NavigationProvider } from "./components/NavigationProvider";
 import { NewSession } from "./components/NewSession";
 import { PrQueuePreview } from "./components/PrQueuePreview";
 import { Prs } from "./components/Prs";
+import { Issues } from "./components/Issues";
 import { Reports } from "./components/Reports";
+import { Databases } from "./components/Databases";
 import { RestartOverlay } from "./components/RestartOverlay";
 import { Reviews } from "./components/Reviews";
 import { RunningCloseDialog } from "./components/RunningCloseDialog";
@@ -74,14 +77,17 @@ import { useWorkspaces } from "./hooks/useWorkspaces";
 import { getActiveViewTab, saveActiveViewTab } from "./lib/active-view-tab";
 import { cachedRepos, resolveWorkspaceApi } from "./lib/api";
 import { buildAppCommandActions } from "./components/app-command-actions";
-import { isToolView, parseRoute, routePath } from "./lib/app-route";
+import { isToolView, parseRoute, routePath, type Route } from "./lib/app-route";
+import { useDeskShowNavigation } from "./hooks/useDeskShowNavigation";
 import {
   APP_BODY,
   DETAIL_TOPBAR,
   DETAIL_TOPBAR_ACTIONS,
   DETAIL_TOPBAR_TITLE,
   DETAIL_TOPBAR_TITLE_TEXT,
+  LIST_COLUMN_VIEWS,
   tabSplitDropPreviewClass,
+  TOPBAR_ACTION_VIEWS,
 } from "./lib/app-shell-classes";
 import { appTopbarTitle } from "./lib/app-topbar-title";
 import type { AppProps, PendingCreateDraft } from "./lib/app-types";
@@ -107,6 +113,7 @@ import {
   receivePins,
   unpin,
 } from "./lib/pins";
+import { resyncUserMap } from "./lib/user-map";
 import { ARCHIVED_PAGE_COLUMN } from "./lib/archived-classes";
 import { PR_PAGE_COLUMN } from "./lib/pr-list-classes";
 import { repoLabel } from "./lib/repo-label";
@@ -114,10 +121,6 @@ import { NO_REPO } from "./lib/session-repo";
 import type { NewTabMorphOrigin } from "./lib/session-tabs-types";
 import { SIDEBAR_CHROME_BTN } from "./lib/sidebar-classes";
 import { useSidebarFilter } from "./lib/sidebar-filter";
-import {
-  nextRenderedSidebarChat,
-  nextUnreadRenderedWorkspaceItem,
-} from "./lib/sidebar-next";
 import { ASK_BAND } from "./lib/sidebar-workspaces";
 import { saveTabSplit } from "./lib/split-tabs";
 import { getTabColors } from "./lib/tab-colors";
@@ -133,6 +136,7 @@ import { Button } from "./ui/button";
 import { cn } from "./ui/cn";
 import { EmptyState, LoadingState } from "./ui/state";
 import { ToastHost, toast } from "./ui/toast";
+import { PulseDot } from "./ui/status";
 import { Tooltip } from "./ui/tooltip";
 import { TopBar, TopBarActions, TopBarTitle } from "./ui/top-bar";
 
@@ -296,7 +300,7 @@ export function AppContent({
     workspaces,
     loaded: workspacesLoaded,
     refresh: refreshWorkspaces,
-  } = useWorkspaces();
+  } = useWorkspaces(route.view === "workspace" ? route.id : undefined);
   // Read by the PR-link opener, which runs from a document-level listener and
   // therefore can't close over the render's value.
   const workspacesRef = useRef(workspaces);
@@ -380,9 +384,10 @@ export function AppContent({
     borrowedSidebar,
     mobileDetail,
     sidebarRef,
-    nextChatRef,
+    unreadChats,
+    allChatsRead,
     nextChatAvailable,
-    setNextChatAvailable,
+    setUnreadChats,
     openPrRef,
   } = documentInteractions;
 
@@ -469,6 +474,9 @@ export function AppContent({
     setShortcutsOpen,
     taskCount,
   } = appViewState;
+  // A Desk voice call outlives a minimised Desk; the trigger shows it is live.
+  const [deskCallActive, setDeskCallActive] = useState(false);
+  const deskCallShown = deskCallActive && !deskOverlay.open;
   const { closePalette, startNewSessionCreate } = useNewSessionCreateStart({
     getCurrentRoute,
     navigate,
@@ -555,6 +563,10 @@ export function AppContent({
       }
       if (msg.type === "pins_changed") {
         receivePins(msg.user, msg.pins);
+        return;
+      }
+      if (msg.type === "user_map_changed") {
+        void resyncUserMap(msg.map, msg.user);
         return;
       }
       if (msg.type === "mention") {
@@ -791,6 +803,16 @@ export function AppContent({
     openReviewForSession,
   } = workspacePanes;
 
+  useDeskShowNavigation({
+    sessions,
+    wsKeyFor,
+    openReviewForSession,
+    setActiveViewTabState,
+    navigate,
+    isPhone,
+    setDeskOverlay,
+  });
+
   const sessionTabs = useSessionTabs({
     routing: {
       route,
@@ -933,26 +955,12 @@ export function AppContent({
   // hair lighter than a filled triangle / globe at the same nominal size).
   const panelIcon = <IconSidebarLeft size={24} />;
   const sidebarToggleKeys = useShortcutKeys("sidebar-toggle");
-  // Rendered rows are the navigation order. Filters, grouping and collapsed
-  // sections all change that order, so backing session arrays cannot answer
-  // which chat is actually next on screen. Ready unread work stays the priority;
-  // when none exists, continue from the selected chat instead.
-  const openNextChat = () => {
-    const sidebar = document.querySelector("[data-sidebar-list]");
-    const workspaceItems = Array.from(
-      sidebar?.querySelectorAll<HTMLButtonElement>("button[data-ws-row]") ?? [],
-    );
-    const renderedItems = Array.from(
-      sidebar?.querySelectorAll<HTMLButtonElement>(
-        "button[data-sidebar-row]",
-      ) ?? [],
-    );
-    const next =
-      nextUnreadRenderedWorkspaceItem(workspaceItems) ??
-      nextRenderedSidebarChat(renderedItems);
-    if (!next) return;
-    next.scrollIntoView({ block: "nearest" });
-    next.click();
+  // The same destination list drives the button, popover and shortcut.
+  const openNextChat = (requestedId?: string) => {
+    const id = requestedId ?? unreadChats[0]?.id;
+    if (!id || !unreadChats.some((chat) => chat.id === id)) return;
+    setActiveViewTab(null);
+    navigate({ view: "session", id });
   };
   const currentTheme = effectiveTheme();
   const commandActions = buildAppCommandActions({
@@ -1074,9 +1082,6 @@ export function AppContent({
     if (route.view !== "prs") navigate({ view: "prs" });
     setDraftFocusSeq((seq) => seq + 1);
   };
-  useLayoutEffect(() => {
-    nextChatRef.current = openNextChat;
-  });
   const renderSessionPane = (
     viewerSession: UnifiedSession,
     socket: ReturnType<typeof useWebSocket>,
@@ -1172,9 +1177,12 @@ export function AppContent({
   );
 
   const navigationActions = {
+    unreadChats,
+    allChatsRead,
     goBack,
     openNextChat,
     openPrs: () => navigate({ view: "prs" }),
+    openIssues: () => navigate({ view: "issues" }),
     openFeed: () => navigate({ view: "feed" }),
     openSettings: (section) => navigate({ view: "settings", section }),
     openTasks: () => navigate({ view: "tasks" }),
@@ -1183,6 +1191,10 @@ export function AppContent({
     openPlain: () => navigate({ view: "plain" }),
     openSupportTinder: () => navigate({ view: "supporttinder" }),
     openReports: (target) => navigate({ view: "reports", ...target }),
+    openDatabases: (databaseId) =>
+      navigate(
+        databaseId ? { view: "databases", databaseId } : { view: "databases" },
+      ),
     openAnalytics: () => navigate({ view: "analytics" }),
     openArchived: () => navigate({ view: "archived" }),
     openCatchUp: () => navigate({ view: "catchup" }),
@@ -1214,6 +1226,7 @@ export function AppContent({
     <UserGate>
       <RestartOverlay connected={connected} addHandler={addHandler} />
       <MediaLightboxHost />
+      <BlockExpandHost />
       <ToastHost container={settingsActive ? null : detailPaneEl} />
       <RunningCloseDialog {...runningCloseDialog} />
       <div className="app">
@@ -1243,6 +1256,10 @@ export function AppContent({
               topbarTitle={topbarTitle}
               phoneTitleHandedOver={phoneTitleHandedOver}
               commandMenuRef={commandMenuRef}
+              deskCallActive={deskCallShown}
+              onOpenDesk={() =>
+                setDeskOverlay({ open: true, origin: "bottom-right" })
+              }
               setAppHeaderEl={setAppHeaderEl}
               setHeaderRepoEl={setHeaderRepoEl}
               setHeaderModelEl={setHeaderModelEl}
@@ -1348,7 +1365,7 @@ export function AppContent({
                   interactions={{
                     isPhone,
                     sidebarRef,
-                    setNextChatAvailable,
+                    setUnreadChats,
                   }}
                   navigation={{
                     taskCount: appViewState.taskCount,
@@ -1406,8 +1423,7 @@ export function AppContent({
                         <TopBarTitle
                           className={cn(
                             DETAIL_TOPBAR_TITLE,
-                            (route.view === "prs" || route.view === "feed") &&
-                              PR_PAGE_COLUMN,
+                            LIST_COLUMN_VIEWS.has(route.view) && PR_PAGE_COLUMN,
                             route.view === "archived" && ARCHIVED_PAGE_COLUMN,
                           )}
                         >
@@ -1421,8 +1437,7 @@ export function AppContent({
                           <TopBarActions
                             className={cn(
                               DETAIL_TOPBAR_ACTIONS,
-                              (route.view === "prs" ||
-                                route.view === "archived") &&
+                              TOPBAR_ACTION_VIEWS.has(route.view) &&
                                 "ml-4 flex-1 pl-0",
                             )}
                             ref={setTopbarActionsEl}
@@ -1551,6 +1566,22 @@ export function AppContent({
                       onOpenNewSession={openPrefilledSession}
                       addHandler={addHandler}
                     />
+                  ) : route.view === "databases" ? (
+                    <Databases
+                      selectedDatabaseId={route.databaseId}
+                      selectedTable={route.table}
+                      onSelect={(databaseId, table) =>
+                        navigate(
+                          { view: "databases", databaseId, table },
+                          { replace: true },
+                        )
+                      }
+                      onBack={() =>
+                        navigate({ view: "databases" }, { replace: true })
+                      }
+                      onOpenSession={(id) => navigate({ view: "session", id })}
+                      addHandler={addHandler}
+                    />
                   ) : route.view === "analytics" ? (
                     <Analytics />
                   ) : route.view === "feed" ? (
@@ -1582,6 +1613,12 @@ export function AppContent({
                       send={send}
                       addHandler={addHandler}
                       onOpenSession={(id) => navigate({ view: "session", id })}
+                    />
+                  ) : route.view === "issues" ? (
+                    <Issues
+                      sessions={sessions}
+                      onOpenSession={(id) => navigate({ view: "session", id })}
+                      topbarActionsEl={topbarActionsEl}
                     />
                   ) : route.view === "reviews" ? (
                     <Reviews
@@ -1839,7 +1876,11 @@ export function AppContent({
 				    on the root page (see .desk-fab). ⌘J and the command palette still
 				    summon it too. */}
             {(!isPhone || !mobileDetail) && (
-              <Tooltip label="Desk" side="left" shortcut={["⌘", "J"]}>
+              <Tooltip
+                label={deskCallShown ? "Desk call in progress" : "Desk"}
+                side="left"
+                shortcut={["⌘", "J"]}
+              >
                 <button
                   className={DESK_FAB}
                   style={
@@ -1854,9 +1895,18 @@ export function AppContent({
                   onClick={() =>
                     setDeskOverlay({ open: true, origin: "bottom-right" })
                   }
-                  aria-label="Open the Desk"
+                  aria-label={
+                    deskCallShown
+                      ? "Desk call in progress. Open the Desk"
+                      : "Open the Desk"
+                  }
                 >
                   <IconDesk size={24} />
+                  {/* The call keeps running behind a minimised Desk; the dot
+                      says so until the call ends or Desk is back up. */}
+                  {deskCallShown && (
+                    <PulseDot className="absolute top-0 right-0 ring-2 ring-[var(--composer-surface)]" />
+                  )}
                 </button>
               </Tooltip>
             )}
@@ -1870,6 +1920,7 @@ export function AppContent({
               }
               phone={isPhone}
               onOpenSession={(id) => navigate({ view: "session", id })}
+              onCallActiveChange={setDeskCallActive}
             />
 
             {/* ⌘K command palette — actions, PRs, and sessions across every view. */}

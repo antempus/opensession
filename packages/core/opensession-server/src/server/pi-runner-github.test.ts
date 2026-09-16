@@ -2,9 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { GITHUB_RUN_AUTH_FILE_ENV } from "./github-auth";
+import { GITHUB_RUN_AUTH_FILE_ENV, githubRunOwnerLogin } from "./github-auth";
 import { AUTO_CONTINUE_USER, githubCredentialUser } from "./auto-continue";
-import { githubCodeRunEnv, githubReadRunEnv, runGithubEnv } from "./pi-runner";
+import { mergeGuardDenyReason } from "./command-policy";
+import { humanPrompter } from "./session-actors";
+import {
+  githubCodeRunEnv,
+  githubReadRunEnv,
+  runGithubEnv,
+  runGithubMergeGuard,
+} from "./pi-runner";
 
 const keys = [
   "OPENSESSION_CONFIG",
@@ -19,6 +26,120 @@ afterEach(() => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+});
+
+describe("GitHub publication authority", () => {
+  test("a connected person's code turn follows repository policy", () => {
+    expect(
+      runGithubMergeGuard({
+        isCode: true,
+        ownerTurn: true,
+        ownerLogin: "alex",
+        baseBranch: "main",
+        sharedCheckout: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  test("a person's shared-checkout code turn may push without personal GitHub authority", () => {
+    const guard = runGithubMergeGuard({
+      isCode: true,
+      ownerTurn: true,
+      ownerLogin: null,
+      baseBranch: "main",
+      sharedCheckout: true,
+    });
+    expect(guard).toEqual({});
+    for (const command of [
+      "git push origin main",
+      "git push origin HEAD:main",
+      "git push origin HEAD:refs/heads/main",
+    ]) {
+      expect(mergeGuardDenyReason(command, guard!)).toBeUndefined();
+    }
+    expect(mergeGuardDenyReason("gh pr merge 12", guard!)).toContain(
+      "cannot merge",
+    );
+    expect(mergeGuardDenyReason("gh pr review 12 --approve", guard!)).toContain(
+      "approving review",
+    );
+  });
+
+  test("an unconnected person's worktree code turn still protects the base branch", () => {
+    const guard = runGithubMergeGuard({
+      isCode: true,
+      ownerTurn: true,
+      ownerLogin: null,
+      baseBranch: "production",
+      sharedCheckout: false,
+    });
+    expect(guard).toEqual({ baseBranch: "production" });
+    expect(
+      mergeGuardDenyReason("git push origin HEAD:production", guard!),
+    ).toContain("protected base branch");
+  });
+
+  test.each([
+    { sender: undefined, author: undefined },
+    { sender: "", author: undefined },
+    { sender: "   ", author: undefined },
+    { sender: "anonymous", author: undefined },
+    { sender: AUTO_CONTINUE_USER, author: undefined },
+    { sender: AUTO_CONTINUE_USER, author: "   " },
+    { sender: "GitHub", author: "Alex" },
+  ])(
+    "ownerless and machine turns keep protection: %j",
+    ({ sender, author }) => {
+      const githubUser = githubCredentialUser(sender, author);
+      const ownerTurn = humanPrompter(githubUser) !== null;
+      expect(ownerTurn).toBe(false);
+      const guard = runGithubMergeGuard({
+        isCode: true,
+        ownerTurn,
+        ownerLogin: null,
+        baseBranch: "main",
+        sharedCheckout: true,
+      });
+      expect(guard).toEqual({ baseBranch: "main" });
+      expect(
+        mergeGuardDenyReason("git push origin HEAD:main", guard!),
+      ).toContain("protected base branch");
+    },
+  );
+
+  test("a named owner's continuation retains the shared-checkout workflow", () => {
+    const githubUser = githubCredentialUser(AUTO_CONTINUE_USER, "Alex");
+    expect(humanPrompter(githubUser)).toBe("Alex");
+    expect(
+      runGithubMergeGuard({
+        isCode: true,
+        ownerTurn: humanPrompter(githubUser) !== null,
+        ownerLogin: null,
+        baseBranch: "main",
+        sharedCheckout: true,
+      }),
+    ).toEqual({});
+  });
+
+  test("ask, unattended and machine turns keep protection in either checkout mode", () => {
+    for (const sharedCheckout of [true, false]) {
+      for (const input of [
+        { isCode: false, ownerTurn: true, ownerLogin: "alex" },
+        { isCode: false, ownerTurn: true, ownerLogin: null },
+        { isCode: false, ownerTurn: false, ownerLogin: null },
+        { isCode: true, ownerTurn: false, ownerLogin: null },
+        { isCode: true, ownerTurn: false, ownerLogin: "alex" },
+      ]) {
+        expect(
+          runGithubMergeGuard({
+            ...input,
+            sharedCheckout,
+            baseBranch: "production",
+          }),
+        ).toEqual({ baseBranch: "production" });
+      }
+    }
+  });
 });
 
 describe("recovered GitHub code-run credentials", () => {
@@ -280,6 +401,38 @@ describe("which credential a run's shell holds", () => {
       });
       expect(env.GH_TOKEN).toBe("projected-token");
       expect(Object.values(env)).not.toContain("human-token");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a sandboxed owner turn drops the merge guard only for a projected person token", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opensession-run-github-"));
+    try {
+      seed(dir);
+      const guard = (ownerTurn: boolean) =>
+        runGithubMergeGuard({
+          isCode: true,
+          ownerTurn,
+          ownerLogin: ownerTurn ? githubRunOwnerLogin("Alice") : null,
+          baseBranch: "main",
+          sharedCheckout: false,
+        });
+      const auth = join(dir, "github-auth.json");
+      process.env[GITHUB_RUN_AUTH_FILE_ENV] = auth;
+      // The launcher projected Alice's token and named her: the same
+      // repository-policy outcome as her turn on the host.
+      writeFileSync(
+        auth,
+        JSON.stringify({ GH_TOKEN: "projected-token", login: "alice" }),
+      );
+      expect(guard(true)).toBeUndefined();
+      // A machine sender's turn in that sandbox keeps the guard regardless.
+      expect(guard(false)).toEqual({ baseBranch: "main" });
+      // An App projection has no login: guarded, even with a readable store
+      // that says Alice is connected.
+      writeFileSync(auth, JSON.stringify({ GH_TOKEN: "projected-token" }));
+      expect(guard(true)).toEqual({ baseBranch: "main" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

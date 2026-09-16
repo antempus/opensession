@@ -10,7 +10,11 @@ import { withToolPresentations } from "@tellahq/opensession-protocol/tool-presen
 import { SLACK_ID_TO_NAME } from "./shared/user-mappings";
 import { stripContext } from "./prompt-context";
 import { configuredIntegration } from "./config";
-import { extractAssistantVideos, toolResultMedia } from "./transcript-media";
+import {
+  assistantProseFields,
+  extractAssistantVideos,
+  toolResultMedia,
+} from "./transcript-media";
 import { transcriptEntryMatchSnippet } from "./transcript-search";
 export {
   extractAssistantVideos,
@@ -549,22 +553,15 @@ function parseEntry(raw: RawJsonlEntry): TranscriptEntry[] {
       let textBlockCount = 0;
       for (const block of content) {
         if (block.type === "text" && block.text) {
-          const assistant = extractAssistantVideos(block.text);
           const baseId = raw.uuid || crypto.randomUUID();
           entries.push({
             id: textBlockCount === 0 ? baseId : `${baseId}-t${textBlockCount}`,
             type: "assistant",
-            content: assistant.content,
             timestamp: ts,
             requestId: raw.requestId,
             ...(model ? { model } : {}),
             ...(raw.isReasoning ? { isReasoning: true } : {}),
-            ...(assistant.videos.length > 0
-              ? { videos: assistant.videos }
-              : {}),
-            ...(assistant.images.length > 0
-              ? { images: assistant.images }
-              : {}),
+            ...assistantProseFields(block.text),
           });
           textBlockCount++;
         }
@@ -584,17 +581,14 @@ function parseEntry(raw: RawJsonlEntry): TranscriptEntry[] {
     } else {
       const text = extractText(content);
       if (text) {
-        const assistant = extractAssistantVideos(text);
         entries.push({
           id: raw.uuid || crypto.randomUUID(),
           type: "assistant",
-          content: assistant.content,
           timestamp: ts,
           requestId: raw.requestId,
           ...(model ? { model } : {}),
           ...(raw.isReasoning ? { isReasoning: true } : {}),
-          ...(assistant.videos.length > 0 ? { videos: assistant.videos } : {}),
-          ...(assistant.images.length > 0 ? { images: assistant.images } : {}),
+          ...assistantProseFields(text),
         });
       }
     }
@@ -702,14 +696,12 @@ function parseCodexEntry(raw: any): TranscriptEntry[] {
       typeof p.message === "string" &&
       p.message.trim()
     ) {
-      const assistant = extractAssistantVideos(p.message);
       return [
         {
           id: p.id || stableCodexId("codex-assistant", raw, p, p.message),
           type: "assistant",
-          content: assistant.content,
           timestamp: ts,
-          ...(assistant.videos.length > 0 ? { videos: assistant.videos } : {}),
+          ...assistantProseFields(p.message),
         },
       ];
     }
@@ -1276,13 +1268,13 @@ export function parseTranscriptWindow(
 export const WIRE_CLAMP_BYTES = 32 * 1024;
 /**
  * Tighter clamp for the transcript-open payload (initial tail + history
- * pages): the UI eagerly renders only ~6KB of markdown per bubble
+ * pages): the UI eagerly renders only ~24KB of markdown per bubble
  * (EAGER_MD_CHARS) and fetches the full entry on "Show more" anyway, so
- * shipping 32KB per entry there only buys transfer + JSON.parse time — an
- * entry-heavy tail hit 1.7MB on the wire. Live appends keep the fatter clamp
- * (no extra fetch mid-conversation for a merely-large message).
+ * shipping more per entry there only buys transfer + JSON.parse time — an
+ * entry-heavy tail hit 1.7MB on the wire. Kept as its own constant so the
+ * open path can be tightened again independently of live appends.
  */
-export const INIT_WIRE_CLAMP_BYTES = 8 * 1024;
+export const INIT_WIRE_CLAMP_BYTES = 32 * 1024;
 function clampEntryForWire(e: TranscriptEntry, max: number): TranscriptEntry {
   if ((e.content?.length ?? 0) <= max) return e;
   return {

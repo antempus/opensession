@@ -698,6 +698,7 @@ registerSessionControl({
       model: modelInput,
       effort: effortInput,
       fastMode: fastModeInput,
+      pstackMode: pstackModeInput,
       images: imageUrls,
       files: rawFiles,
       pastedTexts,
@@ -716,6 +717,8 @@ registerSessionControl({
       sandbox,
       forkFrom,
       accountId: accountIdInput,
+      plainDiscussionId,
+      slackOrigin,
     } = ownedInput;
     const bksId = requestedId;
     const createIdentity = new Bun.CryptoHasher("sha256")
@@ -804,6 +807,9 @@ registerSessionControl({
     const createFastMode = fork
       ? fork.source.fastMode === true
       : fastModeInput === true;
+    const createPstackMode = fork
+      ? fork.source.pstackMode === true
+      : pstackModeInput === true;
     // Pinned provider account: validated exactly like the web palette
     // (mismatched/unknown/foreign ids drop to the pool).
     const createAccountId = fork
@@ -1188,16 +1194,17 @@ registerSessionControl({
       });
     // Pasted blocks follow the message; the uploads note follows them, so the
     // parser's end-anchored note regex still finds it.
+    const openingAttachments = attachmentSources.map((attachment) => ({
+      name: attachment.name,
+      path: creationAttachmentPath(
+        bksId,
+        attachment.attachmentId,
+        attachment.name,
+      ),
+    }));
     let openingPrompt = withUploadsNote(
       withPastedTexts(prompt, pastedTexts),
-      attachmentSources.map((attachment) => ({
-        name: attachment.name,
-        path: creationAttachmentPath(
-          bksId,
-          attachment.attachmentId,
-          attachment.name,
-        ),
-      })),
+      openingAttachments,
     );
     if (createMentionsNote)
       openingPrompt += `
@@ -1287,14 +1294,18 @@ ${createMentionsNote}`;
       model,
       effort: createEffort,
       fastMode: createFastMode || undefined,
+      pstackMode: createPstackMode || undefined,
       accountId: createAccountId,
       images,
+      attachments: openingAttachments,
       // Feed-item linkage follows the session's workspace (Video tab +
       // sidebar feed-row join — the feeds design).
       externalRefs: contextWorkspace?.externalRefs,
       // A session in a support-ticket workspace is on that ticket too —
       // same rule as the web tab strip's "+".
       plainThreadId: joinedWorkspace?.plainThreadId,
+      plainDiscussionId,
+      slackOrigin,
       // Persist the MCP scoping so follow-up prompts keep it.
       persistMcpServers: effectiveMcpServers,
       // Unscoped creates leave this undefined (read as "all" downstream,
@@ -1372,6 +1383,7 @@ ${createMentionsNote}`;
           ...computedSpec,
           ...restoredSpec,
           images: computedSpec.images,
+          attachments: computedSpec.attachments,
           gitEnv: restoredGitEnv,
           materializeWorktree: restoredMaterializer,
           needsWorktree: !!restoredMaterializer,

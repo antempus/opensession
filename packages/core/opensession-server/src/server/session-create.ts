@@ -19,6 +19,11 @@
  * session-control-wiring.ts.
  */
 
+import {
+  mirrorSlackSessionReply,
+  SLACK_SESSION_NOTE,
+} from "../agents/slack/session-reply";
+
 import type { ServerWebSocket } from "bun";
 import { randomUUIDv7 } from "bun";
 import { existsSync } from "node:fs";
@@ -43,7 +48,10 @@ import { buildForkHandoffNote } from "./fork-handoff";
 import { ensureGeneratedTitle } from "./generated-titles";
 import { nameKnownSessionReferencesForTitle } from "./session-reference-title";
 import { onSessionIdle as onHumanAsksSessionIdle } from "./human-asks";
-import { interactiveMcpServers } from "./interactive-mcp";
+import {
+  interactiveMcpServers,
+  plainDiscussionSessionMcp,
+} from "./interactive-mcp";
 import { runAgentHosted } from "./host-client";
 import {
   accountProviderForModel,
@@ -56,6 +64,14 @@ import { configuredInteractiveDefaultModel } from "./model-catalog";
 import { notifyMentions } from "./mentions";
 import { newSessionId } from "./paths";
 import { enablesPstackMode, PSTACK_MODE_NOTE } from "./pstack-mode";
+
+/** Pstack mode for a new session: the palette toggle or a `/pstack <task>` opening prompt. */
+function specPstackMode(spec: {
+  pstackMode?: boolean;
+  displayPrompt: string;
+}): boolean {
+  return spec.pstackMode === true || enablesPstackMode(spec.displayPrompt);
+}
 import {
   pastedTextsFromWire,
   withPastedTexts,
@@ -68,6 +84,7 @@ import {
   promptDispatches,
   promptQueues,
 } from "./queue-state";
+import type { StagedAttachment } from "./prompt-attachments";
 import { type ImageInput, shouldPersistModelSwitch } from "./run-events";
 import {
   attachSessionWatchersToEngineTranscript,
@@ -79,6 +96,12 @@ import {
   watchExternalRunAndDrain,
 } from "./run-session";
 import { type McpScope, STRIPE_CONFIRM_TOOLS } from "./runner-shared";
+import { plainDiscussionDeniedTools } from "./automation-denied-tools";
+import {
+  mirrorTurnToPlainDiscussion,
+  plainDiscussionToolResult,
+  plainDiscussionToolUse,
+} from "../agents/plain/discussion-mirror";
 import {
   isRemoteSandboxProvider,
   resolveRequestedSandbox,
@@ -229,6 +252,7 @@ export interface CreateSessionMessage {
   model?: unknown;
   effort?: unknown;
   fastMode?: unknown;
+  pstackMode?: unknown;
   accountId?: string;
   mcpServers?: unknown;
   repo?: unknown;
@@ -327,6 +351,7 @@ export function resolvePinnedAccountId(
  * between those paths lives in how they fill this in.
  */
 export interface ResolvedCreate {
+  slackOrigin?: import("./types").SlackSessionOrigin;
   id: string;
   /** Raw first-line title persisted immediately (replaced by the generated summary). */
   title: string;
@@ -388,10 +413,16 @@ export interface ResolvedCreate {
   /** Stable preset instructions captured at creation, even if the workspace changes later. */
   presetNote?: string;
   fastMode?: boolean;
+  /** Pstack mode from the palette toggle; `/pstack <task>` as the opening prompt also enables it. */
+  pstackMode?: boolean;
   accountId?: string;
   images?: ImageInput[];
+  /** Server-staged file attachments named in the opening prompt's uploads
+   *  note; a remote opening run gets their bytes in its spec. */
+  attachments?: StagedAttachment[];
   externalRefs?: NativeSessionFile["externalRefs"];
   plainThreadId?: string;
+  plainDiscussionId?: string;
   /** MCP allowlist persisted on the session file. Empty means no MCP servers. */
   persistMcpServers?: string[];
   /**
@@ -440,6 +471,7 @@ export function openingCreateTrustPolicy(
     | "runMcpServers"
     | "user"
     | "createdByLogin"
+    | "plainDiscussionId"
   >,
 ): {
   automation: boolean;
@@ -454,9 +486,12 @@ export function openingCreateTrustPolicy(
   return {
     automation: !!policy,
     mcpServers: policy ? [] : (spec.runMcpServers as McpScope),
-    user: policy ? undefined : spec.user,
+    // A Plain discussion session reads untrusted ticket text: like an
+    // automation run it passes no user, so an allowedUsers-gated server
+    // stays invisible (session-run-inputs.ts makes the same call on resume).
+    user: policy || spec.plainDiscussionId ? undefined : spec.user,
     mcpGrantUser: policy ? undefined : spec.createdByLogin,
-    aws: !policy,
+    aws: !policy && !spec.plainDiscussionId,
     trustProfile: policy ? "automation" : "interactive",
     ...(policy
       ? {
@@ -686,10 +721,24 @@ function createdSessionFileDefaults(spec: ResolvedCreate): NativeSessionFile {
       : {}),
     ...(spec.effort ? { effort: spec.effort } : {}),
     ...(spec.presetNote ? { presetNote: spec.presetNote } : {}),
-    ...(enablesPstackMode(spec.displayPrompt) ? { pstackMode: true } : {}),
+    ...(specPstackMode(spec) ? { pstackMode: true } : {}),
     ...(spec.fastMode ? { fastMode: true } : {}),
     ...(spec.accountId ? { accountId: spec.accountId } : {}),
+    ...(spec.slackOrigin
+      ? {
+          slackOrigin: spec.slackOrigin,
+          slackThreads: [
+            {
+              channel: spec.slackOrigin.channel,
+              threadTs: spec.slackOrigin.threadTs,
+            },
+          ],
+        }
+      : {}),
     ...(spec.plainThreadId ? { plainThreadId: spec.plainThreadId } : {}),
+    ...(spec.plainDiscussionId
+      ? { plainDiscussionId: spec.plainDiscussionId }
+      : {}),
     ...(spec.externalRefs?.length ? { externalRefs: spec.externalRefs } : {}),
     ...(spec.persistMcpServers !== undefined
       ? { mcpServers: spec.persistMcpServers }
@@ -1392,7 +1441,7 @@ export async function openCreatedSession(
 ): Promise<void> {
   assertAutomationDescendantOpeningIsolation(spec);
   const bksId = spec.id;
-  const pstackMode = enablesPstackMode(spec.displayPrompt);
+  const pstackMode = specPstackMode(spec);
   const pendingAttach = spec.attachRepos?.repos.length
     ? spec.attachRepos
     : null;
@@ -1409,7 +1458,7 @@ export async function openCreatedSession(
     )
     .then(async (t) => {
       if (!t) return;
-      publishSessionChange(bksId);
+      await publishSessionChange(bksId);
       if (!wsToName) return;
       const cur = await getWorkspace(wsToName.id);
       if (cur && cur.name === wsToName.name)
@@ -1527,6 +1576,14 @@ export async function openCreatedSession(
           {
             content: spec.openingPrompt,
             user: spec.user,
+            ...(spec.slackOrigin
+              ? {
+                  slackReplyTo: {
+                    channel: spec.slackOrigin.channel,
+                    threadTs: spec.slackOrigin.threadTs,
+                  },
+                }
+              : {}),
             ...(spec.images?.length
               ? {
                   images: spec.images.map(
@@ -1610,6 +1667,7 @@ export async function openCreatedSession(
         }
       }
 
+      if (spec.slackOrigin) spec.openingPrompt += "\n\n" + SLACK_SESSION_NOTE;
       const retrievedMemory = await retrievedMemoryNoteFor(
         spec.openingPrompt,
         spec.user,
@@ -1644,6 +1702,7 @@ export async function openCreatedSession(
               cwd: spec.wtPath,
               user: spec.user,
               images: spec.images,
+              attachments: spec.attachments,
               mcpServers: spec.automationDescendantPolicy
                 ? []
                 : (spec.runMcpServers ?? []),
@@ -1682,7 +1741,7 @@ export async function openCreatedSession(
             lifecycle: "awake",
           },
         });
-        publishSessionChange(bksId);
+        await publishSessionChange(bksId);
         const stored = await findSessionAsync(bksId);
         // The session-list projection may still hold the pre-Runner create row
         // for this same command turn. Launch from the just-committed immutable
@@ -1710,6 +1769,7 @@ export async function openCreatedSession(
               hostId: startToken,
               shouldCancel: () => isAgentSessionCancelled(bksId, startToken),
               images: spec.images,
+              attachments: spec.attachments,
               mcpServers: spec.automationDescendantPolicy
                 ? []
                 : (spec.runMcpServers ?? []),
@@ -1724,6 +1784,9 @@ export async function openCreatedSession(
                       mode: spec.mode,
                       branch: spec.branch,
                       worktreeDir: spec.wtPath,
+                      stackedOn: spec.stackedOn,
+                      existingBranch: spec.worktreeKind === "existing",
+                      pstackMode,
                     }),
                     await memoryNoteFor(spec.user, spec.memoryRepoIds),
                   ]
@@ -1787,12 +1850,18 @@ export async function openCreatedSession(
       };
       const openingTrust = openingCreateTrustPolicy(spec);
       const automationChild = openingTrust.automation;
+      // A discussion session carries only the approval server, never the
+      // interactive siblings (see plainDiscussionSessionMcp).
       const openingMcp = automationChild
         ? {}
-        : interactiveMcpServers(spec.user, bksId);
+        : spec.plainDiscussionId
+          ? plainDiscussionSessionMcp(bksId, spec.plainDiscussionId)
+          : interactiveMcpServers(spec.user, bksId);
       const openingDeniedTools = automationChild
         ? (await import("./automations")).automationDeniedTools()
-        : undefined;
+        : spec.plainDiscussionId
+          ? plainDiscussionDeniedTools()
+          : undefined;
       const openingReposNote = automationChild
         ? undefined
         : [
@@ -1801,11 +1870,18 @@ export async function openCreatedSession(
             // A session that spans repos is handed the persisted map rather
             // than a reconstructed branch note.
             spanning
-              ? buildReposNote(spanning)
+              ? buildReposNote({
+                  ...spanning,
+                  existingBranch: spec.worktreeKind === "existing",
+                  pstackMode,
+                })
               : buildBranchNote({
                   mode: spec.mode,
                   branch: spec.branch,
                   worktreeDir: spec.wtPath,
+                  stackedOn: spec.stackedOn,
+                  existingBranch: spec.worktreeKind === "existing",
+                  pstackMode,
                 }),
             await memoryNoteFor(spec.user, [
               ...spec.memoryRepoIds,
@@ -1835,6 +1911,7 @@ export async function openCreatedSession(
               model: spec.model,
               effort: spec.effort,
               fastMode: spec.fastMode,
+              pstackMode,
               accountId: spec.accountId,
               fallbackModel: interactiveFallbackModel(spec.model),
               mcpServers: openingTrust.mcpServers,
@@ -1932,6 +2009,7 @@ export async function openCreatedSession(
         }
         if (event.type === "tool_use") {
           toolUseCount++;
+          plainDiscussionToolUse(spec.plainDiscussionId, event);
           const entry = {
             id: event.toolUseId || crypto.randomUUID(),
             type: "tool_use" as const,
@@ -1944,6 +2022,7 @@ export async function openCreatedSession(
           io.emit({ type: "stream_tool_use", entry });
         }
         if (event.type === "tool_result") {
+          plainDiscussionToolResult(spec.plainDiscussionId, event);
           const entry = {
             id: event.toolUseId ? `tr-${event.toolUseId}` : crypto.randomUUID(),
             type: "tool_result" as const,
@@ -2027,6 +2106,20 @@ export async function openCreatedSession(
 
     io.emit({ type: "stream_done" });
     io.emit({ type: "session_status", isRunning: false });
+    await mirrorSlackSessionReply(spec.slackOrigin, {
+      sessionId: bksId,
+      localMedia:
+        !spec.remoteSandbox &&
+        !spec.runnerTarget &&
+        !spec.automationDescendantPolicy,
+      assistantText,
+      error: runFailure,
+    });
+    mirrorTurnToPlainDiscussion(spec.plainDiscussionId, {
+      assistantText,
+      endedWithError: !!runFailure,
+      runFailure,
+    });
     if (spec.finish === "auto-continue-guard") {
       // An opening turn announce-then-stops exactly like a later one, and
       // this path bypasses runSessionPromptInner — so run the shared guard
@@ -2057,6 +2150,13 @@ export async function openCreatedSession(
       return;
     }
     if (await openingTurnWasCancelled()) {
+      // A Stop from the discussion cancels the opening turn here, past the
+      // mirror above: report idle so Plain's composer unlocks.
+      mirrorTurnToPlainDiscussion(spec.plainDiscussionId, {
+        assistantText: "",
+        endedWithError: false,
+        runFailure: null,
+      });
       await settleCreationCancelled(
         bksId,
         creationIdentity,
@@ -2070,6 +2170,11 @@ export async function openCreatedSession(
       }
       return;
     }
+    await mirrorSlackSessionReply(spec.slackOrigin, {
+      sessionId: bksId,
+      assistantText: "",
+      error: e instanceof Error ? e.message : String(e),
+    });
     // Failure after the early announce: the client is already in the
     // session — close out the stream and surface the failure there
     // instead of leaving the viewer spinning. Before the announce there's
@@ -2087,6 +2192,14 @@ export async function openCreatedSession(
         });
       }
       await reportSetupFailure(bksId, io, e.message || String(e));
+      // createSession already resolved at the announce, so the discussion
+      // handler cannot report this one: settle Plain from here or its
+      // composer stays locked on IN_PROGRESS.
+      mirrorTurnToPlainDiscussion(spec.plainDiscussionId, {
+        assistantText,
+        endedWithError: true,
+        runFailure: e.message || String(e),
+      });
     } else {
       io.fail(e.message || String(e));
     }
@@ -2338,6 +2451,10 @@ export async function handleCreateSessionMessage(
   const createFastMode = forkSource
     ? forkSource.fastMode
     : msg.fastMode === true;
+  // Pstack mode from the palette's More options (forks inherit).
+  const createPstackMode = forkSource
+    ? forkSource.pstackMode
+    : msg.pstackMode === true;
   // Pinned provider account from the palette (forks inherit).
   const createAccountId = forkSource
     ? forkSource.accountId
@@ -2789,16 +2906,17 @@ export async function handleCreateSessionMessage(
       });
     // Pasted blocks follow the message; the uploads note follows them, so the
     // parser's end-anchored note regex still finds it.
+    const openingAttachments = attachmentSources.map((attachment) => ({
+      name: attachment.name,
+      path: creationAttachmentPath(
+        bksId,
+        attachment.attachmentId,
+        attachment.name,
+      ),
+    }));
     let openingPrompt = withUploadsNote(
       withPastedTexts(prompt, pastedTextsFromWire(msg.pastedTexts)),
-      attachmentSources.map((attachment) => ({
-        name: attachment.name,
-        path: creationAttachmentPath(
-          bksId,
-          attachment.attachmentId,
-          attachment.name,
-        ),
-      })),
+      openingAttachments,
     );
     // @session:<id> mentions from the New-session box get the same
     // resolving footer as prompts on existing sessions (see
@@ -2913,8 +3031,10 @@ export async function handleCreateSessionMessage(
       effort: createEffort,
       presetNote: workspacePreset?.note,
       fastMode: createFastMode,
+      pstackMode: createPstackMode,
       accountId: createAccountId,
       images,
+      attachments: openingAttachments,
       externalRefs: inheritedRefs,
       plainThreadId,
       persistMcpServers: createMcpServers?.length
@@ -3005,6 +3125,7 @@ export async function handleCreateSessionMessage(
           ...computedSpec,
           ...restoredSpec,
           images: computedSpec.images,
+          attachments: computedSpec.attachments,
           gitEnv: restoredGitEnv,
           materializeWorktree: restoredMaterializer,
           needsWorktree: !!restoredMaterializer,

@@ -37,7 +37,12 @@ export interface ComposerConfig {
   defaultModel: string;
   /** Current model id; an empty string selects the default. */
   model: string;
+  /** The model is set elsewhere; effort stays switchable from the pill. */
   modelDisabled?: boolean;
+  /** The whole pill is inert, with `modelTitle` as its tooltip, while the
+   * rest of the composer keeps working: the Desk during a voice call, where
+   * typed text goes into the call and neither model nor effort applies. */
+  modelPillDisabled?: boolean;
   modelTitle?: string;
   /**
    * Reasoning-effort control (stowed as a compact pill, mirroring the
@@ -52,6 +57,10 @@ export interface ComposerConfig {
   accountId?: string;
   /** Session goal pinned via /goal and sent with every prompt. */
   goal?: string | null;
+  /** Pstack mode: the pstack playbooks and skills load for every turn.
+   * Off by default; the "+" menu toggles it when `onPstackModeChange` is
+   * wired. */
+  pstackMode?: boolean;
   /** Conversation usage shown in the model menu. */
   usage?: SessionUsage;
   /**
@@ -101,6 +110,10 @@ export interface ComposerConfig {
   /** The exit is in flight: the chip says so and its close button stops taking
    * clicks. */
   askExitPending?: boolean;
+  /** State of the host's live voice call, shown by the handset beside the
+   * dictation mic (rendered only with `onToggleCall`). `status` is the
+   * call's current phase for the tooltip, e.g. "Listening". */
+  call?: { active: boolean; status?: string };
 }
 
 /** A one-shot draft handed to the composer (see `ComposerConfig.prefill`). */
@@ -139,6 +152,8 @@ export interface ComposerActions {
   onAccountChange?: (accountId: string) => void;
   /** Sets or clears the session goal from the inline target control. */
   onSetGoal?: (goal: string | null) => void;
+  /** Turns pstack mode on or off for the session. */
+  onPstackModeChange?: (on: boolean) => void;
   onImagesChange?: (images: string[]) => void;
   onFilesChange?: (files: FileAttachment[]) => void;
   onAddAttachments?: (picked: FileList | File[]) => void | Promise<void>;
@@ -158,4 +173,6 @@ export interface ComposerActions {
    * the chip renders without an exit rather than offering one that fails.
    */
   onAskModeExit?: () => void;
+  /** Starts the host's voice call, or ends it while `config.call.active`. */
+  onToggleCall?: () => void;
 }

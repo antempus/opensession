@@ -68,6 +68,7 @@ describe("routePath", () => {
     { view: "support", threadId: "thread/1" },
     { view: "plain", threadId: "thread/1" },
     { view: "reports", automationId: "daily check", reportId: "report/1" },
+    { view: "databases", databaseId: "tickets-4f3a", table: "open/tickets" },
     { view: "automations", id: "daily check" },
     { view: "goals", id: "goal/1" },
     { view: "settings", section: "preferences" },
@@ -111,5 +112,12 @@ describe("route helpers", () => {
         { view: "workspace", id: "two" },
       ),
     ).toBe(false);
+  });
+});
+
+describe("issues route", () => {
+  test("round-trips the Issues page", () => {
+    expect(parseRoute("/issues")).toEqual({ view: "issues" });
+    expect(routePath({ view: "issues" })).toBe(`${BASE_PATH}/issues`);
   });
 });

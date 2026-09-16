@@ -14,6 +14,7 @@ import { cn } from "../ui/cn";
 import { Tooltip } from "../ui/tooltip";
 import { Sidebar } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
+import { ServerHealthMonitor } from "./ServerHealthMonitor";
 
 interface AppSidebarProps {
   data: {
@@ -53,7 +54,7 @@ interface AppSidebarProps {
   };
   interactions: Pick<
     ReturnType<typeof useAppDocumentInteractions>,
-    "isPhone" | "sidebarRef" | "setNextChatAvailable"
+    "isPhone" | "sidebarRef" | "setUnreadChats"
   >;
   navigation: {
     taskCount: ReturnType<typeof useAppViewState>["taskCount"];
@@ -110,7 +111,7 @@ export function AppSidebar({
     startSidebarResize,
     headerActionsEl,
   },
-  interactions: { isPhone, sidebarRef, setNextChatAvailable },
+  interactions: { isPhone, sidebarRef, setUnreadChats },
   navigation: {
     taskCount,
     commandMenuRef,
@@ -201,6 +202,11 @@ export function AppSidebar({
               </button>
             </Tooltip>
           </div>
+          {!isPhone && !sidebarCollapsed && (
+            <div className="@container/server-health flex min-w-0 flex-1 items-center justify-center">
+              <ServerHealthMonitor />
+            </div>
+          )}
           <TitleBar onSearch={() => commandMenuRef.current?.open()} />
         </div>
         <Sidebar
@@ -226,6 +232,7 @@ export function AppSidebar({
             route.view === "session" ? (listedSession?.id ?? route.id) : null
           }
           prsActive={route.view === "prs"}
+          issuesActive={route.view === "issues"}
           feedActive={route.view === "feed"}
           connected={connected}
           tasksActive={route.view === "tasks"}
@@ -234,6 +241,7 @@ export function AppSidebar({
           plainActive={route.view === "plain"}
           supportTinderActive={route.view === "supporttinder"}
           reportsActive={route.view === "reports"}
+          databasesActive={route.view === "databases"}
           analyticsActive={route.view === "analytics"}
           showDraftRow={productEmpty && githubConnectionState !== "loading"}
           footerAccessory={footerAccessory}
@@ -247,7 +255,7 @@ export function AppSidebar({
           // the session's top bar.
           headerActionsEl={mobileDetail ? null : headerActionsEl}
           catchUpActive={route.view === "catchup"}
-          onNextChatAvailableChange={setNextChatAvailable}
+          onUnreadChatsChange={setUnreadChats}
           archivedActive={route.view === "archived"}
           onArchive={archiveSessionFromSidebar}
           onArchiveWorkspace={archiveWorkspaceFromSidebar}

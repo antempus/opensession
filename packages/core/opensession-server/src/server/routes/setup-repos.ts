@@ -2,9 +2,12 @@
  * Server-side repository setup, part of the /api/setup family dispatched from
  * setup.ts:
  *
+ *   GET  /api/setup/github/owners: the accounts the GitHub App is installed
+ *        on, for choosing where a new repository is created
  *   GET  /api/setup/github/repos: repos the instance's GitHub credential can
  *                                  see, for the registration picker.
- *   POST /api/setup/repos: clone a remote or register an existing local checkout.
+ *   POST /api/setup/repos: clone a remote, register an existing local checkout,
+ *                          or start a new repository on this server.
  *   PATCH /api/setup/repos/:id: change its default branch or worktree policy.
  */
 
@@ -18,6 +21,7 @@ import {
   rmSync,
   writeFileSync,
 } from "fs";
+import { mkdir, rm, stat, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, isAbsolute, join } from "path";
 import { audit } from "../audit";
@@ -54,6 +58,7 @@ import {
 import { githubCredentialHelperCommand } from "../github-git-credential";
 import { homeDir } from "../paths";
 import { fetchWithTimeout } from "../shared/fetch-with-timeout";
+import { validNewRepoName } from "../../shared/repo-name";
 import { shellSafeDefaultBranch } from "../repo-branch";
 import type { RouteContext } from "./context";
 import {
@@ -398,6 +403,16 @@ function scrubSecret(text: string, secret?: string): string {
   return secret ? text.split(secret).join("***") : text;
 }
 
+let cloneForTest: typeof cloneGithubRepo | null = null;
+
+/** Test seam: stand in for the network clone so a registration that follows
+ *  a mocked GitHub create can be exercised end to end. */
+export function __setGithubCloneForTest(
+  clone: typeof cloneGithubRepo | null,
+): void {
+  cloneForTest = clone;
+}
+
 /**
  * Clone `owner/name` to `dest`, NEVER embedding a credential in the persisted
  * remote URL. Both paths take the full https URL (never the bare owner/name) so
@@ -505,7 +520,9 @@ function assertRepoSlotAvailable(
   id: string,
   registered: Record<string, Repo>,
 ): void {
-  if (registered[id]) {
+  // Own keys only: the registry is a plain object, so a bare index would find
+  // Object's `constructor` on an empty one.
+  if (Object.hasOwn(registered, id)) {
     throw setupRepoError(`Repository id already registered: ${id}`, 409);
   }
   if (Object.values(registered).some((repo) => repo.wtPrefix === id)) {
@@ -580,6 +597,8 @@ function persistRepoRegistration(input: {
   registered: Record<string, Repo>;
   auditRepo: string;
   adopted?: boolean;
+  /** The checkout and its origin were made by this call, not found. */
+  created?: boolean;
 }): RepoSection & { id: string } {
   const config = rawConfig();
   const repos = repoSectionsForMutation(config, input.registered);
@@ -600,8 +619,102 @@ function persistRepoRegistration(input: {
     id: input.id,
     path: entry.repo,
     ...(input.adopted ? { adopted: true } : {}),
+    ...(input.created ? { created: true } : {}),
   });
   return { id: input.id, ...entry };
+}
+
+/** Where a repository started here keeps its origin: a bare sibling of the
+ *  checkout, so the pair reads as one project in `ls ~/checkouts`. */
+function localOriginPath(id: string): string {
+  return `${checkoutsRoot()}/${id}.git`;
+}
+
+/**
+ * Start a repository that exists nowhere yet: a bare origin beside a checkout
+ * of it under ~/checkouts, with one root commit (a README) on `main`, pushed
+ * and set as origin's HEAD so `inspectRepo` and worktree creation see exactly
+ * what a clone would. The registry requires an origin with a commit on the
+ * default branch, and every session flow (branches, diffs, review units)
+ * keys off that, which is why a scratch dir is not a project.
+ *
+ * Nothing is published: this is the "this server only" choice. Its registry
+ * entry has no `ghRepo`; changing the remote or pushing later does not update
+ * that identity or enable PR support. For GitHub support, create on github.com
+ * and register the remote repository instead.
+ */
+async function createLocalRepo(input: {
+  name: string;
+}): Promise<RepoSection & { id: string }> {
+  const id = repoIdFromName(input.name);
+  const registered = configuredRepos();
+  assertRepoSlotAvailable(id, registered);
+  const root = checkoutsRoot();
+  const dest = `${root}/${id}`;
+  const origin = localOriginPath(id);
+  assertRepoPathAvailable(dest, registered);
+  // This runs on the gateway thread, so every filesystem step here is async.
+  const exists = (path: string) =>
+    stat(path).then(
+      () => true,
+      () => false,
+    );
+  if ((await exists(dest)) || (await exists(origin))) {
+    throw setupRepoError(
+      `A checkout already exists at ${dest}. Register it as a local folder instead.`,
+      409,
+    );
+  }
+  await mkdir(root, { recursive: true });
+  const git = async (argv: string[]) => {
+    const result = await runCommand(["git", ...argv], 60_000);
+    if (result.exitCode !== 0)
+      throw new Error(result.stderr || `git ${argv[0]} failed`);
+  };
+  try {
+    await git(["init", "--quiet", "--bare", "-b", "main", origin]);
+    await git(["init", "--quiet", "-b", "main", dest]);
+    await writeFile(join(dest, "README.md"), `# ${input.name}\n`);
+    await git(["-C", dest, "add", "README.md"]);
+    // The same identity the worktree layer signs an empty remote's root
+    // commit with (worktree.ts): the commit is the server's, not a person's.
+    await git([
+      "-C",
+      dest,
+      "-c",
+      "user.name=Open Session",
+      "-c",
+      "user.email=assistant@opensession.dev",
+      "commit",
+      "--quiet",
+      "-m",
+      "Initial commit",
+    ]);
+    await git(["-C", dest, "remote", "add", "origin", origin]);
+    await git(["-C", dest, "push", "--quiet", "-u", "origin", "main"]);
+    await git(["-C", dest, "remote", "set-head", "origin", "main"]);
+    const inspected = await inspectRepo(dest);
+    return persistRepoRegistration({
+      id,
+      registered,
+      auditRepo: inspected.path,
+      created: true,
+      entry: {
+        label: input.name,
+        repo: inspected.path,
+        wtPrefix: id,
+        defaultBranch: await normalizeInspectedDefaultBranch(
+          inspected.defaultBranch,
+        ),
+      },
+    });
+  } catch (error) {
+    // Both halves are this call's own; a failure leaves nothing behind that a
+    // retry would then refuse as "already exists".
+    await rm(dest, { recursive: true, force: true });
+    await rm(origin, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function configureGithubCredentialHelper(
@@ -676,7 +789,7 @@ async function registerGithubRepo(input: {
   mkdirSync(root, { recursive: true });
   try {
     if (!adopted) {
-      await cloneGithubRepo(
+      await (cloneForTest ?? cloneGithubRepo)(
         input.fullName,
         dest,
         input.credential?.env.GH_TOKEN,
@@ -938,6 +1051,33 @@ export async function handleSetupRepoRoutes(
 ): Promise<Response | undefined> {
   const { req, path } = ctx;
 
+  if (path === "/api/setup/github/owners" && req.method === "GET") {
+    // Suggested owners for the GitHub creation page: every account the App
+    // is installed on, including personal accounts. Null
+    // owners means the App identity cannot answer, not that there are none.
+    const {
+      configuredGithubInstallationOwner,
+      githubConfiguredCredential,
+      listGithubAppInstallations,
+    } = await import("../github-app");
+    const appConfigured = githubConfiguredCredential();
+    const installations = appConfigured
+      ? await listGithubAppInstallations()
+      : null;
+    const configuredOwner = configuredGithubInstallationOwner().toLowerCase();
+    return Response.json({
+      appConfigured,
+      appInstallUrl: githubAppInstallUrl(),
+      owners: installations
+        ? installations.map(({ login, type }) => ({
+            login,
+            type,
+            selected: login.toLowerCase() === configuredOwner,
+          }))
+        : null,
+    });
+  }
+
   if (path === "/api/setup/github/repos" && req.method === "GET") {
     // Browse the repositories selected for the workspace App's installations.
     // A connected teammate is only a compatibility path when no App service
@@ -949,33 +1089,36 @@ export async function handleSetupRepoRoutes(
     } = await import("../github-app");
     const appConfigured = githubConfiguredCredential();
     const configuredOwner = configuredGithubInstallationOwner();
+    const fresh = ctx.url.searchParams.get("refresh") === "1";
     // The App's installation directory rides along whenever the App identity
     // can produce one, so the picker can name every account the App reaches
     // and mark the configured default. A just-installed App can take a moment
     // to appear in GitHub's list; retry once so onboarding does not race it.
     let appInstallations = appConfigured
-      ? await listGithubAppInstallations()
+      ? await listGithubAppInstallations({ fresh })
       : null;
     if (appConfigured && !appInstallations?.length) {
       await Bun.sleep(750);
       appInstallations = await listGithubAppInstallations({ fresh: true });
     }
-    const installationContext = appInstallations
-      ? {
-          installationOwner: configuredOwner || null,
-          installations: appInstallations.map(({ login, type }) => ({
-            login,
-            type,
-            selected: login.toLowerCase() === configuredOwner.toLowerCase(),
-          })),
-        }
-      : {};
+    const installationContext = {
+      appConfigured,
+      appInstallUrl: githubAppInstallUrl(),
+      ...(appInstallations
+        ? {
+            installationOwner: configuredOwner || null,
+            installations: appInstallations.map(({ login, type }) => ({
+              login,
+              type,
+              selected: login.toLowerCase() === configuredOwner.toLowerCase(),
+            })),
+          }
+        : {}),
+    };
     const unavailableResponse = (unavailableInstallations?: string[]) =>
       Response.json({
         source: null,
         repos: [],
-        appConfigured,
-        appInstallUrl: githubAppInstallUrl(),
         ...(unavailableInstallations?.length
           ? { unavailableInstallations }
           : {}),
@@ -994,7 +1137,7 @@ export async function handleSetupRepoRoutes(
       ? `service:${installations.map((i) => i.id).join(",")}`
       : credential?.principal || "user";
     const cached = repoListCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < REPO_CACHE_TTL_MS) {
+    if (!fresh && cached && Date.now() - cached.at < REPO_CACHE_TTL_MS) {
       return Response.json({ ...cached.payload, ...installationContext });
     }
     try {
@@ -1085,7 +1228,33 @@ export async function handleSetupRepoRoutes(
       repoId?: unknown;
       path?: unknown;
       id?: unknown;
+      name?: unknown;
+      owner?: unknown;
     } | null;
+    if (body?.source === "new") {
+      if (!validNewRepoName(body.name)) {
+        return Response.json(
+          {
+            error:
+              "name must use letters, digits, dots, dashes and underscores, starting with a letter or digit",
+          },
+          { status: 400 },
+        );
+      }
+      const name = body.name;
+      if (body.owner === undefined || body.owner === "") {
+        return registrationResponse(() => createLocalRepo({ name }));
+      }
+      // Fail closed for older clients: never turn an intended GitHub create
+      // into an unnoticed local-only repository.
+      return Response.json(
+        {
+          error:
+            "Create the repository on https://github.com/new, then connect it as a remote repository.",
+        },
+        { status: 400 },
+      );
+    }
     if (body?.source === "local") {
       if (typeof body.path !== "string" || !isAbsolute(body.path.trim())) {
         return Response.json(

@@ -18,7 +18,7 @@ const ticket = (
   coalescePlainThread: true,
 });
 
-/** An intent written before `coalescePlainThread` existed, or a retrigger. */
+/** An intent written before `coalescePlainThread` existed. */
 const legacy = (sessionId: string, threadId: string, acceptedAt: string) => ({
   ...ticket(sessionId, threadId, acceptedAt),
   coalescePlainThread: undefined,
@@ -66,7 +66,10 @@ describe("superseded Plain thread intents", () => {
   });
 
   test("an explicit retrigger replays even when its thread has a live session", () => {
-    const retrigger = legacy("r1", "th_a", "2026-09-09T21:03:00Z");
+    const retrigger = {
+      ...ticket("r1", "th_a", "2026-09-09T21:03:00Z"),
+      coalescePlainThread: false,
+    };
     const superseded = supersededPlainThreadIntents(
       [
         ticket("s1", "th_a", "2026-09-09T20:42:00Z"),
@@ -76,6 +79,33 @@ describe("superseded Plain thread intents", () => {
       new Map([["th_a", "os-live"]]),
     );
     expect([...superseded.keys()].sort()).toEqual(["s1", "s2"]);
+  });
+
+  test("keeps concurrent explicit retriggers separate from automatic and legacy intents", () => {
+    const intents = [
+      {
+        ...ticket("r1", "th_a", "2026-09-09T20:00:00Z"),
+        coalescePlainThread: false,
+      },
+      {
+        ...ticket("r2", "th_a", "2026-09-09T20:01:00Z"),
+        coalescePlainThread: false,
+      },
+      legacy("l1", "th_a", "2026-09-09T20:42:00Z"),
+      legacy("l2", "th_a", "2026-09-09T21:01:00Z"),
+      ticket("s1", "th_a", "2026-09-09T21:05:00Z"),
+    ];
+    expect([
+      ...supersededPlainThreadIntents(intents, new Map()).keys(),
+    ]).toEqual(["l2", "s1"]);
+    for (const live of ["os-live", "r1", "r2"]) {
+      expect([
+        ...supersededPlainThreadIntents(
+          intents,
+          new Map([["th_a", live]]),
+        ).keys(),
+      ]).toEqual(["l2", "s1"]);
+    }
   });
 
   test("intents written before the flag existed still collapse per thread", () => {

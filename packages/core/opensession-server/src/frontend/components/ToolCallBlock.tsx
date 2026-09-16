@@ -5,6 +5,8 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { sessionAgentName } from "../lib/markdown";
+import { useAgentName } from "../hooks/useAgentName";
 import type { TranscriptEntry } from "../lib/types";
 import { CodeHighlight } from "./LazyCode";
 import { ToolInputDiff } from "./ToolInputDiff";
@@ -34,6 +36,7 @@ import {
   isHiddenToolInputKey,
   mcpLabelParts,
   parseMcpTool,
+  sessionToolId,
   toolCommand as commandOf,
   toolDetail,
   toolFamily,
@@ -185,6 +188,7 @@ export {
   mcpServerDisplayName,
   mcpToolDisplayName,
   parseMcpTool,
+  sessionToolId,
   toolDisplayName,
   toolFamily,
   toolLineStats,
@@ -222,6 +226,7 @@ export function toolSummary(
   rawInput: TranscriptEntry["toolInput"],
   fallback: string,
   roots: readonly PathRoot[] = [],
+  agentName?: string,
 ): string {
   // Pi routes every bridged MCP call through its `mcp_call` dispatcher, so the
   // envelope is what a transcript stores. Summarize the call inside it.
@@ -232,7 +237,11 @@ export function toolSummary(
     toolDetail(unwrapped.toolName, input.value),
     (p) => tidyPath(p, roots),
   );
-  if (detail) return detail;
+  const sessionId = sessionToolId(unwrapped.toolName, input.value);
+  if (detail)
+    return sessionId
+      ? detail.replaceAll(sessionId, agentName ?? sessionAgentName(sessionId))
+      : detail;
   if (
     parseMcpTool(unwrapped.toolName) &&
     fallback.trim() === `Using ${unwrapped.toolName}`
@@ -431,7 +440,15 @@ export const ToolCallBlock = function ToolCallBlock({
   const mcpParts = mcp ? mcpLabelParts(mcp.server, mcp.tool) : [];
   const scopedOpenSession =
     mcpParts[0] === "Open Session" && mcpParts.length > 2;
-  const summary = toolSummary(toolName, callInput.value, entry.content, roots);
+  const linkedSessionId = sessionToolId(toolName, callInput.value);
+  const agentName = useAgentName(linkedSessionId || undefined);
+  const summary = toolSummary(
+    toolName,
+    callInput.value,
+    entry.content,
+    roots,
+    agentName,
+  );
   const isFileTool =
     canonical === "Read" || canonical === "Edit" || canonical === "Write";
   const lineStats = toolLineStats(toolName, callInput.value);
@@ -464,6 +481,13 @@ export const ToolCallBlock = function ToolCallBlock({
     asset.open(assetPath);
   }
 
+  // A sessions call names the session it is about only by id, and the id is
+  // the one thing on the row a reader cannot act on by reading it: the chip is
+  // the way into that session. Not offered when the call is about this very
+  // session, where it would only reload the page the reader is on.
+  const canOpenSession =
+    Boolean(linkedSessionId) && linkedSessionId !== sessionId;
+
   // A Task/Agent call whose sub-agent transcript we can open in the sidebar.
   // Claude-SDK results carry a structured agentId; pi's task tool only
   // embeds the child session id in the result text (<task id="ses_…">) — the
@@ -493,7 +517,18 @@ export const ToolCallBlock = function ToolCallBlock({
         <button
           type="button"
           aria-expanded={expanded}
-          onClick={() => rememberExpansion(!expanded)}
+          onClick={(e) => {
+            // The session chip sits inside this button, and its click has to
+            // bubble on to the transcript's delegated handler, which opens
+            // the session in place: so it is not stopped there, and must not
+            // fold the row on the way through here.
+            if (
+              e.target instanceof Element &&
+              e.target.closest("[data-session-id]")
+            )
+              return;
+            rememberExpansion(!expanded);
+          }}
           onMouseEnter={pending ? () => setDurationVisible(true) : undefined}
           onMouseLeave={pending ? () => setDurationVisible(false) : undefined}
           onFocus={pending ? () => setDurationVisible(true) : undefined}
@@ -618,6 +653,32 @@ export const ToolCallBlock = function ToolCallBlock({
               title="Open this file"
             >
               Open
+              <IconArrowUpRight className="size-4 shrink-0 opacity-70" />
+            </span>
+          )}
+
+          {canOpenSession && (
+            // No handler of its own: the transcript's delegated click handler
+            // navigates on data-session-id, so the click is left to bubble and
+            // the session opens in place. A span, not an anchor, because the
+            // row is a button and an anchor nested in one is dropped from the
+            // accessibility tree. Never hover-gated: a phone has no hover, and
+            // the id is not a way in.
+            <span
+              role="button"
+              tabIndex={0}
+              className={TOOL_ROW_CHIP}
+              data-session-id={linkedSessionId}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.currentTarget.click();
+              }}
+              title={`Open ${agentName}`}
+              aria-label={`Open ${agentName}'s session`}
+            >
+              {agentName}
               <IconArrowUpRight className="size-4 shrink-0 opacity-70" />
             </span>
           )}

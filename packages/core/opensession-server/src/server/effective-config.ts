@@ -12,6 +12,7 @@ import {
 } from "./connections";
 import { mcpSharedGrantHeader, mcpUserGrantHeader } from "./mcp-oauth";
 import { userMatchesAny, commitAuthorFor } from "./shared/user-mappings";
+import { sessionPrincipal } from "./session-actors";
 import { configuredPaths } from "./config";
 import {
   baseJournalKind,
@@ -47,7 +48,6 @@ import {
   sandboxProviderConfigured,
   sandboxesEnabled,
 } from "./sandbox/config";
-import { selfImproveMcpForSession } from "./automations";
 import { createGoalSelfMcpServer } from "../agents/slack/goal-tools";
 
 /** One resolved setting plus where it came from. */
@@ -271,12 +271,29 @@ export async function inProcessServerNames(
   session: UnifiedSession,
   inputs: SessionRunInputs,
 ): Promise<string[]> {
-  if (inputs.inProcessMcpBranch === "automation-self-improve") {
+  const {
+    interactiveMcpServers,
+    automationSessionMcp,
+    plainDiscussionSessionMcp,
+  } = await import("./interactive-mcp");
+  if (
+    inputs.inProcessMcpBranch === "automation-self-improve" ||
+    inputs.inProcessMcpBranch === "automation+human-spawn"
+  ) {
+    // The automation-bar set the turn really carries (papercuts, report,
+    // selfImprove pair, and the human turn's spawn suite), from the same
+    // builder run-session mounts.
     return Object.keys(
-      (await selfImproveMcpForSession(session, session.id)) || {},
+      await automationSessionMcp(session, session.id, {
+        humanPrompter: inputs.humanPrompter,
+      }),
     );
   }
-  const { interactiveMcpServers } = await import("./interactive-mcp");
+  if (inputs.inProcessMcpBranch === "plain-discussion") {
+    return Object.keys(
+      plainDiscussionSessionMcp(session.id, session.plainDiscussionId || ""),
+    );
+  }
   const servers: Record<string, unknown> = {
     ...interactiveMcpServers(inputs.user, session.id),
   };
@@ -481,9 +498,13 @@ export async function buildSessionEffectiveConfig(
       "host-client.ts / sandbox provider",
     ),
   };
-  const git = commitAuthorFor(inputs.user, session.startedBy);
+  const git = commitAuthorFor(inputs.user, sessionPrincipal(session));
   const identity: Record<string, ConfigRow> = {
     user: row(inputs.user ?? null, "request identity"),
+    accountUser: row(
+      inputs.accountUser ?? null,
+      "session-run-inputs.ts provider account identity",
+    ),
     git: row(git ?? null, "shared/user-mappings.ts"),
     github: row(
       githubUserLoginForRun(inputs.user || git?.name) ?? null,

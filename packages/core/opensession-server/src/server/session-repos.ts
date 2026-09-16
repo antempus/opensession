@@ -44,7 +44,7 @@ import { personalPromptNoteFor } from "./personal-prompts";
 import { PSTACK_MODE_NOTE } from "./pstack-mode";
 import {
   findSession,
-  getCachedSessions,
+  getCachedSessionsAsync,
   touchNativeSession,
   updateSessionFile,
 } from "./session-cache";
@@ -56,6 +56,15 @@ import type {
 } from "./types";
 import { defaultRepo } from "./config";
 import { hostRepoId } from "./pr-host";
+import { resolveRegisteredPr } from "./pr-labels";
+import { prMetaForBranch } from "./pr-info";
+import { cachedPrNumberByBranch } from "./pr-cache";
+import {
+  assessPrMergeReadiness,
+  fetchPrReadinessSource,
+  type PrMergeVerdict,
+  type PrReadinessTarget,
+} from "./pr-merge-readiness";
 
 export interface SessionRepoContext {
   repo: string;
@@ -124,27 +133,63 @@ export function resolveSessionRepoContext(
  * that branch as THE branch — sibling commits included. Without this, each
  * sibling session decided the extra commits on the shared branch weren't its own
  * and cherry-picked onto a fresh branch, producing one PR per session instead of
- * one per workspace.
+ * one per workspace. Rewriting the branch as a whole (rebasing it onto the
+ * trunk when the user asks) is fine as long as every sibling commit rides along;
+ * what the note forbids is dropping or routing around them.
  */
 export function buildBranchNote(session: {
   mode?: "ask" | "code" | "scratch";
   branch?: string | null;
   worktreeDir?: string | null;
+  prUrl?: string;
+  prNumber?: number;
+  prs?: Readonly<UnifiedSession["prs"]>;
+  stackedOn?: StackedOn;
+  existingBranch?: boolean;
+  pstackMode?: boolean;
+  automation?: string;
+  automationDescendantPolicy?: UnifiedSession["automationDescendantPolicy"];
 }): string | undefined {
   if (session.mode === "ask" || !session.branch || !session.worktreeDir)
     return undefined;
   const repo = repoForPath(session.worktreeDir);
-  // Shared-checkout repos (opensession) and main-checkout cwds have their own
-  // rules; this note is for isolated per-branch worktrees only.
-  if (
-    sharedCheckoutForNewSessions(repo) ||
-    canonicalPath(session.worktreeDir) === canonicalPath(repo.repo)
-  )
+  // Use the actual checkout, not the default for NEW sessions: changing that
+  // default must not remove branch discipline from an existing worktree.
+  if (canonicalPath(session.worktreeDir) === canonicalPath(repo.repo))
     return undefined;
+  if (
+    repo.publicationMode === "direct" &&
+    repo.host !== "codestorage" &&
+    !session.prUrl &&
+    !session.prNumber &&
+    !session.prs?.some(
+      (pr) =>
+        pr.repo === repo.id &&
+        pr.branch === session.branch &&
+        pr.state !== "MERGED" &&
+        pr.state !== "CLOSED",
+    ) &&
+    !session.stackedOn &&
+    !session.existingBranch &&
+    !session.pstackMode &&
+    !session.automation &&
+    !session.automationDescendantPolicy
+  ) {
+    return [
+      "## Branch discipline (direct publication)",
+      `You are working in \`${session.worktreeDir}\` on branch \`${session.branch}\`. Sibling sessions share this worktree and branch; preserve all their commits and uncommitted work. Stay on this branch, never switch or create branches, reset, stash, or cherry-pick around sibling commits.`,
+      `Repository \`${repo.id}\` defaults to publishing directly to \`${repo.defaultBranch}\` without a pull request. This publication preference is independent of checkout isolation. If the user explicitly requests a PR, or this branch already has an open PR, use the PR workflow instead; never merge that PR without explicit user approval for that specific PR.`,
+      `Before publishing, inspect the complete diff against \`origin/${repo.defaultBranch}\`, including sibling commits. Stop if unfinished or unrelated work would land. Stage only your own changes, inspect the staged diff, and run the repository's required checks before committing.`,
+      `Fetch with \`git fetch origin\`. Before integrating upstream, check for rebase-merge, rebase-apply, or MERGE_HEAD under \`git rev-parse --git-dir\` and coordinate with sibling sessions. If \`git merge-base --is-ancestor origin/${repo.defaultBranch} HEAD\` fails, merge \`origin/${repo.defaultBranch}\` into this branch without rewriting its history, only with a clean index and worktree. If another session has uncommitted work, stop and coordinate; never stash or discard it. Resolve conflicts and rerun all required checks on the final candidate.`,
+      `Publish the checked commit with a normal fast-forward push: \`git push origin HEAD:refs/heads/${repo.defaultBranch}\`. Never force-push or delete the default branch. If the push is rejected because the remote advanced, fetch, integrate, review, and check again; do not blindly retry. Keep this worktree's upstream on its own branch, not the default branch.`,
+      "This preference grants no additional credentials or permissions. If server policy or branch protection refuses direct publication, report the blocker; never bypass it. Automations and their descendants keep their existing publication restrictions.",
+    ].join("\n");
+  }
   return [
     "## Branch discipline (shared worktree)",
     `You are working in \`${session.worktreeDir}\` on branch \`${session.branch}\`. Other sessions in this workspace share this exact worktree and branch — commits you don't recognize are their work, not noise.`,
-    `Stay on \`${session.branch}\`: never create or switch branches, and never rebase away, reset, or cherry-pick around sibling commits. Commit your changes on this branch and push with \`git push -u origin ${session.branch}\`.`,
+    `Stay on \`${session.branch}\`: never create or switch branches, and never drop, reset away, or cherry-pick around sibling commits. Commit your changes on this branch and push with \`git push -u origin ${session.branch}\`.`,
+    `When the user asks to rebase onto the trunk, do it: \`git rebase origin/<default branch>\` keeps every sibling commit, so it is allowed. First make sure no other session has a rebase or merge in progress (no \`rebase-merge\`, \`rebase-apply\`, or \`MERGE_HEAD\` under \`git rev-parse --git-dir\`) and commit or leave untouched any uncommitted work, then push the rewritten branch with \`git push --force-with-lease origin ${session.branch}\`. Do not rebase, force-push, or otherwise rewrite the branch unless the user asked for it in the current conversation.`,
     repo.host === "codestorage"
       ? `Commit and push your branch with \`git push -u origin ${session.branch}\` — this repo is hosted on Code Storage; there is no gh CLI and no pull requests; a pushed branch IS the change request. Never merge it into the default branch yourself.`
       : `This workspace keeps ONE pull request: if an open PR for \`${session.branch}\` already exists, pushing updates it — do not open another. Only run \`gh pr create\` when the branch has no open PR. Never merge a pull request unless the user explicitly asks in the current conversation to merge that specific pull request. A positive review (including 5/5, no blocking findings, or “safe to merge”), passing checks, pull request ownership, or a request to create, update, review, or babysit a pull request does not authorize merging it.`,
@@ -201,7 +246,9 @@ export function buildStackNote(session: {
  * `@<project>:path` mentions resolve. Returns undefined for single-repo sessions
  * so the prompt stays clean.
  */
-export function buildReposNote(session: UnifiedSession): string | undefined {
+export function buildReposNote(
+  session: UnifiedSession & { existingBranch?: boolean },
+): string | undefined {
   const branchNote = [buildBranchNote(session), buildStackNote(session)]
     .filter(Boolean)
     .join("\n\n");
@@ -210,7 +257,7 @@ export function buildReposNote(session: UnifiedSession): string | undefined {
   const primaryRepo = sessionRepoId(session) ?? defaultRepo().id;
   const lines = [
     "## Repos in this session",
-    "This session spans multiple repos. Each is an isolated git worktree — `cd` into the right one to read or edit its files, and commit/push/open PRs in each repo independently (don't edit another repo's shared main checkout).",
+    "This session spans multiple repos. Each is an isolated git worktree — `cd` into the right one to read or edit its files and follow that repository's publication policy independently (don't edit another repo's shared main checkout).",
     // Canonicalized for the note only — the stored worktreeDir stays literal
     // (see canonicalPath) — so a session that predates a checkout rename
     // points the agent at the path that exists today.
@@ -221,7 +268,20 @@ export function buildReposNote(session: UnifiedSession): string | undefined {
   lines.push(
     "A file mentioned from an attached repo arrives as `@<project>:<path>` — resolve it under that repo's worktree dir above.",
   );
-  return [branchNote, lines.join("\n")].filter(Boolean).join("\n\n");
+  const attachedNotes = attached.map((repo) =>
+    buildBranchNote({
+      mode: session.mode,
+      branch: repo.branch,
+      worktreeDir: repo.dir,
+      prs: session.prs,
+      pstackMode: session.pstackMode,
+      automation: session.automation,
+      automationDescendantPolicy: session.automationDescendantPolicy,
+    }),
+  );
+  return [branchNote, lines.join("\n"), ...attachedNotes]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /** Repo ids a session spans, primary first — memory scopes + repos note agree on this. */
@@ -249,7 +309,7 @@ export async function buildSessionNote(
       // answer "what's happening" without a tool round-trip and won't
       // spawn a worker onto work that's already running.
       session.desk ? DESK_NOTE : "",
-      session.desk ? deskBriefingFor(user) : "",
+      session.desk ? await deskBriefingFor(user) : "",
       buildReposNote(session),
       await memoryNoteFor(user, sessionRepoIds(session), session.id),
     ]
@@ -694,7 +754,7 @@ export async function switchPrimaryRepo(
   const workspaceId = session.workspaceId;
   if (workspaceId) {
     const ws = await getWorkspace(workspaceId);
-    const soleMember = !getCachedSessions().some(
+    const soleMember = !(await getCachedSessionsAsync()).some(
       (s) => s.workspaceId === workspaceId && s.id !== sessionId,
     );
     if (
@@ -844,6 +904,70 @@ export async function linkPr(
   ];
   touchNativeSession(sessionId, { linkedPrs: all });
   return { linked, all };
+}
+
+/**
+ * The PR a merge-readiness question is about. A URL or repo id + number
+ * names it outright. Otherwise it is the PR of a session: the given one, or
+ * the caller's own. The session's PR targets are the ones its Review tab
+ * shows (primary branch, attached repos, linked PRs, in that order); the
+ * first target with an open PR wins, else the first with any PR. `repo`
+ * narrows a session lookup to that repo.
+ */
+export async function resolvePrReadinessTarget(
+  sessionId: string,
+  input: { url?: string; repo?: string; number?: number; session?: string },
+): Promise<PrReadinessTarget> {
+  if (input.url || input.number) {
+    const { repo, number } = resolveRegisteredPr(input);
+    return { repoId: repo.id, ghRepo: repo.ghRepo, number };
+  }
+  const targetSession = (input.session || sessionId).trim();
+  const session = findSession(targetSession);
+  if (!session) throw new Error(`Session ${targetSession} not found`);
+  const repoFilter = input.repo?.trim();
+  if (repoFilter && !REPOS[repoFilter])
+    throw new Error(`Unknown repo "${repoFilter}"`);
+  const targets = projectPrTargets(session).filter(
+    (t) =>
+      (!repoFilter || t.repoId === repoFilter) &&
+      REPOS[t.repoId] &&
+      REPOS[t.repoId].host !== "codestorage" &&
+      REPOS[t.repoId].ghRepo,
+  );
+  if (!targets.length)
+    throw new Error(
+      repoFilter
+        ? `Session ${targetSession} has no branch or linked PR in ${repoFilter}`
+        : `Session ${targetSession} has no branch or linked PR to check`,
+    );
+  let fallback: PrReadinessTarget | null = null;
+  for (const t of targets) {
+    const ghRepo = REPOS[t.repoId].ghRepo;
+    const cached = cachedPrNumberByBranch(ghRepo, t.branch);
+    if (cached !== undefined)
+      return { repoId: t.repoId, ghRepo, number: cached };
+    const meta = await prMetaForBranch(t.branch, ghRepo);
+    if (!meta) continue;
+    const found = { repoId: t.repoId, ghRepo, number: meta.number };
+    if (meta.state === "OPEN") return found;
+    fallback ??= found;
+  }
+  if (fallback) return fallback;
+  throw new Error(
+    `Session ${targetSession} has no pull request yet (${targets
+      .map((t) => `${t.repoId}:${t.branch}`)
+      .join(", ")})`,
+  );
+}
+
+/** The interactive entrypoint behind check_pr_ready: resolve, fetch, judge. */
+export async function checkPrMergeReadiness(
+  sessionId: string,
+  input: { url?: string; repo?: string; number?: number; session?: string },
+): Promise<PrMergeVerdict> {
+  const target = await resolvePrReadinessTarget(sessionId, input);
+  return assessPrMergeReadiness(await fetchPrReadinessSource(target));
 }
 
 /** Remove a linked PR from a session (the link only — the PR is untouched). */

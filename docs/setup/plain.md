@@ -10,12 +10,14 @@ customer or change thread state.
 
 ## Env vars
 
-| Var                         | Required for    | Notes                                                                                                                                                                               |
-| --------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PLAIN_API_KEY`             | Plain API calls | required by the integration registry; used by the Support UI and agent's `PlainClient` (`packages/core/opensession-server/src/agents/plain/api.ts`) and by the archive safety sweep |
-| `PLAIN_WEBHOOK_SECRET`      | webhook intake  | **fail-closed**: unset or empty means every Plain webhook returns 401                                                                                                               |
-| `PLAIN_SPAM_CHECK_MODEL`    | optional        | tool-less pre-triage router model; default `claude-haiku-4-5`                                                                                                                       |
-| `PLAIN_REFUND_INTENT_MODEL` | optional        | tool-less classifier for the legacy mention flow's refund/cancellation approval; default `claude-haiku-4-5`                                                                         |
+| Var                           | Required for    | Notes                                                                                                                                                                               |
+| ----------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PLAIN_API_KEY`               | Plain API calls | required by the integration registry; used by the Support UI and agent's `PlainClient` (`packages/core/opensession-server/src/agents/plain/api.ts`) and by the archive safety sweep |
+| `PLAIN_WEBHOOK_SECRET`        | webhook intake  | **fail-closed**: unset or empty means every Plain webhook returns 401                                                                                                               |
+| `PLAIN_SPAM_CHECK_MODEL`      | optional        | tool-less pre-triage router model; default `claude-haiku-4-5`                                                                                                                       |
+| `PLAIN_REFUND_INTENT_MODEL`   | optional        | tool-less classifier for the legacy mention flow's refund/cancellation approval; default `claude-haiku-4-5`                                                                         |
+| `PLAIN_AGENT_API_KEY`         | optional        | key of a separate **Custom agent** machine user for Ask Sidekick (see [Internal agent](#internal-agent-ask-sidekick)); unset, the discussions use `PLAIN_API_KEY`                   |
+| `PLAIN_AGENT_MACHINE_USER_ID` | optional        | pins the agent's `mu_…` id instead of resolving it with `myMachineUser` at first use                                                                                                |
 
 Put server secrets and an optional enable flag in `~/.opensession.env`; the
 service does not use a checkout `.env`:
@@ -39,7 +41,15 @@ Config keys under `integrations.plain` in `~/.opensession/config.json`:
 | `apiUrl`        | GraphQL endpoint used by the archive safety sweep; default `https://core-api.uk.plain.com/graphql/v1`                                                  |
 | `workspaceId`   | Plain workspace id (`w_…`) for app.plain.com deep links; unset hides the UI's open-in-Plain affordances                                                |
 | `mentionHandle` | handle in Plain notes that wakes the mention flow, with or without a leading `@`; default is `persona.name` lowercased with spaces replaced by hyphens |
-| `linearTeamKey` | Linear team key or UUID used when the legacy mention flow creates an issue directly; it uses the Linear OAuth token store or `LINEAR_API_KEY`          |
+
+When the legacy mention flow creates an issue (`GITHUB ISSUE:` in the model's
+reply, or `start worktree`), it opens a GitHub issue in the default
+repository's `ghRepo` with the GitHub App's repository-scoped credential
+(`issues: write`), labels it `feature-request`, and links the thread to it
+through Plain's GitHub Issues integration (a `github_issue` thread link with
+source id `owner/name/number`). Plain's Top issues then ranks GitHub issues,
+and closing an issue moves its linked threads to Close the loop, so never
+close or reopen an issue while threads are still linked to it.
 
 The Plain MCP server used by agent runs is separate from the server-side Plain
 SDK. Open Session does not bundle a Plain MCP server. Add your compatible
@@ -79,17 +89,25 @@ Subscribe the endpoint to these events
   subscriber exists, filter and route the ticket, then fire every enabled
   subscriber asynchronously.
 - `thread.thread_status_transitioned`: when the new status is `DONE`, archive
-  every non-archived Open Session session linked to that thread.
+  every non-archived Open Session session linked to that thread, resolving
+  each session's auto-triage discussion first (see below).
 - `thread.note_created`: when a note contains the configured mention and its
   author has `actorType === "user"`, deliver it to the newest live linked
   session. If no linked session can accept it, run the legacy mention flow.
   Customer, machine-user, and system notes are ignored.
+- `discussion.message_created`, `discussion.turn_stop_requested`,
+  `discussion.tool_call_approval_resolved`: the internal agent, below. Pin the
+  webhook target to version `2026-09-14` or later; the turn-stop event does
+  not exist on earlier versions.
 
 A separate archive safety sweep starts even when the Plain agent is disabled.
 With `PLAIN_API_KEY` set, it first runs 60 seconds after boot and then every 15
 minutes, checking up to 40 distinct threads with active linked sessions per
 pass. The webhook gives immediate archival; the sweep covers missed status
-events.
+events. Both run the same archive path (`server/plain-archive.ts`): a session
+with an auto-triage discussion is archived only after that discussion is
+resolved, so a resolution that fails (Plain down, agent key missing) leaves the
+session unarchived and the next webhook or sweep pass retries it.
 
 ### New-ticket filtering and routing
 
@@ -97,7 +115,7 @@ The gate fetches the thread up to eight times: once immediately, then after up
 to seven 15-second waits. It skips the thread when its earliest email/chat was
 sent by a Plain user or machine user. If no email/chat appears but other
 timeline activity exists after 30 seconds, it treats the thread as an outbound
-follow-up or Linear close-the-loop thread and skips it. A still-empty thread
+follow-up or issue-tracker close-the-loop thread and skips it. A still-empty thread
 after all attempts fails open and is triaged.
 
 The tool-less router then returns one of three routes:
@@ -137,8 +155,7 @@ Scope the automation deliberately:
   but does not grant authority; see
   [github.md](github.md#automation-pr-credentials-and-review-requests).
 - **`mcpServers`** is the run's allowlist. The template suggests `plain`,
-  `workos`, `tinybird`, `linear`, `sentry`, and `stripe`; remove servers you do
-  not use. `[]` means no external MCP servers. For an ordinary unsandboxed
+  `workos`, `tinybird`, `sentry`, and `stripe`; remove servers you do not use. `[]` means no external MCP servers. For an ordinary unsandboxed
   automation, omitting the field preserves the legacy behavior of exposing all
   configured servers. Sandbox automations run in fresh disposable Daytona
   Executors and require a qualified provider, a pinned subscription account,
@@ -178,6 +195,107 @@ teammate approval. Only then does a dedicated execution turn expose the Stripe
 mutators, and any customer reply it drafts still requires the separate reply
 confirmation above. See
 [security-model.md](../security-model.md#stripe-a-third-enforcement-tier).
+
+## Internal agent (Ask Sidekick)
+
+Open Session can also be the agent a teammate picks in Plain's **Ask
+Sidekick** — from Home or from a thread. Plain calls this a
+[custom internal agent](https://www.plain.com/docs/agents/internal-agent):
+each Sidekick conversation is a _discussion_, and the agent answers it over
+webhooks and the discussion mutations
+(`packages/core/opensession-server/src/agents/plain/discussions.ts`,
+`discussion-api.ts`, `discussion-mirror.ts`, `discussion-tools.ts`).
+
+One discussion is one Open Session session. The first message creates an
+ask-mode session with `plainDiscussionId` set — inside the ticket's workspace
+when the discussion was opened on a thread, so it gets the same ticket context
+as a triage session — and every later message is delivered into that session.
+Every finished turn is posted back to the discussion as Markdown and the agent
+is reported idle, whoever started the turn: a teammate steering the same
+session in the Open Session UI answers in Plain too. Each tool call is reported
+on the discussion timeline. **Stop** in Plain cancels the session's run.
+
+A discussion session reads untrusted ticket text, so its turns run under the
+triage automation's policy rather than an interactive session's: the
+automation deny-set plus the Plain customer-facing writes and the Stripe money
+movers are denied, no user is passed (an `allowedUsers` server stays
+invisible), no AWS credentials are provisioned, and the only in-process
+`opensession-*` server it carries is `opensession-plain-discussion`; the
+interactive admin, sessions, workflows, publish, keychain and self-deploy tools
+are never mounted. This holds on the opening turn, on every later message and
+on a turn a person sends from the Open Session UI.
+
+Nothing posted in a discussion reaches the customer. Instead of the Plain MCP
+writes the session carries the `opensession-plain-discussion` tools:
+
+- `reply_to_customer`: shows the exact reply on an **Approve / Deny** card in
+  the discussion and waits for the decision. Approved: the reply is sent as the
+  triage machine user and the thread is snoozed as waiting for the customer.
+  Denied: nothing is sent and the reviewer note goes back to the model.
+- `execute_stripe_action`: the same card for a specific refund or
+  cancellation. Approved: the money-tools execution turn the
+  `@<handle> go ahead` note flow uses runs with a discussion prompt that
+  treats the approved proposal as the action, re-verifies its identifiers and
+  amount in Stripe, and aborts on any ambiguity (a discussion opened from
+  Home has no thread note to fall back on).
+
+A decision that arrives after a restart finds no waiting tool; the card stays
+answered in Plain and the model is told nothing ran. Waiting tools give up
+after 30 minutes.
+
+### Setup
+
+1. **Settings → Machine users & API keys**: open the machine user whose key
+   is `PLAIN_API_KEY` and set **Type** to **Custom agent** (that is what
+   lists it in Ask Sidekick; the picker shows the machine user's name, so
+   name it `Open Session`). Its key must carry `threadDiscussion:read`,
+   `threadDiscussion:edit`, `threadDiscussionMessage:create`,
+   `threadDiscussionMessage:edit`, `thread:read`, `customer:read`.
+2. To keep the agent identity separate from the triage machine user instead,
+   add a second machine user with the same type and permissions and store its
+   key as `PLAIN_AGENT_API_KEY`; the triage code keeps using `PLAIN_API_KEY`.
+3. **Settings → Webhooks → Add webhook target** for `POST /plain/webhook`
+   (or edit the existing one), version `2026-09-14`, subscribed to
+   `discussion.message_created`, `discussion.turn_stop_requested` and
+   `discussion.tool_call_approval_resolved`. The signing secret is the
+   workspace's, so `PLAIN_WEBHOOK_SECRET` stays as it is.
+4. `opensession restart`, then open Ask Sidekick, pick **Open Session** and
+   send a prompt.
+
+`discussion.message_created` fires for every discussion in the workspace,
+including Sidekick's own and the agent's own replies (a person's turn is
+`OUTBOUND`, the agent's replies come back as `INBOUND`). The handler answers
+only `AGENT_SESSION` discussions whose agent is this machine user, for
+`OUTBOUND` messages, while the discussion is not `RESOLVED`; everything else
+is dropped silently.
+
+### Auto-triage discussions
+
+With the agent set up, every ticket the auto-triage flow actually triages
+(past the outbound and spam gates in `handlers.ts`) also gets an Ask Sidekick
+discussion opened by each `plain:thread_created` subscriber as its run starts,
+before model and repository setup. Subscribers get separate discussions, never a
+shared timeline. The triage session is that discussion's session: it runs
+exactly as before and still posts the diagnosis as an internal note, and on
+top of that every tool call shows on the discussion timeline and its final
+message is posted there. The discussion stays open after triage: a teammate
+who asks a follow-up in it is answered by the same session, with the
+investigation already in context, and the session then carries the
+`opensession-plain-discussion` approval tools beside its automation set (the
+discussion deny-set applies, so replies and Stripe actions only go through the
+card). A turn relayed from the discussion is sent as `Plain`, which counts as a
+machine actor: it bills no subscription and unlocks no spawn suite. When the
+ticket reaches DONE, whether the status webhook reports it or the periodic
+DONE sweep catches a missed one, the discussion is resolved and the session
+then archived. A resolution that fails (Plain down, agent key missing) leaves
+the session unarchived, so the next sweep retries it.
+
+A ticket that the classifier skips gets the existing "auto-triage skipped" note
+and no discussion. If the discussion cannot be opened (no agent key, Plain
+down) the run still fires, without one. The discussion id is recorded in the
+run's durable intent the moment Plain returns it, before the discussion is
+marked in progress or the run does anything else, so a run replayed after a
+restart reports into the same discussion instead of opening a second one.
 
 ## Internal notes in English
 

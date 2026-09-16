@@ -252,12 +252,18 @@ export const VIEWER_MESSAGES =
   // --strip-clearance is 0 by default and the docked tab bar's height on a
   // multi-session workspace.
   "phone:px-3 " +
-  "phone:pt-[calc(var(--pane-header-h)+var(--strip-clearance,0px)+8px)] " +
-  // Dissolve the transcript into the header as it scrolls up under the pills.
-  // A non-linear fade mirrored into mask alpha:
-  // hidden for the first fifth, 45% by three fifths, full at the bar height.
-  "phone:[-webkit-mask-image:linear-gradient(to_bottom,transparent_0,transparent_calc(var(--pane-header-h)*0.2),rgba(0,0,0,0.45)_calc(var(--pane-header-h)*0.6),#000_var(--pane-header-h))] " +
-  "phone:[mask-image:linear-gradient(to_bottom,transparent_0,transparent_calc(var(--pane-header-h)*0.2),rgba(0,0,0,0.45)_calc(var(--pane-header-h)*0.6),#000_var(--pane-header-h))]";
+  "phone:pt-[calc(var(--pane-header-h)+var(--strip-clearance,0px)+8px)]";
+// No mask-image on the scroll container. The header's own wash
+// (APP_HEADER_OVERLAY's ::before: page-colour gradient plus backdrop blur) is
+// what dissolves the transcript as it scrolls under the pills. A mask on the
+// scroller used to sharpen that fade, and on iOS Safari 27 it left the top of
+// the viewport unpainted: a hard-edged, full-width band of page colour from
+// under the status bar to about 200pt down, cutting through the middle of a
+// heading, after scrolling into history while a session streamed. WebKit keeps
+// a masked scroller's mask in a backing store of its own, sized to the
+// scrolled contents, and a tile of it that misses a paint is a region where
+// the mask reads as fully transparent. Nothing else on the page can produce a
+// flat band with a hard bottom edge.
 
 /**
  * The composer floats up over the transcript so the session scrolls UNDER it,
@@ -558,6 +564,26 @@ export const TRANSCRIPT_PILL_SPINNER =
 export const TRANSCRIPT_PILL_TOP =
   `pointer-events-none absolute top-3 left-1/2 z-[5] ${PILL_CENTRED} ` +
   "phone:top-[calc(var(--pane-header-h)+var(--strip-clearance,0px)+8px)]";
+
+/**
+ * Where the catch-up spinner floats while held entries wait for the watch
+ * handshake. A sibling of the scroll area like the top pill, so it never
+ * moves a row; 12px of ring and nothing else, centred on the reading column.
+ *
+ * It sits in the 16px of clear resting space the scroller keeps above
+ * everything that overlaps its bottom edge (VIEWER_MESSAGES): the composer's
+ * overlap (`--session-under`) plus whatever action band is up
+ * (`--suggestions-under`). Measured at `bottom-2` instead, the ring landed on
+ * the composer's top edge on desktop and wedged between the phone action bar
+ * and the input; this offset clears both and rides the band's own clearance,
+ * so quick replies or the phone toolbar lift it out of the way with them.
+ * 8px up puts the ring mid-way through that resting space rather than
+ * touching whatever sits below it.
+ */
+export const TRANSCRIPT_SYNC_SPOT =
+  "pointer-events-none absolute left-1/2 z-[5] flex " +
+  "bottom-[calc(var(--session-under,0px)+var(--suggestions-under,0px)+8px)] " +
+  PILL_CENTRED;
 
 /* ── Session info page (phone) ──────────────────────────────────────────────
  *

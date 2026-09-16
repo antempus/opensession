@@ -98,11 +98,15 @@ a reset, and are retained until atomic session deletion removes both transcript
 rows and receipts. The destination-only method is internal and must be called
 after short SessionKernel admission; it is not an HTTP route.
 
-After each commit, the store publishes a wake-up on
-`packages/core/opensession-server/src/server/transcript-bus.ts`. Seq-mode
-watchers reconcile from SQLite by `changeSeq`; the in-process notification is
-not itself the replay buffer. This avoids polling for server-owned sessions and
-makes delayed or duplicate notifications harmless.
+After each commit, the gateway drains the actor's durable pending wake through
+`packages/core/opensession-server/src/server/transcript-bus.ts`. One drain owns a
+session at a time: concurrent callers wait until their required wake cursor is
+covered instead of independently reading and publishing the same pending span.
+A caller arriving during acknowledgement extends the drain; failures leave the
+durable wake retryable. Publication remains at least once across crashes.
+Seq-mode watchers reconcile from SQLite by `changeSeq`; the in-process
+notification is not itself the replay buffer. This avoids polling for
+server-owned sessions and makes delayed or duplicate notifications harmless.
 
 ## Serving to clients
 
@@ -115,9 +119,10 @@ by Open Session:
   windows must also include 50 user messages, because intermediate assistant
   notes collapse into the work fold and do not add visible conversation rows.
   Extension stops at 1,400 rows or an estimated 850,000 uncompressed wire
-  bytes. Ordinary opening content is clamped to the 6,000 characters the web
-  client can render eagerly; folded tool results and intermediate assistant
-  notes get 256-character previews. Parser-only request ids, raw notice kinds,
+  bytes. Ordinary opening content is clamped to the 24,000 characters the web
+  client can render eagerly; folded tool results get 256-character previews
+  and intermediate assistant notes 4,000-character previews, with notes that
+  are less than 20% over sent whole. Parser-only request ids, raw notice kinds,
   and context provenance are removed after classification. Large transcript
   frames use WebSocket per-message deflate when the client negotiates it, with
   a shared server compressor to bound memory.

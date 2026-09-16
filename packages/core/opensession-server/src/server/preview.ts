@@ -29,6 +29,7 @@ import {
   forgetRemoteSandboxPortalAgents,
   listPortalServices,
   listSandboxPortalServices,
+  MAX_PORTAL_READY_MS,
 } from "./portal-supervisor";
 import { revokeSandboxPortalGrants } from "./sandbox-portal-relay";
 import {
@@ -134,6 +135,19 @@ export interface PreviewStatus {
     | "sleeping"
     | "waking"
     | "needs_attention";
+  /** Set for a session on this machine whose Portals run in a Sandbox of
+   * their own (portal-sandbox.ts): which provider, and how that machine is
+   * doing. */
+  portalSandbox?: {
+    provider: string;
+    lifecycle?:
+      | "preparing"
+      | "awake"
+      | "sleeping"
+      | "waking"
+      | "needs_attention";
+    error?: string;
+  };
 }
 
 /** The declared Portal a repository considers its main app: the one keyed
@@ -223,11 +237,16 @@ export function parsePreviewPortalRecipes(
           Number(item.port) <= 19_000
             ? Number(item.port)
             : undefined;
+        // Clamp to the supervisor's ceiling rather than dropping the value: a
+        // dropped declaration silently falls back to the 15-second default,
+        // which killed tella-fusion's declared 600-second cold start.
         const readyTimeoutSeconds =
           Number.isInteger(item.readyTimeoutSeconds) &&
-          Number(item.readyTimeoutSeconds) >= 5 &&
-          Number(item.readyTimeoutSeconds) <= 300
-            ? Number(item.readyTimeoutSeconds)
+          Number(item.readyTimeoutSeconds) >= 5
+            ? Math.min(
+                Number(item.readyTimeoutSeconds),
+                MAX_PORTAL_READY_MS / 1_000,
+              )
             : undefined;
         return [
           {
@@ -342,10 +361,15 @@ async function listenerSnapshotRaw(): Promise<string> {
     return listenerSnapshot.raw;
   }
   if (!listenerSnapshotRefresh) {
-    listenerSnapshotRefresh = $`ss -tlnpH`
-      .quiet()
-      .nothrow()
-      .text()
+    const snapshot =
+      process.platform === "darwin"
+        ? $`/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -F pn`
+            .quiet()
+            .nothrow()
+            .text()
+            .then(macListenerRows)
+        : $`ss -tlnpH`.quiet().nothrow().text();
+    listenerSnapshotRefresh = snapshot
       .then((raw) => {
         listenerSnapshot = { raw, at: Date.now() };
         return raw;
@@ -355,6 +379,20 @@ async function listenerSnapshotRaw(): Promise<string> {
       });
   }
   return await listenerSnapshotRefresh;
+}
+
+/** Normalize lsof's machine-readable fields to the same local-address and
+ * pid columns consumed by the Linux listener parser. macOS does not ship ss. */
+export function macListenerRows(raw: string): string {
+  let pid = "";
+  const rows: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (/^p\d+$/.test(line)) pid = line.slice(1);
+    else if (line.startsWith("n") && /:\d+$/.test(line)) {
+      rows.push(`LISTEN 0 0 ${line.slice(1)} *:* ${pid ? `pid=${pid}` : ""}`);
+    }
+  }
+  return rows.join("\n");
 }
 
 /** Select socket rows by the local-address column, not by a loose substring
@@ -627,7 +665,11 @@ export async function getPreviewStatus(
   for (const service of observedServices) {
     const httpsPort = hostServiceHttpsPort(service.port);
     let previewUrl: string | null = null;
-    if (service.state === "awake" && httpsPort != null) {
+    if (
+      (service.state === "awake" ||
+        (service.managed && service.state === "sleeping")) &&
+      httpsPort != null
+    ) {
       if (
         await ensurePreviewRoute(httpsPort, `127.0.0.1:${service.port}`, host)
       ) {

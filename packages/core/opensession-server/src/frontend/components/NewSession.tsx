@@ -27,12 +27,10 @@ import {
   type ModelOption,
   type SandboxStatusInfo,
 } from "../lib/api";
-import { getCurrentUser } from "./UserPicker";
+import { getCurrentUser, useAuthStatus } from "./UserPicker";
+import { NewRepoDialog } from "./NewRepoDialog";
 import { type FileAttachment } from "../lib/images";
-import {
-  createPastedTextAttachment,
-  type PastedTextAttachment,
-} from "../lib/pasted-text";
+import { type PastedTextAttachment } from "../lib/pasted-text";
 import {
   loadDraft,
   saveDraft,
@@ -42,11 +40,13 @@ import {
   workspaceDraftKey,
 } from "../lib/drafts";
 import {
+  addDraftPastedText,
   attachToDraft,
   dropStagingAttachments,
   isStaging,
   removeDraftFile,
   removeDraftImage,
+  removeDraftPastedText,
   sameFiles,
   sameImages,
 } from "../lib/attachments";
@@ -65,7 +65,11 @@ import {
 } from "../lib/session-checkout-pref";
 import { repoSelectionHint, toggleRepoSelection } from "../lib/repo-selection";
 import { fallbackBranchName } from "../lib/workspace-draft";
-import { newSessionDefaultRepo } from "../lib/new-session-repo";
+import {
+  newSessionDefaultRepo,
+  refreshedNewSessionRepo,
+  newSessionWorkspaceScope,
+} from "../lib/new-session-repo";
 import { NewSessionPrompt } from "./NewSessionPrompt";
 import type { NewSessionPromptHandle } from "../lib/new-session-prompt-types";
 import { ComposerContextChip } from "./ComposerContextChip";
@@ -74,6 +78,7 @@ import {
   IconArrowUp,
   IconChevronDown,
   IconChevronRight,
+  IconChecklist,
   IconConnections,
   IconDotsHorizontal,
   IconEye,
@@ -81,6 +86,7 @@ import {
   IconBox,
   IconMessage,
   IconNewBranch,
+  IconPlus,
   IconX,
 } from "./icons";
 import type { WSClientMessage, WSServerMessage } from "../lib/types";
@@ -186,10 +192,10 @@ export function NewSession({
   prefillPrompt,
   initialMcpServers,
   forceMode,
-  workspaceId,
+  workspaceId: sourceWorkspaceId,
   modelWorkspaceId,
   forceRepo,
-  forceBranch,
+  forceBranch: sourceBranch,
   workspaces,
   sessions,
   onCreateStarted,
@@ -209,6 +215,12 @@ export function NewSession({
   const [repo, setRepo] = useState(
     forceMode === "scratch" ? NO_REPO : forceRepo || prefill.repo,
   );
+  // A different project must not reuse the original workspace's checkout.
+  const { workspaceId, forceBranch } = newSessionWorkspaceScope(repo, {
+    repo: forceRepo,
+    workspaceId: sourceWorkspaceId,
+    forceBranch: sourceBranch,
+  });
   // Exactly one start point owns the branch semantics. A PR is not merely an
   // existing worktree: it must send `fromPr` so the server checks out the
   // existing head branch rather than trying to create it again.
@@ -314,16 +326,9 @@ export function NewSession({
     };
   }, []);
   useEffect(() => {
-    setRepo((current) => {
-      // "No repo" is a real choice, not an unresolved id — without this it
-      // fails the `repos.some(...)` membership test below and gets replaced by
-      // the configured default the moment /repos lands.
-      if (forceRepo === NO_REPO || current === NO_REPO) return current;
-      if (forceRepo && repos.some((item) => item.id === forceRepo))
-        return forceRepo;
-      if (repos.some((item) => item.id === current)) return current;
-      return configuredDefaultRepo;
-    });
+    setRepo((current) =>
+      refreshedNewSessionRepo(current, repos, configuredDefaultRepo, forceRepo),
+    );
   }, [configuredDefaultRepo, forceRepo, repos]);
 
   /** A repo's picker label, falling back to its id before `/repos` lands. */
@@ -401,6 +406,36 @@ export function NewSession({
   );
   const [status, setStatus] = useState<CreateStatus>({ kind: "idle" });
   const busy = status.kind === "creating" || status.kind === "reconnecting";
+  // "New repository" at the foot of the Project picker: a project that exists
+  // nowhere yet starts here rather than in a scratch dir. It is a setup call,
+  // so it follows the same admin rule Settings uses to show that page.
+  // It is available in workspace composers too: choosing a new project
+  // releases the original workspace and branch through the scope above.
+  const [newRepoOpen, setNewRepoOpen] = useState(false);
+  const admin = useAuthStatus()?.admin;
+  const canCreateRepo = admin !== false;
+  function adoptCreatedRepo(created: { id: string; label?: string }) {
+    setRepos((current) =>
+      current.some((option) => option.id === created.id)
+        ? current
+        : [
+            ...current,
+            {
+              id: created.id,
+              label: created.label || created.id,
+              sharedCheckout: false,
+            },
+          ],
+    );
+    setRepo(created.id);
+    setStartPoint({ kind: "new" });
+    setExtraRepos([]);
+    // The row above is a stand-in until /repos answers with the real entry
+    // (tile colour, checkout mode); the create already invalidated the cache.
+    fetchRepos()
+      .then((items) => setRepos(repoOptions(items)))
+      .catch(() => {});
+  }
   // Which edges of the prompt have content beyond them, and so earn a hairline.
   const [edges, setEdges] = useState({ top: false, bottom: false });
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -425,6 +460,9 @@ export function NewSession({
     }
   }
   const [fastMode, setFastMode] = useState(false);
+  // Pstack mode: the pstack playbooks and skills load for every turn. Off by
+  // default so an ordinary session never sees them.
+  const [pstackMode, setPstackMode] = useState(false);
   // Pinned provider account for the new session ("" = auto pool pick).
   // Soft pin: the runner prefers it and falls back on exhaustion. Only
   // meaningful for Anthropic/OpenAI subscription-backed models.
@@ -492,6 +530,27 @@ export function NewSession({
       })
       .catch(() => {});
   }, []);
+  // A project can be set to always start in a Sandbox (Workspace >
+  // Sandboxes > Projects). Follow it whenever the project changes until the
+  // person picks for themselves; the choice stays visible in "Run in".
+  const repoSandboxDefault = sandboxStatus?.defaults?.repos?.[repo];
+  useEffect(() => {
+    if (sandboxSelectionTouched.current || !sandboxStatus) return;
+    const ready: string[] = sandboxStatus.connections?.length
+      ? sandboxStatus.connections
+          .filter((connection) => connection.state === "ready")
+          .map((connection) => connection.provider)
+      : (sandboxStatus.providers || [])
+          .filter((p) => p.configured && p.certified)
+          .map((p) => p.id);
+    setSandboxProvider(
+      repoSandboxDefault &&
+        repoSandboxDefault !== "none" &&
+        ready.includes(repoSandboxDefault)
+        ? repoSandboxDefault
+        : "",
+    );
+  }, [repo, repoSandboxDefault, sandboxStatus]);
   const readySandboxProviders: string[] = sandboxStatus?.connections?.length
     ? sandboxStatus.connections
         .filter((connection) => connection.state === "ready")
@@ -662,7 +721,7 @@ export function NewSession({
   }
 
   useEffect(() => {
-    fetchModels(modelWorkspaceId || workspaceId)
+    fetchModels(modelWorkspaceId || sourceWorkspaceId)
       .then(async (m) => {
         setModels(m.models);
         setDefaultModel(m.default);
@@ -682,7 +741,7 @@ export function NewSession({
         });
       })
       .catch(() => {});
-  }, [modelWorkspaceId, workspaceId]);
+  }, [modelWorkspaceId, sourceWorkspaceId]);
 
   // Worktrees are per-repo; refetch and reset the selection when it changes.
   // Inside a workspace, snap back to the shared sibling branch, not "New branch".
@@ -875,7 +934,10 @@ export function NewSession({
         if (repo && repo !== NO_REPO) input.repo = repo;
         return createWorkspaceApi(input);
       };
-      const parkedId = getParkedNewSessionWorkspaceId();
+      const parkedId =
+        sourceWorkspaceId || forceRepo
+          ? null
+          : getParkedNewSessionWorkspaceId();
       const workspace = workspaceId
         ? // Scoped to an existing workspace: update its draft, never rename it.
           await updateWorkspaceApi(workspaceId, { draft })
@@ -966,7 +1028,7 @@ export function NewSession({
     const createWorkspaceId =
       workspaceId ||
       prWorkspaceId ||
-      (!selectedPullRequest
+      (!selectedPullRequest && !sourceWorkspaceId && !forceRepo
         ? getParkedNewSessionWorkspaceId() || undefined
         : undefined);
     const worktreeMode =
@@ -1042,6 +1104,7 @@ export function NewSession({
     if (model) createMessage.model = model;
     // This assignment replaces `...(fastMode ? { fastMode: true } : {})`.
     if (fastMode) createMessage.fastMode = true;
+    if (pstackMode) createMessage.pstackMode = true;
     if (accountProvider && accountId) createMessage.accountId = accountId;
     // Once defaults have loaded, Host is an explicit override ("local").
     // Omitting the field would make the server re-apply the user's default.
@@ -1330,7 +1393,11 @@ export function NewSession({
               // Picking a project is a fresh source choice, even when it is the
               // same repo as the selected PR. Otherwise the title says Project
               // while create_session still checks out the PR's existing branch.
-              setStartPoint(defaultStartPoint());
+              setStartPoint(
+                nextRepo === forceRepo && sourceBranch
+                  ? { kind: "worktree", branch: sourceBranch }
+                  : { kind: "new" },
+              );
               // A plain pick is "work here", not "and here too": it replaces
               // the whole selection, which is what it did before any of this.
               // It does NOT become your default either — that is a setting
@@ -1355,6 +1422,15 @@ export function NewSession({
               repoOptionLabel,
               MULTI_MODIFIER,
             )}
+            action={
+              canCreateRepo
+                ? {
+                    label: "New repository…",
+                    icon: <IconPlus size={20} />,
+                    onSelect: () => setNewRepoOpen(true),
+                  }
+                : undefined
+            }
             // A feed workspace is repo-less by construction (its subject is a
             // a feed item, not a checkout), so its create doesn't offer one.
             disabled={busy || forceMode === "scratch"}
@@ -1385,6 +1461,11 @@ export function NewSession({
               <IconChevronDown className={CHEVRON} size={22} />
             )}
           </PaletteSelect>
+          <NewRepoDialog
+            open={newRepoOpen}
+            onOpenChange={setNewRepoOpen}
+            onCreated={adoptCreatedRepo}
+          />
         </div>
         {phoneBar && (
           <button
@@ -1489,15 +1570,15 @@ export function NewSession({
                 adoptDraftAttachments();
               },
               addAttachments: (picked) => void addAttachments(picked),
+              // Through the store, like an image or a file: the handler must
+              // not carry its own copy of the list (lib/attachments.ts).
               addPastedText: (text) => {
-                const next = [...pastedTexts, createPastedTextAttachment(text)];
-                setPastedTexts(next);
-                saveDraft(DRAFT_KEY, { pastedTexts: next });
+                addDraftPastedText(DRAFT_KEY, text);
+                adoptDraftAttachments();
               },
               removePastedText: (id) => {
-                const next = pastedTexts.filter((item) => item.id !== id);
-                setPastedTexts(next);
-                saveDraft(DRAFT_KEY, { pastedTexts: next });
+                removeDraftPastedText(DRAFT_KEY, id);
+                adoptDraftAttachments();
               },
               create: handleCreate,
               changeHasText: setHasPromptText,
@@ -1595,6 +1676,7 @@ export function NewSession({
                       FOOTER_ICON_BTN,
                       (branchPicked ||
                         sandboxProvider ||
+                        pstackMode ||
                         modelEngine(effectiveModelId) !== "pi" ||
                         selectedMcpServers.length > 0) &&
                         paletteIconBtnOn,
@@ -1716,6 +1798,18 @@ export function NewSession({
                       </Menu.Popup>
                     </Menu.SubmenuRoot>
                   )}
+                  <Menu.CheckboxItem
+                    checked={pstackMode}
+                    closeOnClick={false}
+                    onCheckedChange={setPstackMode}
+                    className="justify-between gap-3"
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <IconChecklist className="shrink-0 text-dim" size={20} />
+                      <span className="truncate">Pstack mode</span>
+                    </span>
+                    <Menu.Check on={pstackMode} className="text-dim" />
+                  </Menu.CheckboxItem>
                   <Menu.SubmenuRoot>
                     <Menu.SubmenuTrigger className="justify-between gap-3">
                       <span className="flex min-w-0 items-center gap-2">

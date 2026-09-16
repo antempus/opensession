@@ -4,6 +4,7 @@ import { splitSessionRef, subagentSuffix } from "./share-link";
 
 export type Route =
   | { view: "prs" }
+  | { view: "issues" }
   | { view: "feed" }
   | { view: "new"; prompt?: string }
   | { view: "session"; id: string; subagent?: string[] }
@@ -17,6 +18,7 @@ export type Route =
   | { view: "support"; threadId: string }
   | { view: "plain"; threadId?: string }
   | { view: "reports"; automationId?: string; reportId?: string }
+  | { view: "databases"; databaseId?: string; table?: string }
   | { view: "analytics" }
   | { view: "tasks" }
   | { view: "reviews"; id?: string }
@@ -143,10 +145,18 @@ export function parseRoute(pathname: string): Route {
     if (reports[2]) route.reportId = decodeURIComponent(reports[2]);
     return route;
   }
+  const databases = path.match(/^\/databases(?:\/([^/]+)(?:\/([^/]+))?)?$/);
+  if (databases) {
+    const route: Extract<Route, { view: "databases" }> = { view: "databases" };
+    if (databases[1]) route.databaseId = decodeURIComponent(databases[1]);
+    if (databases[2]) route.table = decodeURIComponent(databases[2]);
+    return route;
+  }
 
   if (path === "/analytics") return { view: "analytics" };
   if (path === "/feed" || path === "/people") return { view: "feed" };
   if (path === "/tasks") return { view: "tasks" };
+  if (path === "/issues") return { view: "issues" };
   if (path === "/new") return { view: "new" };
 
   const automation = path.match(/^\/automations(?:\/(.+))?$/);
@@ -215,12 +225,18 @@ export function routePath(route: Route): string {
       return route.automationId
         ? `${BASE_PATH}/reports/${encodeURIComponent(route.automationId)}${route.reportId ? `/${encodeURIComponent(route.reportId)}` : ""}`
         : `${BASE_PATH}/reports`;
+    case "databases":
+      return route.databaseId
+        ? `${BASE_PATH}/databases/${encodeURIComponent(route.databaseId)}${route.table ? `/${encodeURIComponent(route.table)}` : ""}`
+        : `${BASE_PATH}/databases`;
     case "analytics":
       return `${BASE_PATH}/analytics`;
     case "feed":
       return `${BASE_PATH}/feed`;
     case "tasks":
       return `${BASE_PATH}/tasks`;
+    case "issues":
+      return `${BASE_PATH}/issues`;
     case "new":
       return route.prompt
         ? `${BASE_PATH}/new?prompt=${encodeURIComponent(route.prompt)}`

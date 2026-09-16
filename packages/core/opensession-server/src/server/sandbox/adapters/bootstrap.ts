@@ -42,9 +42,10 @@
  * Credential trust note: a SCOPED slice of `~/.opensession-claude-accounts.json`
  * (Claude OAuth pool) is uploaded into the sandbox per LAUNCH (not at
  * bootstrap): only the run's pinned account when spec.accountId is set, else
- * the shared pool accounts plus the run user's own personal accounts — never
- * another user's personal subscription (accountsForRemoteUpload,
- * claude-accounts.ts). That's deliberately narrower than the docker
+ * the shared pool accounts plus the account user's own personal accounts
+ * (the person who pressed send, remoteRunAccountPolicy) — never another
+ * user's personal subscription (accountsForRemoteUpload, claude-accounts.ts).
+ * That's deliberately narrower than the docker
  * provider's ro mount of the full store, because this is third-party compute;
  * a self-hoster who doesn't accept even the scoped upload runs these adapters
  * against their OWN Daytona/E2B deployment (both are self-hostable).
@@ -62,6 +63,7 @@ import {
   rmSync,
   unlinkSync,
 } from "fs";
+import { readdir, readFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "path";
 import { OPENSESSION_SESSIONS_DIR, homeDir, stateDir } from "../../paths";
 import {
@@ -102,8 +104,11 @@ import {
 } from "../../models";
 import { filterMcpServers } from "../../runner-shared";
 import { githubCredentialUser } from "../../auto-continue";
-import { GITHUB_RUN_AUTH_FILE_ENV, githubAuthEnv } from "../../github-auth";
-import { isMachineActor } from "../../session-actors";
+import {
+  GITHUB_RUN_AUTH_FILE_ENV,
+  githubUserAuthProjection,
+} from "../../github-auth";
+import { isMachineActor, providerAccountUser } from "../../session-actors";
 import {
   appendTranscriptEntries,
   recordEngineSessionOwner,
@@ -332,6 +337,33 @@ function remoteSettingsProviderIds(
       .map(remoteModelProviderId)
       .filter((id): id is string => !!id),
   );
+}
+
+/**
+ * Account identity and pin policy for one remote run. `accountUser` is the
+ * person whose personal subscriptions may be uploaded: the takeover identity
+ * when the trusted host set one, else the run user, else the session creator
+ * (providerAccountUser drops machine actors). An automation's own turn names
+ * no person, so it must run on its pinned account and never rotates off it.
+ * A person who took the session over pays with their own subscription,
+ * personal accounts first and the shared pool as backup, so their turn
+ * carries no pin. MCP and GitHub policy keep reading spec.user, so the
+ * automation's restrictions still apply to that turn.
+ */
+export function remoteRunAccountPolicy(
+  spec: Pick<
+    RunHostSpec,
+    "trustProfile" | "user" | "accountUser" | "mcpGrantUser"
+  >,
+): { accountUser: string | undefined; pinnedAutomationTurn: boolean } {
+  const accountUser = providerAccountUser(
+    spec.accountUser ?? spec.user,
+    spec.mcpGrantUser,
+  );
+  return {
+    accountUser,
+    pinnedAutomationTurn: spec.trustProfile === "automation" && !accountUser,
+  };
 }
 
 /** Strip host-only and unknown account fields before writing Claude tokens to a guest. */
@@ -597,6 +629,41 @@ export function findRemoteStateBySession(
     listRemoteStates(provider).find((state) => state.sessionId === sessionId) ||
     null
   );
+}
+
+/** Lifecycle callers must also find machines whose setup failed before the
+ * session acquired a sandboxId. Read only provider mappings, never actor DBs,
+ * and keep this recovery lookup off synchronous gateway I/O. */
+export async function findRemoteStateBySessionAsync(
+  provider: string,
+  sessionId: string,
+): Promise<RemoteSandboxState | null> {
+  let files: string[];
+  try {
+    files = await readdir(STATE_DIR);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  for (const file of files) {
+    if (!file.startsWith(`${provider}-`) || !file.endsWith(".json")) continue;
+    let raw: string;
+    try {
+      raw = await readFile(`${STATE_DIR}/${file}`, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    let state: RemoteSandboxState;
+    try {
+      state = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (state?.provider === provider && state.sessionId === sessionId)
+      return withTrustPolicy(state);
+  }
+  return null;
 }
 
 /** Enumerate a provider's persisted sandboxes. Used by provider-side orphan
@@ -985,7 +1052,7 @@ export async function assertDialbackReachable(
 function need(r: ExecResult, what: string): void {
   if (r.exitCode !== 0) {
     throw new Error(
-      `remote sandbox bootstrap failed (${what}): ${redactUrl((r.stderr || r.stdout).trim().slice(0, 500))}`,
+      `remote sandbox bootstrap failed (${what}, exit ${r.exitCode}): ${redactUrl((r.stderr.trim() || r.stdout.trim() || "no command output").slice(0, 500))}`,
     );
   }
 }
@@ -1721,7 +1788,14 @@ export async function setupRemoteWorkspace(
   defaultBranch: string,
   repoId?: string,
   identity?: Omit<WorkloadIdentityContext, "lifecycle">,
-  options: { seedPrivateFiles?: boolean; runLifecycleHooks?: boolean } = {},
+  options: {
+    seedPrivateFiles?: boolean;
+    runLifecycleHooks?: boolean;
+    /** Checkpoint to restore into a FRESHLY materialized workspace (see
+     * sandbox/checkpoint.ts). A workspace already on disk keeps its disk.
+     * Refused, loudly, unless it was taken on `branch`. */
+    restoreCheckpoint?: { ref: string; commit: string; branch: string };
+  } = {},
 ): Promise<void> {
   const startedAt = Date.now();
   const mark = (stage: string) =>
@@ -1833,20 +1907,48 @@ export async function setupRemoteWorkspace(
     }
   }
   mark("branch ready");
-  // Installation tokens expire in about an hour. Keep them only for this
-  // bounded clone/fetch, then leave a credential-free GitHub origin. Every run
-  // projects a fresh token through the process-local credential helper below,
-  // so lazy blob fetches and pushes never depend on a token at rest.
-  if (isGithubHttpsUrl(cloneUrl)) {
-    const safeOrigin = credentialFreeHttpsUrl(cloneUrl);
-    const scrubbed = await driver.exec(
-      `git remote set-url origin ${shellQuoteWord(safeOrigin)}`,
-      { cwd },
-    );
-    if (scrubbed.exitCode !== 0)
-      throw new Error(
-        `could not scrub GitHub clone credential: ${scrubbed.stderr.trim().slice(0, 300)}`,
+  try {
+    // A fresh workspace (cold clone or adopted warm clone) continues from the
+    // session's last checkpoint while origin still carries the clone
+    // credential: the branch lands on the checkpoint head with its uncommitted
+    // changes. A failure here is loud, because silently starting from origin's
+    // branch tip is exactly the data loss the checkpoint exists to prevent.
+    if (options.restoreCheckpoint && workspaceState !== "cwd") {
+      const { ref, commit, branch: taken } = options.restoreCheckpoint;
+      if (taken !== branch)
+        throw new Error(
+          `checkpoint ${commit.slice(0, 12)} was taken on branch ${taken}, but this session is on ${branch}; rebuild the Sandbox to continue from origin`,
+        );
+      const restored = await driver.exec(
+        checkpointRestoreScript(ref, commit, { branch }),
+        { cwd, timeoutMs: 300_000 },
       );
+      if (restored.exitCode !== 0) {
+        throw new Error(
+          `could not restore checkpoint ${commit.slice(0, 12)} from ${ref}: ` +
+            `${redactUrl((restored.stderr || restored.stdout).trim().slice(0, 300))}`,
+        );
+      }
+      mark(`checkpoint ${commit.slice(0, 12)} restored`);
+    }
+  } finally {
+    // Installation tokens expire in about an hour. Keep them only for this
+    // bounded clone/fetch/restore, then leave a credential-free GitHub origin,
+    // also when the restore just failed and the Sandbox is about to be parked
+    // as needs-attention. Every run projects a fresh token through the
+    // process-local credential helper below, so lazy blob fetches and pushes
+    // never depend on a token at rest.
+    if (isGithubHttpsUrl(cloneUrl)) {
+      const safeOrigin = credentialFreeHttpsUrl(cloneUrl);
+      const scrubbed = await driver.exec(
+        `git remote set-url origin ${shellQuoteWord(safeOrigin)}`,
+        { cwd },
+      );
+      if (scrubbed.exitCode !== 0)
+        throw new Error(
+          `could not scrub GitHub clone credential: ${scrubbed.stderr.trim().slice(0, 300)}`,
+        );
+    }
   }
   // Per-session only: warm/template preparation never calls this path, so
   // private files are injected after restore and can never land in a shared
@@ -1867,6 +1969,40 @@ export async function setupRemoteWorkspace(
     );
     mark("lifecycle ready");
   }
+}
+
+/** Shell that restores a checkpoint into the checkout at the current
+ * directory: fetch the hidden ref, verify it is the recorded commit, land the
+ * branch on the checkpoint's parent, and leave the checkpointed tree as
+ * uncommitted changes (sandbox/checkpoint.ts explains the commit shape).
+ * `branch` refuses unless that is the checkout's current branch, so a
+ * checkpoint never lands on a branch other than the one it was taken from.
+ * `onlyForward` additionally refuses unless the current HEAD is an ancestor
+ * of the checkpoint, so a checkout that is reused rather than fresh can lose
+ * no commit. Nothing is touched before every check has passed. */
+export function checkpointRestoreScript(
+  ref: string,
+  commit: string,
+  options: { branch?: string; onlyForward?: boolean } = {},
+): string {
+  return [
+    ...(options.branch
+      ? [
+          `test "$(git branch --show-current)" = ${shellQuoteWord(options.branch)}`,
+        ]
+      : []),
+    `git fetch --no-tags --quiet origin ${shellQuoteWord(`+${ref}:refs/opensession/checkpoint`)}`,
+    `test "$(git rev-parse --verify 'refs/opensession/checkpoint^{commit}')" = ${shellQuoteWord(commit)}`,
+    ...(options.onlyForward
+      ? [
+          // merge-base says nothing on failure; the caller relays stderr.
+          "{ git merge-base --is-ancestor HEAD refs/opensession/checkpoint || { echo 'this checkout has commits the checkpoint does not include; restoring would drop them' >&2; false; }; }",
+        ]
+      : []),
+    "git -c advice.detachedHead=false reset --hard --quiet refs/opensession/checkpoint",
+    "git reset --mixed --quiet 'refs/opensession/checkpoint^'",
+    "git update-ref -d refs/opensession/checkpoint",
+  ].join(" && ");
 }
 
 const REMOTE_LIFECYCLE_DIR = `${REMOTE_HOME}/.opensession/lifecycle`;
@@ -2110,7 +2246,9 @@ function makeRemoteLauncher(
       const secureFiles: string[] = [];
       const secureDirectories: string[] = [];
       const automationProfile = spec.trustProfile === "automation";
-      if (automationProfile && !spec.accountId) {
+      const { accountUser, pinnedAutomationTurn } =
+        remoteRunAccountPolicy(spec);
+      if (pinnedAutomationTurn && !spec.accountId) {
         throw new Error(
           "automation sandbox runs require a pinned model account",
         );
@@ -2125,11 +2263,11 @@ function makeRemoteLauncher(
       );
       const accounts = usesAnthropic
         ? projectRemoteClaudeAccounts(
-            accountsForRemoteUpload(spec.user, spec.accountId),
+            accountsForRemoteUpload(accountUser, spec.accountId),
           )
         : [];
       if (
-        automationProfile &&
+        pinnedAutomationTurn &&
         usesAnthropic &&
         !accounts.some((account) => account.id === spec.accountId)
       ) {
@@ -2171,13 +2309,15 @@ function makeRemoteLauncher(
       // a freshly minted repository-scoped App token: the code set for code
       // mode, the read set for ask mode (the review workflows chew on
       // untrusted PR content and can print their environment). Automations
-      // and machine senders never receive a person's token.
+      // and machine senders never receive a person's token. A person's
+      // projection also names their login (non-secret) so the guest applies
+      // the merge guard the way a host run would; App tokens carry no login.
       const githubPerson = githubCredentialUser(spec.user, spec.author?.name);
       let githubAuth: Record<string, string> =
         !automationProfile &&
         spec.mode === "code" &&
         !isMachineActor(githubPerson)
-          ? githubAuthEnv(githubPerson)
+          ? githubUserAuthProjection(githubPerson)
           : {};
       if (!githubAuth.GH_TOKEN) {
         // The sandbox origin is mutable by repository setup code. Bind service
@@ -2280,11 +2420,11 @@ function makeRemoteLauncher(
               spec.accountId
                 ? [spec.accountId]
                 : readModelProviderConfig()?.openaiAccounts,
-              spec.user,
+              accountUser,
             )
           : { accounts: [], seeds: [], skipped: [] };
       if (
-        automationProfile &&
+        pinnedAutomationTurn &&
         usesOpenai &&
         !openaiUpload.accounts.some((account) => account.id === spec.accountId)
       ) {
@@ -2352,13 +2492,13 @@ function makeRemoteLauncher(
       const usesXai = remoteRunNeedsXai(spec.model, spec.fallbackModel);
       const xaiUpload = usesXai
         ? await buildXaiRemoteUpload({
-            user: spec.user,
+            user: accountUser,
             accountId: spec.accountId,
             restrictIds: readModelProviderConfig()?.xaiAccounts,
           })
         : { accounts: [], skipped: [] };
       if (
-        automationProfile &&
+        pinnedAutomationTurn &&
         usesXai &&
         !xaiUpload.accounts.some((account) => account.id === spec.accountId)
       ) {
@@ -2562,6 +2702,7 @@ function recordForSpec(
     mode: spec.mode,
     mcpServers: spec.mcpServers,
     user: spec.user,
+    accountUser: spec.accountUser,
     deniedTools: spec.deniedTools,
     confirmTools: spec.confirmTools,
     aws: spec.aws,
@@ -2570,6 +2711,7 @@ function recordForSpec(
     transientFallback: spec.transientFallback,
     effort: spec.effort,
     fastMode: spec.fastMode,
+    pstackMode: spec.pstackMode,
     accountId: spec.accountId,
     accountStrict: spec.accountStrict,
     usageCredits: spec.usageCredits,
@@ -2894,6 +3036,7 @@ export async function resumeRemoteSandboxRun(
         registerRunToken(oldSpec.rpcToken, {
           sessionId: oldSpec.osSessionId,
           user: oldSpec.user,
+          humanPrompter: oldSpec.accountUser,
         });
       }
       registerRunWsHost(oldSpec.hostId, oldSpec.wsToken);
@@ -2938,7 +3081,11 @@ export async function resumeRemoteSandboxRun(
     ? crypto.randomUUID()
     : undefined;
   if (rpcToken)
-    registerRunToken(rpcToken, { sessionId: run.osSessionId, user: run.user });
+    registerRunToken(rpcToken, {
+      sessionId: run.osSessionId,
+      user: run.user,
+      humanPrompter: run.accountUser,
+    });
   const hostId = `rh-${Bun.randomUUIDv7()}`;
   const spec: RunHostSpec =
     recovery.kind === "replay"
@@ -2976,9 +3123,11 @@ export async function resumeRemoteSandboxRun(
           aws: run.aws,
           author: oldSpec?.author,
           user: run.user,
+          accountUser: run.accountUser,
           fallbackModel: run.fallbackModel,
           effort: run.effort,
           fastMode: run.fastMode,
+          pstackMode: run.pstackMode,
           accountId: run.accountId,
           accountStrict: run.accountStrict,
           usageCredits: run.usageCredits,

@@ -38,6 +38,7 @@ import { reviewLoopResult, type ReviewLoopResult } from "../lib/review-loop";
 import { useSidePanel } from "./useSidePanel";
 import { useSessionAssets } from "../components/AssetsPanel";
 import { useSessionReports } from "../components/SessionReportsPanel";
+import { useSessionDatabases } from "../components/SessionDatabasesPanel";
 import { fetchSessionNotesApi } from "../lib/api";
 import { markNotesRead } from "../lib/note-reads";
 import { clearMention, onMentionsChanged } from "../lib/mentions";
@@ -54,6 +55,7 @@ import type { useSessionSocket } from "./useSessionSocket";
 import type { LiveTurnStore } from "../lib/live-turn-store";
 import type { TranscriptViewStore } from "../lib/transcript-view-store";
 import type { SessionPrRef } from "../lib/types";
+import type { PortalTarget } from "../lib/portals";
 import type { SessionViewerProps } from "../lib/session-viewer-bindings";
 
 type WorkspaceSummaryStyle = CSSProperties & {
@@ -304,6 +306,41 @@ export function useSessionViewStateController({
   const [panelTerminalMounted, setPanelTerminalMounted] = useState(
     () => activePanelOpen && sidePanel.page === "terminal",
   );
+  const [pinnedPortal, setPinnedPortal] = useState<PortalTarget | null>(null);
+  const handledSidebarPortalsRef = useRef(new Set<string>());
+  useEffect(() => {
+    handledSidebarPortalsRef.current.clear();
+  }, [session.id]);
+  const sidebarPortalIdentity = (target: PortalTarget) =>
+    `${target.sessionId}\u0000${target.key}\u0000${target.name}`;
+  const pinPortal = (target: PortalTarget) => {
+    if (target.sessionId !== session.id) return;
+    const identity = sidebarPortalIdentity(target);
+    handledSidebarPortalsRef.current.add(identity);
+    setPinnedPortal(target);
+  };
+  const autoPinPortal = (target: PortalTarget) => {
+    if (
+      target.sessionId !== session.id ||
+      pinnedPortal?.sessionId === session.id
+    )
+      return false;
+    const identity = sidebarPortalIdentity(target);
+    if (handledSidebarPortalsRef.current.has(identity)) return false;
+    handledSidebarPortalsRef.current.add(identity);
+    setPinnedPortal(target);
+    return true;
+  };
+  const closePinnedPortal = () => {
+    if (pinnedPortal?.sessionId !== session.id) return;
+    setPinnedPortal(null);
+  };
+  const expandPinnedPortal = () => {
+    if (pinnedPortal?.sessionId !== session.id) return null;
+    const target = pinnedPortal;
+    setPinnedPortal(null);
+    return target;
+  };
   const assets = useSessionAssets(session.id, addHandler);
   const assetPaths = useMemo(
     () => assets.files.map((file) => file.path),
@@ -328,6 +365,7 @@ export function useSessionViewStateController({
     openAssetsRef.current?.();
   }, []);
   const sessionReports = useSessionReports(session.id, addHandler);
+  const sessionDatabases = useSessionDatabases(session.id, addHandler);
   const [notes, setNotes] = useState<SessionNote[]>([]);
   const [noteMode, setNoteMode] = useState(false);
   const attachmentDrop = useSessionAttachmentDrop({
@@ -437,6 +475,12 @@ export function useSessionViewStateController({
       setPanelPage,
       panelTerminalMounted,
       setPanelTerminalMounted,
+      pinnedPortal:
+        pinnedPortal?.sessionId === session.id ? pinnedPortal : null,
+      pinPortal,
+      autoPinPortal,
+      closePinnedPortal,
+      expandPinnedPortal,
     },
     assets: {
       assetFiles: assets.files,
@@ -452,6 +496,7 @@ export function useSessionViewStateController({
     },
     notes: {
       sessionReports,
+      sessionDatabases,
       notes,
       setNotes,
       noteMode,

@@ -6,7 +6,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { opendir } from "fs/promises";
+import { opendir, readFile, stat } from "fs/promises";
 import { OPENSESSION_SESSIONS_DIR } from "./paths";
 import { statePath } from "./paths";
 import { existsSync } from "fs";
@@ -164,9 +164,8 @@ export function readEngineTranscript(
   return parseTranscript(path);
 }
 
-/** readEngineTranscript with the file parse yielding to the event loop —
- *  identical output. The pi SQLite read stays sync (bounded pages),
- *  and so does the pi store read (same bounded store pages). */
+/** Read legacy files or the owned store asynchronously. Store-backed reads
+ * must resolve the owning session through the canonical access boundary. */
 export async function readEngineTranscriptAsync(
   worktreeDir: string,
   engineSessionId: string,
@@ -220,59 +219,46 @@ export async function readEngineHandoffTranscriptAsync(
  *     osSessionId);
  *  2. the persisted engine→unified map (sessionForEngineId — recorded before the
  *     runner ever yields init, and never cleared on run end);
- *  3. the session scan — every engine slot, including a claude-slot match for
+ *  3. a memory-cache hint — every engine slot, including a claude-slot match for
  *     slack/linear files whose pi id predates the pi slot there (equality on
  *     the uuid can only mean this engine session; ses_/claude ids of other
  *     sessions never collide with one of these uuids).
  */
-function engineStoreOwner(engineSessionId: string): UnifiedSession | undefined {
+async function engineStoreOwner(
+  engineSessionId: string,
+): Promise<UnifiedSession | undefined> {
   if (!engineSessionId) return undefined;
-  try {
-    // Call-time require, not a static import: session-cache imports this
-    // module (getAllSessions), so the static edge must stay one-directional.
-    // By the time a transcript is read the cache module is long-loaded —
-    // this is a module-cache hit (the importLegacyIntoStore pattern in
-    // pi-transcript.ts).
-    const cacheMod =
-      require("./session-cache") as typeof import("./session-cache");
-    const sessions = cacheMod.getCachedSessions();
-    const byUnifiedId = (unifiedId: string | undefined) =>
-      unifiedId
-        ? sessions.find(
-            (s) => s.id === unifiedId || s.aliasIds?.includes(unifiedId),
-          )
-        : undefined;
-    const journaled = activeRunRecords().find(
-      (r) => r.claudeSessionId === engineSessionId && r.osSessionId,
+  // The journal/map name a known session even when the list cache is cold or
+  // invalidated. Resolve it asynchronously at the canonical access boundary;
+  // the cache is only a hint for legacy sessions without a recorded mapping.
+  const cache = await import("./session-cache");
+  const journaled = activeRunRecords().find(
+    (record) =>
+      record.claudeSessionId === engineSessionId && record.osSessionId,
+  );
+  const id = journaled?.osSessionId ?? sessionForEngineId(engineSessionId);
+  if (id) return cache.findSessionAsync(id);
+  const hint = cache
+    .peekCachedSessions()
+    .find(
+      (session) =>
+        session.piSessionId === engineSessionId ||
+        session.codexThreadId === engineSessionId ||
+        session.claudeSessionId === engineSessionId,
     );
-    return (
-      byUnifiedId(journaled?.osSessionId) ??
-      byUnifiedId(sessionForEngineId(engineSessionId)) ??
-      sessions.find(
-        (s) =>
-          s.piSessionId === engineSessionId ||
-          s.codexThreadId === engineSessionId ||
-          s.claudeSessionId === engineSessionId,
-      )
-    );
-  } catch (e) {
-    console.warn(
-      `[sessions] engine store owner resolution failed for ${engineSessionId}:`,
-      e instanceof Error ? e.message : e,
-    );
-    return undefined;
-  }
+  return hint ? cache.findSessionAsync(hint.id) : undefined;
 }
 
 function engineStoreTranscript(engineSessionId: string): TranscriptEntry[] {
-  const owner = engineStoreOwner(engineSessionId);
-  return owner ? mergedSessionTranscript(owner) : [];
+  throw new Error(
+    "Synchronous engine-store reads cannot authorize session scope; use readEngineTranscriptAsync",
+  );
 }
 
 async function engineStoreTranscriptAsync(
   engineSessionId: string,
 ): Promise<TranscriptEntry[]> {
-  const owner = engineStoreOwner(engineSessionId);
+  const owner = await engineStoreOwner(engineSessionId);
   return owner ? mergedSessionTranscriptAsync(owner) : [];
 }
 
@@ -282,7 +268,7 @@ async function engineStoreTranscriptAsync(
 async function engineStoreHandoffTranscriptAsync(
   engineSessionId: string,
 ): Promise<TranscriptEntry[]> {
-  const owner = engineStoreOwner(engineSessionId);
+  const owner = await engineStoreOwner(engineSessionId);
   if (!owner || owner.id.startsWith("plain-")) return [];
   try {
     return (await transcript.readHandoffTail(owner.id)).entries;
@@ -671,17 +657,38 @@ function readJsonSafe<T>(path: string): T | null {
   try {
     return JSON.parse(readFileSync(path, "utf-8"));
   } catch (e) {
-    // A missing file is normal; a corrupt one makes the session silently
-    // vanish from the UI, so leave a trace.
-    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT")
-      console.warn(`[sessions] Failed to parse ${path}:`, e);
-    return null;
+    return readJsonFailure(path, e);
   }
+}
+
+/** readJsonSafe for the gateway thread: the same contract without blocking. */
+async function readJsonSafeAsync<T>(path: string): Promise<T | null> {
+  try {
+    return JSON.parse(await readFile(path, "utf-8"));
+  } catch (e) {
+    return readJsonFailure(path, e);
+  }
+}
+
+function readJsonFailure(path: string, e: unknown): null {
+  // A missing file is normal; a corrupt one makes the session silently
+  // vanish from the UI, so leave a trace.
+  if ((e as NodeJS.ErrnoException)?.code !== "ENOENT")
+    console.warn(`[sessions] Failed to parse ${path}:`, e);
+  return null;
 }
 
 function getFileMtime(path: string): string {
   try {
     return statSync(path).mtime.toISOString();
+  } catch {
+    return new Date(0).toISOString();
+  }
+}
+
+async function getFileMtimeAsync(path: string): Promise<string> {
+  try {
+    return (await stat(path)).mtime.toISOString();
   } catch {
     return new Date(0).toISOString();
   }
@@ -749,10 +756,19 @@ const SIDECAR_SOURCE_OWNED = new Set<string>([
 function overlaySidecarExtras(session: UnifiedSession): UnifiedSession {
   const path = `${SESSIONS_DIR}/${session.id}.json`;
   if (!existsSync(path)) return session;
-  const data = readJsonSafe<NativeSessionFile>(path);
-  if (!data) return session;
+  return applySidecarExtras(session, readJsonSafe<NativeSessionFile>(path));
+}
+
+/** The overlay half of overlaySidecarExtras, for a caller that already holds
+ * the sidecar document: the metadata facade has just committed it and must
+ * not read it back. */
+function applySidecarExtras(
+  session: UnifiedSession,
+  sidecar: NativeSessionFile | null | undefined,
+): UnifiedSession {
+  if (!sidecar) return session;
   const row = session as unknown as Record<string, unknown>;
-  for (const [key, value] of Object.entries(data)) {
+  for (const [key, value] of Object.entries(sidecar)) {
     if (value === undefined || SIDECAR_SOURCE_OWNED.has(key)) continue;
     row[key] = value;
   }
@@ -764,7 +780,18 @@ function slackSessionRow(file: string): UnifiedSession | null {
   const path = `${SLACK_SESSIONS_DIR}/${file}`;
   const data = readJsonSafe<SlackSessionFile>(path);
   if (!data) return null;
+  return overlaySidecarExtras(
+    slackSessionRowFromData(file, data, () => getFileMtime(path)),
+  );
+}
 
+/** The row a Slack session file projects to, before its sidecar overlay.
+ * `fileMtime` stands in for the timestamps an older loop did not record. */
+function slackSessionRowFromData(
+  file: string,
+  data: SlackSessionFile,
+  fileMtime: () => string,
+): UnifiedSession {
   const branch = data.branch || file.replace(".json", "");
   const startedBy = data.userId ? resolveSlackUser(data.userId) : null;
 
@@ -772,10 +799,12 @@ function slackSessionRow(file: string): UnifiedSession | null {
   const id = `slack-${file.replace(".json", "")}`;
   const archived = isArchivedId(id);
 
-  return overlaySidecarExtras({
+  return {
     id,
     claudeSessionId: data.claudeSessionId || null,
     source: "slack",
+    // Match the Slack loop for legacy files; never override an explicit ask.
+    mode: data.mode ?? "code",
     branch,
     worktreeDir: data.worktreeDir || null,
     createdBy: startedBy,
@@ -784,8 +813,8 @@ function slackSessionRow(file: string): UnifiedSession | null {
     // `branch` is the last resort: for a thread/DM session it is the raw
     // `<channel>-<threadTs>` key, which is not a name anyone can read.
     title: data.title?.trim() || branch,
-    lastActivity: data.lastActivity || data.createdAt || getFileMtime(path),
-    createdAt: data.createdAt || getFileMtime(path),
+    lastActivity: data.lastActivity || data.createdAt || fileMtime(),
+    createdAt: data.createdAt || fileMtime(),
     isRunning: false,
     transcriptPath: null,
     slackThread: data.channel
@@ -799,7 +828,7 @@ function slackSessionRow(file: string): UnifiedSession | null {
     piSessionId: data.piSessionId || undefined,
     archived: archived || undefined,
     archivedReason: archived ? getArchiveReason(id) || "manual" : undefined,
-  });
+  };
 }
 
 /** Resolve one exact Slack-owned session without waiting for the materialized
@@ -819,6 +848,112 @@ export function readSlackSession(sessionId: string): UnifiedSession | null {
   return session;
 }
 
+/** The list row for one Slack- or Linear-owned session with the sidebar
+ * overlays applied and no transcript resolution: the Slack/Linear counterpart
+ * of readNativeSessionListRow, for the targeted index write a publish makes.
+ * Their files are written by the agent loops, not the metadata facade, so this
+ * targeted read is the only way a fresh Slack thread reaches the list index
+ * between full rebuilds. Undefined for a native id, an unknown key, or a key
+ * that escapes the source directory. */
+export function readAgentSessionListRow(
+  sessionId: string,
+  aliasIds?: readonly string[],
+): UnifiedSession | undefined {
+  const source = agentSessionSource(sessionId);
+  if (!source) return undefined;
+  const session =
+    source.kind === "slack"
+      ? slackSessionRow(source.file)
+      : linearSessionRow(source.file);
+  return agentSessionListRow(sessionId, session, aliasIds);
+}
+
+/**
+ * readAgentSessionListRow for the metadata facade, which has just committed
+ * `sidecar`, the natively owned extras stored under this id (normally with
+ * no `id` of their own), and must neither read that document back nor block
+ * the gateway thread. The agent-owned source file is read asynchronously and
+ * the committed sidecar is overlaid in place of the file read. Undefined for
+ * a native id, an unknown key, or a key that escapes the source directory.
+ */
+export async function readAgentSessionListRowAsync(
+  sessionId: string,
+  aliasIds: readonly string[] | undefined,
+  sidecar: NativeSessionFile | null | undefined,
+): Promise<UnifiedSession | undefined> {
+  const source = agentSessionSource(sessionId);
+  if (!source) return undefined;
+  const session = await agentSourceRowAsync(source);
+  return agentSessionListRow(
+    sessionId,
+    session && applySidecarExtras(session, sidecar),
+    aliasIds,
+  );
+}
+
+const NATIVE_SESSION_ID = /^[A-Za-z0-9_-]{1,160}$/;
+
+/** The id rule the native file reader enforces before it opens a path. */
+export function isNativeSessionId(sessionId: string): boolean {
+  return NATIVE_SESSION_ID.test(sessionId);
+}
+
+/** Whether `sessionId` names a Slack- or Linear-owned session file inside
+ * its source directory: the rule the agent file reader enforces. Slack
+ * thread keys carry a dotted timestamp, which the native rule refuses. */
+export function isAgentSessionId(sessionId: string): boolean {
+  return agentSessionSource(sessionId) !== undefined;
+}
+
+type AgentSessionSource = { kind: "slack" | "linear"; file: string };
+
+/** The agent-owned source file behind a `slack-` or `linear-` id. */
+function agentSessionSource(sessionId: string): AgentSessionSource | undefined {
+  const kind = sessionId.startsWith("slack-")
+    ? "slack"
+    : sessionId.startsWith("linear-")
+      ? "linear"
+      : null;
+  if (!kind) return undefined;
+  const key = sessionId.slice(kind.length + 1);
+  if (!key || key.includes("/") || key.includes("\\")) return undefined;
+  return { kind, file: `${key}.json` };
+}
+
+/** slackSessionRow / linearSessionRow without the sidecar overlay and
+ * without blocking: the source file and its mtime are read asynchronously. */
+async function agentSourceRowAsync(
+  source: AgentSessionSource,
+): Promise<UnifiedSession | null> {
+  if (source.kind === "slack") {
+    if (SKIP_FILES.has(source.file)) return null;
+    const path = `${SLACK_SESSIONS_DIR}/${source.file}`;
+    const data = await readJsonSafeAsync<SlackSessionFile>(path);
+    if (!data) return null;
+    // Only a file that records no creation time falls back to its mtime;
+    // the constructor never asks otherwise, so the stat is skipped as the
+    // sync reader skips it.
+    const mtime = data.createdAt || (await getFileMtimeAsync(path));
+    return slackSessionRowFromData(source.file, data, () => mtime);
+  }
+  const path = `${LINEAR_SESSIONS_DIR}/${source.file}`;
+  const data = await readJsonSafeAsync<LinearSessionFile>(path);
+  if (!data) return null;
+  const mtime = await getFileMtimeAsync(path);
+  return linearSessionRowFromData(data, () => mtime);
+}
+
+function agentSessionListRow(
+  sessionId: string,
+  session: UnifiedSession | null,
+  aliasIds: readonly string[] | undefined,
+): UnifiedSession | undefined {
+  if (!session || session.id !== sessionId) return undefined;
+  if (aliasIds?.length) session.aliasIds = [...aliasIds];
+  applySessionOverlays(session);
+  return session;
+}
+
 function* slackSessionRows(): Generator<UnifiedSession> {
   if (!existsSync(SLACK_SESSIONS_DIR)) return [];
 
@@ -832,58 +967,72 @@ function scanSlackSessions(): UnifiedSession[] {
   return [...slackSessionRows()];
 }
 
+function linearSessionRow(file: string): UnifiedSession | null {
+  if (!file.endsWith(".json")) return null;
+  const path = `${LINEAR_SESSIONS_DIR}/${file}`;
+  const data = readJsonSafe<LinearSessionFile>(path);
+  if (!data) return null;
+  return overlaySidecarExtras(
+    linearSessionRowFromData(data, () => getFileMtime(path)),
+  );
+}
+
+/** The row a Linear session file projects to, before its sidecar overlay.
+ * `fileMtime` is the file's own clock: its creation time, and its activity
+ * when the file records none. */
+function linearSessionRowFromData(
+  data: LinearSessionFile,
+  fileMtime: () => string,
+): UnifiedSession {
+  const rawName =
+    data.participants?.[0]?.name || data.lastActiveUser?.name || null;
+  // Clean up email-style names (e.g. "john@example.com" → "John")
+  const startedBy = rawName?.includes("@")
+    ? rawName.split("@")[0].charAt(0).toUpperCase() +
+      rawName.split("@")[0].slice(1)
+    : rawName;
+
+  const title = data.issueIdentifier
+    ? `${data.issueIdentifier}: ${data.issueTitle || data.branch}`
+    : data.branch;
+
+  const id = `linear-${data.branch}`;
+  const archived = isArchivedId(id);
+
+  return {
+    id,
+    claudeSessionId: data.claudeSessionId,
+    source: "linear",
+    branch: data.branch,
+    worktreeDir: data.worktreeDir || null,
+    createdBy: startedBy,
+    startedBy,
+    title,
+    lastActivity: data.updatedAt || fileMtime(),
+    createdAt: fileMtime(),
+    isRunning: false,
+    transcriptPath: null,
+    linearIssue: data.issueIdentifier
+      ? {
+          identifier: data.issueIdentifier,
+          title: data.issueTitle || data.branch,
+          url: data.issueUrl,
+        }
+      : undefined,
+    model: data.model,
+    // Same pi-slot mapping as the slack scan (agent-session-sync writes it).
+    piSessionId: data.piSessionId || undefined,
+    archived: archived || undefined,
+    archivedReason: archived ? getArchiveReason(id) || "manual" : undefined,
+  };
+}
+
 function* linearSessionRows(): Generator<UnifiedSession> {
   if (!existsSync(LINEAR_SESSIONS_DIR)) return [];
 
   for (const file of readdirSync(LINEAR_SESSIONS_DIR)) {
-    if (!file.endsWith(".json")) continue;
-    const data = readJsonSafe<LinearSessionFile>(
-      `${LINEAR_SESSIONS_DIR}/${file}`,
-    );
-    if (!data) continue;
-
-    const rawName =
-      data.participants?.[0]?.name || data.lastActiveUser?.name || null;
-    // Clean up email-style names (e.g. "john@example.com" → "John")
-    const startedBy = rawName?.includes("@")
-      ? rawName.split("@")[0].charAt(0).toUpperCase() +
-        rawName.split("@")[0].slice(1)
-      : rawName;
-
-    const title = data.issueIdentifier
-      ? `${data.issueIdentifier}: ${data.issueTitle || data.branch}`
-      : data.branch;
-
-    const id = `linear-${data.branch}`;
-    const archived = isArchivedId(id);
-
-    yield overlaySidecarExtras({
-      id,
-      claudeSessionId: data.claudeSessionId,
-      source: "linear",
-      branch: data.branch,
-      worktreeDir: data.worktreeDir || null,
-      createdBy: startedBy,
-      startedBy,
-      title,
-      lastActivity:
-        data.updatedAt || getFileMtime(`${LINEAR_SESSIONS_DIR}/${file}`),
-      createdAt: getFileMtime(`${LINEAR_SESSIONS_DIR}/${file}`),
-      isRunning: false,
-      transcriptPath: null,
-      linearIssue: data.issueIdentifier
-        ? {
-            identifier: data.issueIdentifier,
-            title: data.issueTitle || data.branch,
-            url: data.issueUrl,
-          }
-        : undefined,
-      model: data.model,
-      // Same pi-slot mapping as the slack scan (agent-session-sync writes it).
-      piSessionId: data.piSessionId || undefined,
-      archived: archived || undefined,
-      archivedReason: archived ? getArchiveReason(id) || "manual" : undefined,
-    });
+    const session = linearSessionRow(file);
+    if (session) yield session;
   }
 }
 
@@ -906,6 +1055,7 @@ export function nativeSessionRow(data: NativeSessionFile): UnifiedSession {
     createdBy: data.createdBy || null,
     createdByLogin: data.createdByLogin,
     startedBy: data.createdBy,
+    lastPromptedBy: data.lastPromptedBy,
     title: data.title || data.branch || "Ask session",
     mode: data.mode,
     // Back-compat: older session files stored the repo under `project`.
@@ -937,6 +1087,7 @@ export function nativeSessionRow(data: NativeSessionFile): UnifiedSession {
       data.archivedReason ||
       (archived ? getArchiveReason(data.id) || "manual" : undefined),
     plainThreadId: data.plainThreadId,
+    plainDiscussionId: data.plainDiscussionId,
     externalRefs: data.externalRefs,
     // The MCP allowlist the session was created with. Dropping it here left
     // `sessionMcpScopeSource`'s "session" branch unreachable, so a session
@@ -947,6 +1098,7 @@ export function nativeSessionRow(data: NativeSessionFile): UnifiedSession {
     model: data.model,
     effort: data.effort,
     fastMode: data.fastMode,
+    pstackMode: data.pstackMode,
     accountId: data.accountId,
     codexThreadId: data.codexThreadId,
     piSessionId: data.piSessionId,
@@ -959,7 +1111,10 @@ export function nativeSessionRow(data: NativeSessionFile): UnifiedSession {
     lastRunError: data.lastRunError,
     loop: data.loop,
     slackThreads: data.slackThreads,
+    slackOrigin: data.slackOrigin,
     sandbox: data.sandbox,
+    sandboxCheckpoint: data.sandboxCheckpoint,
+    portalSandbox: data.portalSandbox,
     lastActivity: data.lastActivity,
     createdAt: data.createdAt,
     isRunning: false,
@@ -977,7 +1132,7 @@ export function readNativeSessionListRow(
   sessionId: string,
   aliasIds?: readonly string[],
 ): UnifiedSession | undefined {
-  if (!/^[A-Za-z0-9_-]{1,160}$/.test(sessionId)) return undefined;
+  if (!isNativeSessionId(sessionId)) return undefined;
   const data = readJsonSafe<NativeSessionFile>(
     `${SESSIONS_DIR}/${sessionId}.json`,
   );

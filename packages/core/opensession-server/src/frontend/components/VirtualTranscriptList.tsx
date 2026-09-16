@@ -10,16 +10,14 @@ import {
 import React from "react";
 import { flushSync } from "react-dom";
 import { PHONE_QUERY } from "../lib/breakpoints";
+import { isIOSWebKit } from "../lib/platform";
 import {
   loadTranscriptSizes,
   recordTranscriptSizes,
   seededBlockEstimate,
   type TranscriptSizes,
 } from "../lib/transcript-sizes";
-import {
-  newTailBlockKeys,
-  shouldAnimateTranscriptItemArrival,
-} from "../lib/transcript-block-identity";
+import { TranscriptArrivalTracker } from "../lib/transcript-arrival";
 import { transcriptEnterClass } from "../lib/transcript-motion";
 import { TranscriptTopApproachGate } from "../lib/transcript-top-approach";
 import {
@@ -84,11 +82,12 @@ interface Props {
 }
 
 /** A block that just arrived at the live edge fades up into place instead of
- *  popping. One-shot: callers only set `enter` on keys their previous build had
- *  not mounted, and the class stays on across re-renders (a finished CSS
- *  animation does not restart when its element re-renders). The transform
- *  lives on this inner wrapper because the virtualized row itself positions
- *  with an inline translateY that the keyframe must not fight. */
+ *  popping. One-shot and stateless: the adapter sets `enter` only in the
+ *  render that reconciled a new item list against what it had mounted; every
+ *  later render of that list, including a row virtualized out and mounted
+ *  back in, renders without it. The transform lives on this inner wrapper
+ *  because the virtualized row itself positions with an inline translateY
+ *  that the keyframe must not fight. */
 function EnterRow({
   enter,
   children,
@@ -175,15 +174,18 @@ class TranscriptVirtualizer extends React.Component<
   private topApproachGate = new TranscriptTopApproachGate();
   private rowObserver: ResizeObserver | null = null;
   private rowRefs = new Map<string, (node: HTMLDivElement | null) => void>();
-  /** Every block key this adapter instance has ever mounted. The first build
-   *  seeds it (opening a session is not an arrival); afterwards, a tail key
-   *  missing from the set just arrived live and plays the entrance fade. Keys
-   *  stay in the set once seen, so a virtualizer remount never replays it. */
-  private mountedKeys: Set<string> | null = null;
-  /** Entry identities already painted inside those blocks. Unlike block keys,
-   * these survive an optimistic row becoming a new durable transcript range. */
-  private mountedEntryIds = new Set<string>();
+  /** Block keys and entry identities this adapter instance has mounted, and
+   * which tail blocks arrived live since the previous item list. Keyed on the
+   * immutable `items` identity: scroll, measurement, and geometry renders
+   * reuse the list and cost no reconciliation. */
+  private arrivals = new TranscriptArrivalTracker();
   private seeded: { session: string; sizes?: TranscriptSizes } | null = null;
+  /** The offset callback TanStack registered through `observeElementOffset`.
+   * A scrollTop write made here hands the virtualizer its new offset in the
+   * same task, instead of one scroll event (and one paint) later. */
+  private offsetCallback:
+    | ((offset: number, isScrolling: boolean) => void)
+    | undefined;
   private virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>;
 
   constructor(props: Omit<Props, "enabled">) {
@@ -340,13 +342,14 @@ class TranscriptVirtualizer extends React.Component<
     return {
       count: props.items.length,
       getScrollElement: () => this.scrollContainer(),
-      // TanStack keeps a stable keyed item in place when older rows prepend.
+      // Keyed prepends are anchored by this adapter's reader anchor, not by
+      // TanStack's `anchorTo: "end"` mode. That mode rewrites its internal
+      // offset the moment history prepends and, on iOS WebKit, defers the
+      // matching DOM write while the reader touches or scrolls: until then the
+      // mounted range describes a viewport the reader is not looking at, and
+      // the late write lands on top of the reader anchor's own correction.
       // Product-level following includes non-virtual tail rows, selections,
       // and disclosure intent, so the host is the sole owner of end following.
-      // A negative threshold disables core's independent geometry-only end
-      // correction without disabling keyed prepend anchoring.
-      anchorTo: "end",
-      scrollEndThreshold: -1,
       estimateSize: (index) => {
         const item = props.items[index];
         if (!item) return 96;
@@ -370,7 +373,7 @@ class TranscriptVirtualizer extends React.Component<
           props.trailingMounted,
         ),
       observeElementRect,
-      observeElementOffset,
+      observeElementOffset: this.observeOffset,
       scrollToFn: this.scrollToFn,
       measureElement: measureTranscriptElement,
       // Semantic transcript revisions are measured synchronously in
@@ -395,6 +398,27 @@ class TranscriptVirtualizer extends React.Component<
     this.writeAwaitingRender = true;
     elementScroll(offset, options, instance);
   };
+
+  private observeOffset: VirtualizerOptions<
+    HTMLDivElement,
+    HTMLDivElement
+  >["observeElementOffset"] = (instance, callback) => {
+    this.offsetCallback = callback;
+    const unsubscribe = observeElementOffset(instance, callback);
+    return () => {
+      if (this.offsetCallback === callback) this.offsetCallback = undefined;
+      unsubscribe?.();
+    };
+  };
+
+  /** After this adapter writes scrollTop, the virtualizer would otherwise
+   * learn the new offset from the scroll event, one frame later, and paint
+   * that frame with the range of the old offset: a prepend larger than the
+   * overscan leaves the reader over unmounted rows for that paint. Reporting
+   * the offset now recomputes the range in the same task. */
+  private syncVirtualizerOffset(container: HTMLDivElement) {
+    this.offsetCallback?.(container.scrollTop, false);
+  }
 
   private measureCommittedRows(prevProps: Omit<Props, "enabled">) {
     const keys = committedTranscriptMeasureKeys(
@@ -440,12 +464,12 @@ class TranscriptVirtualizer extends React.Component<
     return pickReaderAnchor(root, container.getBoundingClientRect().top);
   }
 
-  /** Native keyed anchoring owns structural prepends. Grouped rows can still
-   * change internally, estimates resolve to measurements, and a partial row
-   * can grow at its start. Whatever moved, the entry the reader was looking at
-   * goes back where it was before this commit, as a delta on the current
-   * scroll position: the snapshot was taken synchronously before the DOM
-   * changed, so no reader movement can hide inside it. */
+  /** History prepends above the reader, grouped rows change internally,
+   * estimates resolve to measurements, and a partial row can grow at its
+   * start. Whatever moved, the entry the reader was looking at goes back where
+   * it was before this commit, as a delta on the current scroll position: the
+   * snapshot was taken synchronously before the DOM changed, so no reader
+   * movement can hide inside it. */
   private settleReaderAnchor() {
     // A virtualizer scroll write raised a nested render. Until it commits,
     // scrollTop and the row transforms describe different layouts, so hold
@@ -483,6 +507,7 @@ class TranscriptVirtualizer extends React.Component<
       return;
     }
     container.scrollTop += delta;
+    this.syncVirtualizerOffset(container);
   }
 
   private scheduleDeferredFlush() {
@@ -505,6 +530,7 @@ class TranscriptVirtualizer extends React.Component<
       }
       this.deferredDelta = 0;
       container.scrollTop += delta;
+      this.syncVirtualizerOffset(container);
     }, TOUCH_SETTLE_MS);
   }
 
@@ -837,6 +863,24 @@ class TranscriptVirtualizer extends React.Component<
       // the first time, a grouped row growing below the reader) would only
       // be undone by that settle: two writes in one frame instead of one.
       if (this.heldAnchor) return false;
+      // Nor may TanStack write while the reader touches, or while iOS WebKit
+      // is scrolling. A write under the finger cancels the fling, and on iOS
+      // the library does not write at all then: it banks the delta in a
+      // bucket of its own and flushes it once scrolling is quiet, on top of
+      // whatever the host and this adapter corrected meanwhile. The host's
+      // own live-edge writes keep `isScrolling` true through a stream, so
+      // that bucket used to collect a whole stream's growth and throw a
+      // reader who had since left for history by that sum. The host re-pins
+      // the live edge on layout; a parked reader's displacement is measured
+      // from the DOM by the anchor of the commit that moves the rows.
+      if (
+        shouldDeferReaderCorrection({
+          touching: this.touching,
+          sinceTouchActivity: performance.now() - this.lastTouchActivityAt,
+        }) ||
+        (isIOSWebKit && instance.isScrolling)
+      )
+        return false;
       const liveEdgeDelta = this.props.shouldMaintainEnd?.()
         ? delta
         : undefined;
@@ -855,25 +899,10 @@ class TranscriptVirtualizer extends React.Component<
     // Tail-arrival detection runs here, in the imperative adapter, because
     // "mounted by the previous build" is virtualizer knowledge: the function
     // component above is compiler-managed and may re-render without a new
-    // item list, and a ref-based previous-set there is a compile error.
-    const itemsByKey = new Map(
-      this.props.items.map((item) => [item.key, item]),
-    );
-    const entering = newTailBlockKeys(
-      this.mountedKeys,
-      this.props.items.map((item) => item.key),
-    ).filter((key) => {
-      const item = itemsByKey.get(key);
-      return (
-        !item || shouldAnimateTranscriptItemArrival(item, this.mountedEntryIds)
-      );
-    });
-    if (this.mountedKeys === null) this.mountedKeys = new Set();
-    for (const item of this.props.items) {
-      this.mountedKeys.add(item.key);
-      for (const entryId of item.entryIds) this.mountedEntryIds.add(entryId);
-    }
-    const enteringSet = new Set(entering);
+    // item list, and a ref-based previous-set there is a compile error. The
+    // tracker walks the list once per identity; a same-list render (scroll,
+    // remeasure, resize) gets an empty set and does no reconciliation.
+    const enteringSet = this.arrivals.reconcile(this.props.items);
     const result = (
       <div
         ref={this.setRoot}
@@ -913,15 +942,31 @@ class TranscriptVirtualizer extends React.Component<
   }
 }
 
+const NO_MEASURE_KEYS: ReadonlySet<string> = new Set();
+
+/** Rows whose semantic content changed between two committed item lists. The
+ * lists are immutable snapshots, so the same reference means nothing to
+ * remeasure and the scan is skipped outright: geometry and scroll commits
+ * reuse the list and must not pay for it. Rows usually keep their position
+ * between lists (append, regroup, remeasure), so a positional lookup serves
+ * first; the keyed map is built only once a row has moved (history prepend). */
 export function committedTranscriptMeasureKeys(
-  previous: VirtualTranscriptItem[],
-  next: VirtualTranscriptItem[],
-): Set<string> {
-  const previousItems = new Map(previous.map((item) => [item.key, item]));
+  previous: readonly VirtualTranscriptItem[],
+  next: readonly VirtualTranscriptItem[],
+): ReadonlySet<string> {
+  if (previous === next) return NO_MEASURE_KEYS;
+  let previousByKey: Map<string, VirtualTranscriptItem> | undefined;
+  const previousFor = (index: number, key: string) => {
+    const aligned = previous[index];
+    if (aligned?.key === key) return aligned;
+    previousByKey ??= new Map(previous.map((item) => [item.key, item]));
+    return previousByKey.get(key);
+  };
   const changed = new Set<string>();
-  for (const item of next) {
+  for (let index = 0; index < next.length; index++) {
+    const item = next[index]!;
     if (item.measure === false) continue;
-    const before = previousItems.get(item.key);
+    const before = previousFor(index, item.key);
     const beforeVersion = before?.measureVersion;
     const nextVersion = item.measureVersion;
     if (
@@ -941,12 +986,19 @@ export function committedTranscriptMeasureKeys(
 }
 
 /**
- * The entry the reader is looking at: the first entry-level node at or
- * straddling the viewport top, descended to its innermost `[data-eid]`. That
- * is the choice browser scroll anchoring makes, which Chrome cannot make for
+ * The entry the reader is looking at: the entry-level node at or straddling
+ * the viewport top, descended to its innermost `[data-eid]`. That is the
+ * choice browser scroll anchoring makes, which Chrome cannot make for
  * transform-positioned rows (measured: 0px compensation in every case). The
  * innermost node matters because a grouped row keeps its outer identity while
  * older steps hydrate into it above the reader.
+ *
+ * Rows are absolutely positioned, so a row whose content just grew (an image
+ * decoded, a code block highlighted) overlaps the rows below it until the
+ * virtualizer lays them out again. Later siblings paint on top, so what the
+ * reader sees at the viewport top is the last row straddling it in DOM order,
+ * not the first. Taking the first picked the grown row, whose own top never
+ * moves, and the reader's real row slid out from under them uncorrected.
  */
 export function pickReaderAnchor(
   root: HTMLElement,
@@ -954,10 +1006,18 @@ export function pickReaderAnchor(
 ): ReaderAnchor | undefined {
   const intersects = (rect: DOMRect) =>
     rect.height > 0 && rect.bottom > viewportTop + 1;
+  let picked: { row: HTMLElement; rect: DOMRect } | undefined;
   for (const row of root.children) {
     if (!(row instanceof HTMLElement)) continue;
-    const rowRect = row.getBoundingClientRect();
-    if (!intersects(rowRect)) continue;
+    const rect = row.getBoundingClientRect();
+    if (!intersects(rect)) continue;
+    // Past the first intersecting row, only a row that still straddles the
+    // top can be painted over the pick; rows that start below it cannot.
+    if (picked && rect.top > viewportTop + 1) break;
+    picked = { row, rect };
+  }
+  if (picked) {
+    const { row, rect: rowRect } = picked;
     const rowId = row.dataset.eid;
     let anchor: ReaderAnchor | undefined = rowId
       ? { node: row, id: rowId, top: rowRect.top - viewportTop }

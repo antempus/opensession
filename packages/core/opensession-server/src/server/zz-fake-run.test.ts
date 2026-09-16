@@ -76,6 +76,9 @@ beforeAll(async () => {
     sessionListStoreMod.__setSessionListStoreForTest(testSessionListStore);
   restoreSessionListStore = () =>
     sessionListStoreMod.__setSessionListStoreForTest(previousSessionListStore);
+  // Queue drains read the catalog for running children. Start with complete
+  // empty coverage; subsequent session writes publish their individual rows.
+  await sessionListStoreMod.upsertIndexedSessions([], "include");
   const runJournal = await import("./run-journal");
   const prevJournal = runJournal.__setActiveRunsPathForTest(
     `${tmp}/active-runs.json`,
@@ -138,6 +141,56 @@ async function waitForLastRunError(id: string): Promise<{ message: string }> {
 }
 
 describe("fake-engine session runs (consumer loop end-to-end)", () => {
+  test("recovery exports rotated engine identity before announcing idle", async () => {
+    if (!redirected) return;
+    const sid = "bks-zz-recovered-identity";
+    writeSessionFile(sid);
+    sessionCache.invalidateSessionsCache();
+    await runSession.recordRecoveredRunEvent(sid, {
+      type: "init",
+      provider: "pi",
+      sessionId: "ses_recovered_initial",
+    });
+    expect(sessionJson(sid).piSessionId).toBe("ses_recovered_initial");
+
+    const { onSessionStateChange } = await import("./session-state-events");
+    const idleEngineIds: string[] = [];
+    const unsubscribe = onSessionStateChange((event) => {
+      if (event.sessionId === sid && !event.isRunning)
+        idleEngineIds.push(sessionJson(sid).piSessionId);
+    });
+    try {
+      await runSession.recordRecoveredRunEvent(sid, {
+        type: "done",
+        provider: "pi",
+        sessionId: "ses_recovered_rotated",
+        result: "completed",
+      });
+      expect(idleEngineIds.length).toBeGreaterThan(0);
+      expect(idleEngineIds.every((id) => id === "ses_recovered_rotated")).toBe(
+        true,
+      );
+      expect(sessionJson(sid).piSessionId).toBe("ses_recovered_rotated");
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("recovery awaits automatic model selection persistence", async () => {
+    if (!redirected) return;
+    const sid = "bks-zz-recovered-model";
+    writeSessionFile(sid, { model: "pi/openai/gpt-5.6-sol" });
+    sessionCache.invalidateSessionsCache();
+    await runSession.recordRecoveredRunEvent(sid, {
+      type: "model_switch",
+      fromModel: "pi/openai/gpt-5.6-sol",
+      toModel: "pi/openai/gpt-6-astra",
+      switchReason: "out of credits",
+    });
+    expect(sessionJson(sid).model).toBe("pi/openai/gpt-6-astra");
+    expect(sessionJson(sid).autoFallbackModel).toBe("pi/openai/gpt-5.6-sol");
+  });
+
   test("clean run: engine id + usage persisted, FSM idle, settled", async () => {
     if (!redirected) return;
     const sid = "bks-zz-clean";
@@ -304,10 +357,10 @@ describe("fake-engine session runs (consumer loop end-to-end)", () => {
     const data = sessionJson(sid);
     expect(fake.calls.map((call) => call.model)).toEqual([
       "pi/openai/gpt-5.6-sol",
-      "pi/anthropic/claude-opus-5",
+      "pi/openai/gpt-6-astra",
     ]);
     expect(data.model).toBe("dial/medium");
-    expect(data.lastEngineModel).toBe("pi/anthropic/claude-opus-5");
+    expect(data.lastEngineModel).toBe("pi/openai/gpt-6-astra");
     expect(data.modelHistory).toBeUndefined();
   });
 
@@ -330,7 +383,7 @@ describe("fake-engine session runs (consumer loop end-to-end)", () => {
 
     const data = sessionJson(sid);
     expect(data.model).toBe("gpt-5.6-sol");
-    expect(data.lastEngineModel).toBe("pi/anthropic/claude-opus-5");
+    expect(data.lastEngineModel).toBe("pi/openai/gpt-6-astra");
     expect(data.modelHistory).toBeUndefined();
   });
 
@@ -352,12 +405,12 @@ describe("fake-engine session runs (consumer loop end-to-end)", () => {
     await runSession.runSessionPromptAndDrain(sid, "keep going", "Test");
 
     const data = sessionJson(sid);
-    expect(data.model).toBe("pi/anthropic/claude-opus-5");
+    expect(data.model).toBe("pi/openai/gpt-6-astra");
     expect(data.modelHistory).toHaveLength(1);
     expect(data.modelHistory[0].by).toContain("out of credits");
   });
 
-  test("the next prompt retries the model selected before a usage fallback", async () => {
+  test("prompts keep the fallback until the original selection's cooldown expires", async () => {
     if (!redirected) return;
     const sid = "bks-zz-retry-selected-model";
     writeSessionFile(sid, { model: "dial/medium" });
@@ -369,6 +422,11 @@ describe("fake-engine session runs (consumer loop end-to-end)", () => {
         kind: "clean",
         engineSessionId: "ses_zz_fallback",
         text: ["recovered"],
+      },
+      {
+        kind: "clean",
+        engineSessionId: "ses_zz_fallback",
+        text: ["still on fallback"],
       },
       {
         kind: "clean",
@@ -386,7 +444,20 @@ describe("fake-engine session runs (consumer loop end-to-end)", () => {
 
     await runSession.runSessionPromptAndDrain(sid, "second turn", "Test");
 
-    expect(fake.calls[3].model).toBe(fake.calls[0].model);
+    expect(fake.calls[3].model).toBe(fake.calls[2].model);
+    expect(sessionJson(sid).modelHistory).toEqual(fallback.modelHistory);
+    expect(sessionJson(sid).autoFallbackModel).toBe("dial/medium");
+
+    await sessionCache.updateSessionFile(sid, (data) => ({
+      ...data,
+      modelHistory: data.modelHistory?.map((entry) => ({
+        ...entry,
+        at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      })),
+    }));
+    await runSession.runSessionPromptAndDrain(sid, "after cooldown", "Test");
+
+    expect(fake.calls[4].model).toBe(fake.calls[0].model);
     const retried = sessionJson(sid);
     expect(retried.model).toBe("dial/medium");
     expect(retried.autoFallbackModel).toBeUndefined();
@@ -415,6 +486,13 @@ describe("fake-engine session runs (consumer loop end-to-end)", () => {
     await runSession.runSessionPromptAndDrain(sid, "first turn", "Test");
 
     expect(sessionJson(sid).autoFallbackModel).toBeNull();
+    await sessionCache.updateSessionFile(sid, (data) => ({
+      ...data,
+      modelHistory: data.modelHistory?.map((entry) => ({
+        ...entry,
+        at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      })),
+    }));
 
     await runSession.runSessionPromptAndDrain(sid, "second turn", "Test");
 
@@ -471,7 +549,7 @@ describe("fake-engine session runs (consumer loop end-to-end)", () => {
 
     const data = sessionJson(sid);
     expect(data.model).toBe("dial/medium");
-    expect(data.lastEngineModel).toBe("pi/openai/gpt-5.6-terra");
+    expect(data.lastEngineModel).toBe("pi/anthropic/claude-opus-5");
     expect(data.modelHistory).toBeUndefined();
   });
 

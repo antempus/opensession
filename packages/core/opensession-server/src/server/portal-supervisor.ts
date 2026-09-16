@@ -6,18 +6,26 @@
  * agent can inspect services without becoming their process manager.
  */
 
+import { existsSync, readFileSync } from "fs";
 import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  writeFileSync,
-} from "fs";
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "path";
+import {
+  activeHostPortalPorts,
+  assertHostPortalCapacity,
+  hostPortalActivity,
+  type HostPortalActivity,
+} from "./portal-lifecycle";
 import { audit } from "./audit";
+import { portalHostCommand, spawnPortalHost } from "./portal-host-process";
 import { ensureAgentAwsCredsFile } from "./aws-creds";
 import { configuredPaths, configuredServer } from "./config";
 import {
@@ -69,6 +77,13 @@ export type PortalRecord = {
   /** Detached user scope for a host Portal's complete process tree. */
   scopeUnit?: string;
   startedAt?: string;
+  /** Persisted only when the idle reaper sleeps the Portal. Hot-path request
+   * touches stay in memory so every proxied asset does not rewrite .ports.conf. */
+  lastAccessedAt?: string;
+  sleptAt?: string;
+  readyTimeoutMs?: number;
+  /** Time to release external resources, such as a private simulator device. */
+  shutdownGraceMs?: number;
   lastError?: string;
 };
 
@@ -97,6 +112,30 @@ const remoteRelayAgentStarts: Map<string, Promise<string | null>> = ((
   Promise<string | null>
 >;
 const PORTAL_REAP_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_PORTAL_IDLE_MS = 30 * 60_000;
+const DEFAULT_MAX_HOST_PORTALS = 4;
+const DEFAULT_MIN_AVAILABLE_MEMORY_MB = 24 * 1024;
+
+type HostPortalRef = {
+  sessionId: string;
+  worktreeDir: string;
+  name: string;
+  port: number;
+};
+
+const portalGlobal = globalThis as unknown as {
+  __opensessionHostPortalRefs?: Map<number, HostPortalRef>;
+  __opensessionHostPortalWakes?: Map<
+    string,
+    Promise<PortalRecord & { url: string }>
+  >;
+  __opensessionHostPortalReservations?: Set<string>;
+};
+const hostPortalRefs = (portalGlobal.__opensessionHostPortalRefs ??= new Map());
+const hostPortalWakes = (portalGlobal.__opensessionHostPortalWakes ??=
+  new Map());
+const hostPortalReservations =
+  (portalGlobal.__opensessionHostPortalReservations ??= new Set());
 export const SANDBOX_PORTAL_AGENT_ENTRY = `${REPO_ROOT}/packages/core/opensession-server/src/runner-host/sandbox-portal-agent.ts`;
 
 function portalKey(name: string): string {
@@ -173,6 +212,34 @@ export function readPortalRegistry(worktreeDir: string): PortalRecord[] {
     : [];
 }
 
+async function readHostRegistryText(worktreeDir: string): Promise<string> {
+  try {
+    return await readFile(registryPath(worktreeDir), "utf8");
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT")
+      return "";
+    throw error;
+  }
+}
+
+async function readHostPortalRegistry(
+  worktreeDir: string,
+): Promise<PortalRecord[]> {
+  return parsePortalRegistry(await readHostRegistryText(worktreeDir));
+}
+
+/** Identifies one process incarnation of a Portal record, so a cleanup
+ * decided against an old incarnation cannot act on its replacement. */
+export function portalGeneration(portal: PortalRecord): string {
+  return JSON.stringify([
+    portal.sessionId,
+    portal.name,
+    portal.startedAt,
+    portal.pid,
+    portal.scopeUnit,
+  ]);
+}
+
 function serializedPortalRegistry(
   previousText: string,
   records: PortalRecord[],
@@ -192,13 +259,91 @@ function serializedPortalRegistry(
   return [...kept, ...generated, ""].join("\n");
 }
 
-function writePortalRegistry(
+const hostRegistryWrites = new Map<string, Promise<void>>();
+const hostPortalOperations = new Map<string, Promise<unknown>>();
+
+/**
+ * Serialize start, stop, and restart of one host Portal by canonical worktree
+ * and name. A stop validates the record's generation, terminates the process
+ * group (the scope unit is stable per worktree and name), and persists the
+ * stopped record; none of that may interleave with a start or restart that
+ * replaces the record, or the stale stop kills the replacement and overwrites
+ * its record. Unlike the Sandbox seam this queues rather than coalesces: a
+ * stop after a start must run after it, not return the start's result.
+ */
+async function withHostPortalOperation<T>(
   worktreeDir: string,
-  records: PortalRecord[],
-): void {
-  const path = registryPath(worktreeDir);
-  const previous = existsSync(path) ? readFileSync(path, "utf8") : "";
-  writeFileSync(path, serializedPortalRegistry(previous, records));
+  name: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = `${await canonicalDir(worktreeDir)}:${name}`;
+  const previous = hostPortalOperations.get(key) ?? Promise.resolve();
+  const task = previous.catch(() => {}).then(operation);
+  hostPortalOperations.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (hostPortalOperations.get(key) === task)
+      hostPortalOperations.delete(key);
+  }
+}
+
+async function updateHostPortalRegistry(
+  worktreeDir: string,
+  update: (records: PortalRecord[]) => PortalRecord[],
+): Promise<void> {
+  const dir = await canonicalDir(worktreeDir);
+  const previous = hostRegistryWrites.get(dir) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(async () => {
+      const text = await readHostRegistryText(dir);
+      const records = update(parsePortalRegistry(text));
+      const path = registryPath(dir);
+      const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, serializedPortalRegistry(text, records));
+        await rename(temporary, path);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    });
+  hostRegistryWrites.set(dir, next);
+  try {
+    await next;
+  } finally {
+    if (hostRegistryWrites.get(dir) === next) hostRegistryWrites.delete(dir);
+  }
+}
+
+/**
+ * Merge one operation's registry writes into the registry as it is now.
+ * Only records this operation changed are applied: another Portal in a shared
+ * checkout may have started while this one waited for readiness. A change
+ * decided against one incarnation is dropped when the record has since been
+ * replaced. Start, stop, sleep, and restart change generation fields only
+ * under the Portal's operation lock, so their writes always land; the unlocked
+ * status poll only changes state, so a probe of generation A that finishes
+ * after a restart installed B cannot mark B failed and strand its process.
+ */
+export function applyPortalRegistryWrites(
+  latest: PortalRecord[],
+  snapshot: readonly PortalRecord[],
+  records: readonly PortalRecord[],
+): PortalRecord[] {
+  for (const record of records) {
+    const before = snapshot.find((entry) => entry.name === record.name);
+    if (JSON.stringify(record) === JSON.stringify(before)) continue;
+    const current = latest.find((entry) => entry.name === record.name);
+    if (
+      before &&
+      current &&
+      portalGeneration(current) !== portalGeneration(before)
+    )
+      continue;
+    latest = upsert(latest, record);
+  }
+  return latest;
 }
 
 async function portListening(port: number): Promise<boolean> {
@@ -240,9 +385,19 @@ type PortalOps = {
 };
 
 function hostPortalOps(worktreeDir: string): PortalOps {
+  let readSnapshot: PortalRecord[] = [];
   return {
-    readRegistry: async () => readPortalRegistry(worktreeDir),
-    writeRegistry: async (records) => writePortalRegistry(worktreeDir, records),
+    readRegistry: async () => {
+      readSnapshot = await readHostPortalRegistry(worktreeDir);
+      return readSnapshot;
+    },
+    writeRegistry: async (records) => {
+      const snapshot = readSnapshot;
+      await updateHostPortalRegistry(worktreeDir, (latest) =>
+        applyPortalRegistryWrites(latest, snapshot, records),
+      );
+      readSnapshot = records;
+    },
     probePort: portListening,
     pidAlive,
     scopeAlive: userScopeActive,
@@ -262,7 +417,10 @@ function hostPortalOps(worktreeDir: string): PortalOps {
   };
 }
 
-type PortalProcess = Pick<PortalRecord, "pid" | "scopeUnit">;
+type PortalProcess = Pick<
+  PortalRecord,
+  "pid" | "scopeUnit" | "shutdownGraceMs"
+>;
 
 async function portalProcessAlive(
   ops: PortalOps,
@@ -297,7 +455,7 @@ async function waitForPortalPort(
 
 async function allocatePort(worktreeDir: string): Promise<number> {
   const reserved = new Set(
-    readPortalRegistry(worktreeDir).map((record) => record.port),
+    (await readHostPortalRegistry(worktreeDir)).map((record) => record.port),
   );
   for (let port = 4_000; port < 9_000; port++) {
     if (!reserved.has(port) && !(await portListening(port))) return port;
@@ -367,7 +525,11 @@ async function listPortals(ops: PortalOps): Promise<PortalRecord[]> {
   let changed = false;
   const checked = await Promise.all(
     records.map(async (record) => {
-      if (record.state === "stopped" || record.state === "failed")
+      if (
+        record.state === "stopped" ||
+        record.state === "failed" ||
+        record.state === "sleeping"
+      )
         return record;
       const listening = await ops.probePort(record.port);
       const alive = await portalProcessAlive(ops, record);
@@ -417,7 +579,9 @@ async function startPortal(
     port?: number;
     key?: string;
     description?: string;
+    defaultPath?: string;
     readyTimeoutMs?: number;
+    shutdownGraceMs?: number;
     /** Host Portals record their owner so a restarted server can reap them; Sandbox Portals die with the Sandbox. */
     ownsProcess: boolean;
     allocatePort: (records: PortalRecord[]) => Promise<number>;
@@ -442,7 +606,12 @@ async function startPortal(
     throw new Error("Portal command is required.");
   const records = await listPortals(ops);
   const current = records.find((record) => record.name === name);
-  if (current && current.state !== "stopped" && current.state !== "failed") {
+  if (
+    current &&
+    current.state !== "stopped" &&
+    current.state !== "failed" &&
+    current.state !== "sleeping"
+  ) {
     const key = validateKey(input.key) ?? portalKey(name);
     const sameService =
       current.command === command &&
@@ -475,6 +644,13 @@ async function startPortal(
     ...(input.ownsProcess ? { sessionId: input.sessionId } : {}),
     ...(input.description?.trim()
       ? { description: input.description.trim().slice(0, 240) }
+      : {}),
+    ...(normalizePortalPath(input.defaultPath)
+      ? { defaultPath: normalizePortalPath(input.defaultPath) }
+      : {}),
+    ...(input.readyTimeoutMs ? { readyTimeoutMs: input.readyTimeoutMs } : {}),
+    ...(input.shutdownGraceMs
+      ? { shutdownGraceMs: Math.min(30_000, input.shutdownGraceMs) }
       : {}),
     state: "starting",
     startedAt: new Date().toISOString(),
@@ -540,14 +716,31 @@ async function terminatePortalProcess(
   const pid = processRef.pid;
   if (!pid || pid < 2 || !(await ops.pidAlive(pid))) return;
   await ops.signalGroup(pid, "SIGTERM");
-  await Bun.sleep(1_500);
-  if (await ops.pidAlive(pid)) await ops.signalGroup(pid, "SIGKILL");
+  const grace = Math.min(
+    30_000,
+    Math.max(1_500, processRef.shutdownGraceMs ?? 1_500),
+  );
+  const deadline = Date.now() + grace;
+  do {
+    await Bun.sleep(Math.min(250, Math.max(0, deadline - Date.now())));
+    if (!(await ops.pidAlive(pid))) return;
+  } while (Date.now() < deadline);
+  await ops.signalGroup(pid, "SIGKILL");
 }
 
-async function stopPortal(ops: PortalOps, name: string): Promise<PortalRecord> {
+async function stopPortal(
+  ops: PortalOps,
+  name: string,
+  expectedGeneration?: string,
+): Promise<PortalRecord> {
   const records = await ops.readRegistry();
   const current = records.find((record) => record.name === name);
   if (!current) throw new Error(`Portal '${name}' does not exist.`);
+  if (
+    expectedGeneration !== undefined &&
+    portalGeneration(current) !== expectedGeneration
+  )
+    throw new Error("Portal changed before cleanup; retry on the next sweep.");
   await terminatePortalProcess(ops, current);
   const stopped = {
     ...current,
@@ -578,10 +771,12 @@ function withPortalPath(
 export async function listPortalServices(
   worktreeDir: string,
 ): Promise<PortalRecord[]> {
-  return listPortals(hostPortalOps(worktreeDir));
+  const records = await listPortals(hostPortalOps(worktreeDir));
+  for (const record of records) await registerHostPortal(worktreeDir, record);
+  return records;
 }
 
-export async function startPortalService(input: {
+type HostPortalStartInput = {
   sessionId: string;
   worktreeDir: string;
   name: string;
@@ -589,10 +784,27 @@ export async function startPortalService(input: {
   port?: number;
   key?: string;
   description?: string;
+  defaultPath?: string;
   readyTimeoutMs?: number;
+  shutdownGraceMs?: number;
   /** Narrow, caller-owned additions for a trusted declared recipe. */
   env?: Record<string, string>;
-}): Promise<PortalRecord & { url: string }> {
+};
+
+export function startPortalService(
+  input: HostPortalStartInput,
+): Promise<PortalRecord & { url: string }> {
+  return withHostPortalOperation(
+    input.worktreeDir,
+    validateName(input.name),
+    () => startHostPortal(input),
+  );
+}
+
+/** The start itself; callers hold this Portal's operation lock. */
+async function startHostPortal(
+  input: HostPortalStartInput,
+): Promise<PortalRecord & { url: string }> {
   const logDir = join(sessionScratchRoot(), input.sessionId, "portals");
   const logPath = join(logDir, `${input.name}.log`);
   // The same short-lived AWS credentials the agent's own shell gets (a pointer
@@ -600,70 +812,102 @@ export async function startPortalService(input: {
   // repository's dev server (tella-fusion's start.sh) otherwise falls back to
   // an operator SSO profile and hangs on an interactive login. {} when the
   // mint is off.
-  const awsEnv = await ensureAgentAwsCredsFile();
-  const started = await startPortal(hostPortalOps(input.worktreeDir), {
-    ...input,
-    ownsProcess: true,
-    logPath,
-    allocatePort: () => allocatePort(input.worktreeDir),
-    urlFor: (port) =>
-      `https://${configuredServer().previewHost}:${port + 6_000}`,
-    launch: async ({ name, command, port, url }) => {
-      mkdirSync(logDir, { recursive: true });
-      const log = openSync(logPath, "w");
-      const directCommand = ["setsid", "bash", "-lc", `exec ${command}`];
-      const portalEnv = {
-        PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
-        HOME: process.env.HOME || "/tmp",
-        ...awsEnv,
-        ...input.env,
-        PORT: String(port),
-        PORTAL_URL: url,
-        OPENSESSION_PORTAL: name,
-        // Next's detached telemetry flusher escapes the Portal process group
-        // during shutdown. Portals do not need telemetry, so never create it.
-        NEXT_TELEMETRY_DISABLED: "1",
-      };
-      const scoped = previewScopeCommand(
-        directCommand,
-        input.worktreeDir,
-        name,
-        { env: portalEnv },
-      );
-      const proc = Bun.spawn(scoped.command, {
-        cwd: input.worktreeDir,
-        // Portal commands are user-authored code. Do not hand them the Open
-        // Session service environment, which can include operator credentials.
-        env: scoped.env,
-        stdin: "ignore",
-        stdout: log,
-        stderr: log,
-      });
-      closeSync(log);
-      proc.unref();
-      return {
-        pid: proc.pid,
-        ...(scoped.unit ? { scopeUnit: scoped.unit } : {}),
-      };
-    },
-  });
-  audit({
-    msg: "portal_started",
-    session_id: input.sessionId,
-    portal: started.name,
-    port: started.port,
-  });
-  return started;
+  let releaseAdmission: () => Promise<void> = async () => {};
+  try {
+    const awsEnv = await ensureAgentAwsCredsFile();
+    const started = await startPortal(hostPortalOps(input.worktreeDir), {
+      ...input,
+      ownsProcess: true,
+      logPath,
+      allocatePort: () => allocatePort(input.worktreeDir),
+      urlFor: (port) =>
+        `https://${configuredServer().previewHost}:${port + 6_000}`,
+      launch: async ({ name, command, port, url }) => {
+        await assertHostPortalCapacity();
+        releaseAdmission = await reserveHostPortalStart(
+          input.worktreeDir,
+          name,
+        );
+        await mkdir(logDir, { recursive: true });
+        const log = await open(logPath, "w");
+        const directCommand = portalHostCommand(command);
+        const portalEnv = {
+          PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
+          HOME: process.env.HOME || "/tmp",
+          ...awsEnv,
+          ...input.env,
+          PORT: String(port),
+          PORTAL_URL: url,
+          OPENSESSION_PORTAL: name,
+          // Next's detached telemetry flusher escapes the Portal process group
+          // during shutdown. Portals do not need telemetry, so never create it.
+          NEXT_TELEMETRY_DISABLED: "1",
+        };
+        const scoped = previewScopeCommand(
+          directCommand,
+          input.worktreeDir,
+          name,
+          { env: portalEnv },
+        );
+        try {
+          const pid = await spawnPortalHost({
+            command: scoped.command,
+            cwd: input.worktreeDir,
+            // Portal commands never inherit the gateway's credentials.
+            env: scoped.env,
+            log: log.fd,
+          });
+          return { pid, ...(scoped.unit ? { scopeUnit: scoped.unit } : {}) };
+        } finally {
+          await log.close();
+        }
+      },
+    });
+    hostPortalActivity.observe(
+      started.port,
+      portalGeneration(started),
+      Date.now(),
+    );
+    hostPortalActivity.touch(started.port);
+    await registerHostPortal(input.worktreeDir, started, true);
+    audit({
+      msg: "portal_started",
+      session_id: input.sessionId,
+      portal: started.name,
+      port: started.port,
+    });
+    return started;
+  } finally {
+    await releaseAdmission();
+  }
 }
 
-export async function stopPortalService(input: {
+type HostPortalStopInput = {
   sessionId: string;
   worktreeDir: string;
   name: string;
-}): Promise<PortalRecord> {
+  /** Refuse to stop a record that no longer matches `portalGeneration`. */
+  expectedGeneration?: string;
+};
+
+export function stopPortalService(
+  input: HostPortalStopInput,
+): Promise<PortalRecord> {
+  return withHostPortalOperation(
+    input.worktreeDir,
+    validateName(input.name),
+    () => stopHostPortal(input),
+  );
+}
+
+/** The stop itself; callers hold this Portal's operation lock. */
+async function stopHostPortal(
+  input: HostPortalStopInput,
+): Promise<PortalRecord> {
   const stopped = await stopPortal(
     hostPortalOps(input.worktreeDir),
     validateName(input.name),
+    input.expectedGeneration,
   );
   audit({
     msg: "portal_stopped",
@@ -674,12 +918,49 @@ export async function stopPortalService(input: {
   return stopped;
 }
 
+async function sleepPortalService(input: {
+  sessionId: string;
+  worktreeDir: string;
+  name: string;
+  generation: string;
+  lastAccessedAt: number;
+  stillIdle: () => boolean;
+}): Promise<PortalRecord> {
+  return withHostPortalOperation(input.worktreeDir, input.name, async () => {
+    const ops = hostPortalOps(input.worktreeDir);
+    const records = await ops.readRegistry();
+    const current = records.find((record) => record.name === input.name);
+    if (!current) throw new Error(`Portal '${input.name}' does not exist.`);
+    if (current.state !== "awake") return current;
+    if (portalGeneration(current) !== input.generation || !input.stillIdle())
+      return current;
+    await terminatePortalProcess(ops, current);
+    const sleeping = {
+      ...current,
+      state: "sleeping" as const,
+      pid: undefined,
+      scopeUnit: undefined,
+      lastAccessedAt: new Date(input.lastAccessedAt).toISOString(),
+      sleptAt: new Date().toISOString(),
+    };
+    await ops.writeRegistry(upsert(records, sleeping));
+    await registerHostPortal(input.worktreeDir, sleeping);
+    audit({
+      msg: "portal_slept",
+      session_id: input.sessionId,
+      portal: sleeping.name,
+      port: sleeping.port,
+    });
+    return sleeping;
+  });
+}
+
 /** Stop every host-managed Portal before its session workspace is removed. */
 export async function stopAllPortalServices(input: {
   sessionId: string;
   worktreeDir: string;
 }): Promise<void> {
-  const records = readPortalRegistry(input.worktreeDir);
+  const records = await readHostPortalRegistry(input.worktreeDir);
   for (const record of records) {
     if (record.state === "stopped") continue;
     try {
@@ -695,11 +976,102 @@ export async function stopAllPortalServices(input: {
 
 export type PortalOwnerSession = Pick<
   UnifiedSession,
-  "id" | "worktreeDir" | "attachedRepos"
->;
+  "id" | "worktreeDir" | "attachedRepos" | "aliasIds"
+> &
+  Partial<Pick<UnifiedSession, "archived" | "isRunning">>;
+function portalOwnerIds(
+  session: Pick<UnifiedSession, "id" | "aliasIds">,
+): string[] {
+  return [session.id, ...(session.aliasIds ?? [])];
+}
+
 export type PortalReapResult = {
   stopped: Array<{ sessionId: string; worktreeDir: string; name: string }>;
 };
+
+export type PortalSleepResult = {
+  slept: Array<{ sessionId: string; worktreeDir: string; name: string }>;
+};
+
+export async function sleepIdlePortalServices(
+  sessions: readonly PortalOwnerSession[],
+  options: {
+    now?: number;
+    idleMs?: number;
+    activity?: HostPortalActivity;
+    activePorts?: ReadonlySet<number> | null;
+  } = {},
+): Promise<PortalSleepResult> {
+  const now = options.now ?? Date.now();
+  const idleMs =
+    options.idleMs ??
+    positiveIntegerEnv("OPENSESSION_PORTAL_IDLE_MS", DEFAULT_PORTAL_IDLE_MS);
+  const activity = options.activity ?? hostPortalActivity;
+  const activePorts =
+    options.activePorts === undefined
+      ? await activeHostPortalPorts()
+      : options.activePorts;
+  if (activePorts === null) return { slept: [] };
+  // The catalog deliberately omits live runner overlays. Probe only Portal
+  // owners in the in-memory engine registry, never every historical actor.
+  const { isAgentEngineBusy } = await import("./agent-runner");
+  const owners = new Map<string, PortalOwnerSession>();
+  for (const session of sessions) {
+    for (const id of portalOwnerIds(session)) owners.set(id, session);
+  }
+  const ownerDirs = sessions
+    .flatMap((session) => [
+      session.worktreeDir,
+      ...(session.attachedRepos ?? []).map((repo) => repo.dir),
+    ])
+    .filter((dir): dir is string => typeof dir === "string");
+  const slept: PortalSleepResult["slept"] = [];
+  const observedPorts = new Set<number>();
+  for (const { ref, record } of await managedHostPortals(ownerDirs)) {
+    observedPorts.add(record.port);
+    const owner = owners.get(ref.sessionId);
+    if (!owner || owner.archived) continue; // The orphan/archive reaper owns these.
+    const generation = portalGeneration(record);
+    activity.observe(record.port, generation, now);
+    if (activePorts.has(record.port)) activity.touch(record.port, now);
+    const lastAccessedAt = activity.lastUsedAt(record.port, generation) ?? now;
+    if (
+      !portalShouldSleep({
+        state: record.state,
+        ownerRunning: !!owner.isRunning || isAgentEngineBusy(owner.id),
+        now,
+        lastAccessedAt,
+        idleMs,
+      })
+    )
+      continue;
+    try {
+      const result = await sleepPortalService({
+        sessionId: ref.sessionId,
+        worktreeDir: ref.worktreeDir,
+        name: ref.name,
+        generation,
+        lastAccessedAt,
+        stillIdle: () =>
+          !isAgentEngineBusy(owner.id) &&
+          activity.idle(record.port, generation, now, idleMs),
+      });
+      if (result.state === "sleeping")
+        slept.push({
+          sessionId: ref.sessionId,
+          worktreeDir: ref.worktreeDir,
+          name: ref.name,
+        });
+    } catch (error) {
+      console.warn(
+        `[portals] could not sleep idle ${ref.name} in ${ref.worktreeDir}:`,
+        error,
+      );
+    }
+  }
+  activity.retain(observedPorts);
+  return { slept };
+}
 
 export function portalsNeedingContainment(
   records: readonly PortalRecord[],
@@ -724,70 +1096,334 @@ export type PortalContainmentMigrationResult = {
  * spelling, the same registry read under the alias made every Portal owned by
  * a session spelled the other way look orphaned, and the reaper killed it.
  */
-function canonicalDir(dir: string): string {
+async function canonicalDir(dir: string): Promise<string> {
   try {
-    return realpathSync(dir);
+    return await realpath(dir);
   } catch {
     return resolve(dir);
   }
 }
 
-/**
- * Stop host Portal process groups that no live session owns. Portal records
- * are intentionally stored with the worktree, which survives a coordinator
- * restart, so this closes the gap between a crashed delete and the next human
- * action. Legacy records without sessionId are only reaped when no session
- * owns their worktree at all.
- */
-export async function reapOrphanedPortalServices(
-  sessions: readonly PortalOwnerSession[],
-): Promise<PortalReapResult> {
-  const owners = new Map<string, Set<string>>();
-  const addOwner = (dir: string | null | undefined, sessionId: string) => {
-    if (!dir) return;
-    const key = canonicalDir(dir);
-    const set = owners.get(key) ?? new Set<string>();
-    set.add(sessionId);
-    owners.set(key, set);
-  };
-  for (const session of sessions) {
-    addOwner(session.worktreeDir, session.id);
-    for (const repo of session.attachedRepos ?? [])
-      addOwner(repo.dir, session.id);
-  }
+function portalRefKey(worktreeDir: string, name: string): string {
+  // Callers register canonical directories before constructing a key.
+  return `${worktreeDir}\0${name}`;
+}
 
-  // Include session worktrees outside the normal worktree root, then discover
-  // deleted-session worktrees below the managed root. We only act on explicit
-  // OpenSession Portal records, never arbitrary processes in those directories.
-  const dirs = new Set(owners.keys());
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+async function registerHostPortal(
+  worktreeDir: string,
+  portal: PortalRecord,
+  accessedNow = false,
+): Promise<void> {
+  if (!portal.sessionId) return;
+  const ref = {
+    sessionId: portal.sessionId,
+    worktreeDir: await canonicalDir(worktreeDir),
+    name: portal.name,
+    port: portal.port,
+  };
+  hostPortalRefs.set(portal.port, ref);
+  if (accessedNow) {
+    hostPortalActivity.observe(
+      portal.port,
+      portalGeneration(portal),
+      Date.now(),
+    );
+    hostPortalActivity.touch(portal.port);
+  }
+}
+
+async function managedHostPortals(
+  additionalDirs: readonly string[] = [],
+): Promise<
+  Array<{
+    ref: HostPortalRef;
+    record: PortalRecord;
+  }>
+> {
+  const dirs = new Set(
+    await Promise.all(additionalDirs.filter(Boolean).map(canonicalDir)),
+  );
+  for (const ref of hostPortalRefs.values()) dirs.add(ref.worktreeDir);
   try {
-    for (const entry of readdirSync(configuredPaths().worktreesDir, {
+    for (const entry of await readdir(configuredPaths().worktreesDir, {
       withFileTypes: true,
     })) {
       if (entry.isDirectory())
         dirs.add(
-          canonicalDir(join(configuredPaths().worktreesDir, entry.name)),
+          await canonicalDir(join(configuredPaths().worktreesDir, entry.name)),
+        );
+    }
+  } catch {}
+  const portals: Array<{ ref: HostPortalRef; record: PortalRecord }> = [];
+  for (const worktreeDir of dirs) {
+    for (const record of await readHostPortalRegistry(worktreeDir)) {
+      // Mac Portals own a detached process group, not a systemd scope.
+      const hasProcess =
+        record.scopeUnit || (process.platform === "darwin" && record.pid);
+      if (!record.sessionId || (!hasProcess && record.state !== "sleeping"))
+        continue;
+      await registerHostPortal(worktreeDir, record);
+      portals.push({
+        ref: {
+          sessionId: record.sessionId,
+          worktreeDir,
+          name: record.name,
+          port: record.port,
+        },
+        record,
+      });
+    }
+  }
+  return portals;
+}
+
+async function hostPortalRecord(
+  sourcePort: number,
+): Promise<{ ref: HostPortalRef; record: PortalRecord } | undefined> {
+  if (
+    !Number.isInteger(sourcePort) ||
+    sourcePort < MIN_PORT ||
+    sourcePort >= 14_000
+  )
+    return;
+  let ref = hostPortalRefs.get(sourcePort);
+  if (!ref) {
+    await managedHostPortals();
+    ref = hostPortalRefs.get(sourcePort);
+  }
+  if (!ref) return;
+  const record = (await readHostPortalRegistry(ref.worktreeDir)).find(
+    (candidate) =>
+      candidate.name === ref!.name && candidate.port === sourcePort,
+  );
+  if (!record) {
+    hostPortalRefs.delete(sourcePort);
+    return;
+  }
+  return { ref, record };
+}
+
+/** Resolve one Caddy host-Portal upstream and record real HTTP activity. */
+export async function hostPortalRouteStatus(
+  sourcePort: number,
+): Promise<{ state: PortalState; sessionId: string } | undefined> {
+  const found = await hostPortalRecord(sourcePort);
+  if (!found) return;
+  hostPortalActivity.observe(
+    found.record.port,
+    portalGeneration(found.record),
+    Date.now(),
+  );
+  return { state: found.record.state, sessionId: found.ref.sessionId };
+}
+
+/** Wake a Portal that the idle reaper deliberately slept. Concurrent browser
+ * refreshes share one cold start rather than spawning competing dev servers. */
+export async function wakeHostPortalRoute(
+  sourcePort: number,
+): Promise<PortalRecord & { url: string }> {
+  const found = await hostPortalRecord(sourcePort);
+  if (!found) return Promise.reject(new Error("Host Portal is not registered"));
+  if (found.record.state === "awake") {
+    await registerHostPortal(found.ref.worktreeDir, found.record, true);
+    return Promise.resolve({
+      ...found.record,
+      url: `https://${configuredServer().previewHost}:${sourcePort + 6_000}`,
+    });
+  }
+  if (found.record.state !== "sleeping")
+    return Promise.reject(
+      new Error(`Host Portal is ${found.record.state}, not sleeping`),
+    );
+  const key = portalRefKey(found.ref.worktreeDir, found.ref.name);
+  const existing = hostPortalWakes.get(key);
+  if (existing) return existing;
+  const wake = withHostPortalOperation(
+    found.ref.worktreeDir,
+    found.ref.name,
+    async () => {
+      const current = (
+        await readHostPortalRegistry(found.ref.worktreeDir)
+      ).find((record) => record.name === found.ref.name);
+      if (
+        !current ||
+        current.state !== "sleeping" ||
+        portalGeneration(current) !== portalGeneration(found.record)
+      )
+        throw new Error("Portal changed before wake; reload its status.");
+      return startHostPortal({
+        sessionId: found.ref.sessionId,
+        worktreeDir: found.ref.worktreeDir,
+        name: current.name,
+        command: current.command,
+        port: current.port,
+        key: current.key,
+        description: current.description,
+        defaultPath: current.defaultPath,
+        readyTimeoutMs: current.readyTimeoutMs ?? 180_000,
+        shutdownGraceMs: current.shutdownGraceMs,
+      });
+    },
+  ).finally(() => hostPortalWakes.delete(key));
+  hostPortalWakes.set(key, wake);
+  return wake;
+}
+
+export function hostPortalAdmissionReason(input: {
+  active: number;
+  reserved?: number;
+  maxActive: number;
+  availableMemoryMb: number;
+  minAvailableMemoryMb: number;
+}): string | undefined {
+  if (input.active + (input.reserved ?? 0) >= input.maxActive)
+    return `Host Portal capacity is full (${input.maxActive} active)`;
+  if (input.availableMemoryMb < input.minAvailableMemoryMb)
+    return `Host memory is below the Portal safety floor (${Math.round(input.availableMemoryMb)} MB available; ${input.minAvailableMemoryMb} MB required)`;
+  return undefined;
+}
+
+async function availableMemoryMb(): Promise<number> {
+  try {
+    const match = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(
+      await readFile("/proc/meminfo", "utf8"),
+    );
+    return match ? Number(match[1]) / 1024 : Number.POSITIVE_INFINITY;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+async function reserveHostPortalStart(
+  worktreeDir: string,
+  name: string,
+): Promise<() => Promise<void>> {
+  const root = configuredPaths().worktreesDir;
+  // Acquisitions and releases share a lane so a readiness completion cannot
+  // remove a reservation while an asynchronous census still sees the old tree.
+  return withHostPortalOperation(root, "@admission", async () => {
+    const key = portalRefKey(await canonicalDir(worktreeDir), name);
+    const portals = await managedHostPortals();
+    const memoryMb = await availableMemoryMb();
+    const active = new Set(
+      portals
+        .filter(({ record }) =>
+          ["starting", "waking", "awake"].includes(record.state),
+        )
+        .map(({ ref }) => portalRefKey(ref.worktreeDir, ref.name)),
+    );
+    for (const reservation of hostPortalReservations) active.add(reservation);
+    const reason = hostPortalAdmissionReason({
+      active: active.size,
+      maxActive: positiveIntegerEnv(
+        "OPENSESSION_MAX_HOST_PORTALS",
+        DEFAULT_MAX_HOST_PORTALS,
+      ),
+      availableMemoryMb: memoryMb,
+      minAvailableMemoryMb: positiveIntegerEnv(
+        "OPENSESSION_PORTAL_MIN_AVAILABLE_MEMORY_MB",
+        DEFAULT_MIN_AVAILABLE_MEMORY_MB,
+      ),
+    });
+    if (reason)
+      throw new Error(
+        `${reason}. Stop another Portal or wait for it to sleep.`,
+      );
+    hostPortalReservations.add(key);
+    return () =>
+      withHostPortalOperation(root, "@admission", async () => {
+        hostPortalReservations.delete(key);
+      });
+  });
+}
+
+export function portalShouldSleep(input: {
+  state: PortalState;
+  ownerRunning: boolean;
+  now: number;
+  lastAccessedAt: number;
+  idleMs: number;
+}): boolean {
+  return (
+    input.state === "awake" &&
+    !input.ownerRunning &&
+    input.now - input.lastAccessedAt >= input.idleMs
+  );
+}
+
+/**
+ * Reconcile host Portal lifetime: missing or archived owners and idle services.
+ * Durable records survive coordinator restarts. Legacy ownerless records are
+ * considered archived only when every owner of their worktree is archived.
+ */
+export async function reapOrphanedPortalServices(
+  sessions: readonly PortalOwnerSession[],
+): Promise<PortalReapResult> {
+  const owners = new Map<string, Map<string, boolean>>();
+  const addOwner = async (
+    dir: string | null | undefined,
+    session: PortalOwnerSession,
+  ) => {
+    if (!dir) return;
+    const key = await canonicalDir(dir);
+    const set = owners.get(key) ?? new Map<string, boolean>();
+    for (const id of portalOwnerIds(session))
+      set.set(id, session.archived === true);
+    owners.set(key, set);
+  };
+  for (const session of sessions) {
+    await addOwner(session.worktreeDir, session);
+    for (const repo of session.attachedRepos ?? [])
+      await addOwner(repo.dir, session);
+  }
+
+  // Discover deleted-session worktrees too, but act only on explicit Portal
+  // records. Never enumerate or open session actor databases here.
+  const dirs = new Set(owners.keys());
+  try {
+    for (const entry of await readdir(configuredPaths().worktreesDir, {
+      withFileTypes: true,
+    })) {
+      if (entry.isDirectory())
+        dirs.add(
+          await canonicalDir(join(configuredPaths().worktreesDir, entry.name)),
         );
     }
   } catch {}
 
   const stopped: PortalReapResult["stopped"] = [];
   for (const worktreeDir of dirs) {
-    const liveOwners = owners.get(worktreeDir) ?? new Set<string>();
-    for (const portal of readPortalRegistry(worktreeDir)) {
+    const liveOwners = owners.get(worktreeDir) ?? new Map<string, boolean>();
+    for (const portal of await readHostPortalRegistry(worktreeDir)) {
       if (portal.state === "stopped" || portal.state === "failed") continue;
+      const generation = portalGeneration(portal);
       const orphaned = portal.sessionId
         ? !liveOwners.has(portal.sessionId)
         : liveOwners.size === 0;
-      if (!orphaned) continue;
+      const archived = portal.sessionId
+        ? liveOwners.get(portal.sessionId) === true
+        : liveOwners.size > 0 && [...liveOwners.values()].every(Boolean);
+      const reason = orphaned ? "orphaned" : archived ? "archived" : null;
+      if (!reason) continue;
       const sessionId = portal.sessionId || "orphaned-portal";
       try {
-        await stopPortalService({ sessionId, worktreeDir, name: portal.name });
+        await stopPortalService({
+          sessionId,
+          worktreeDir,
+          name: portal.name,
+          expectedGeneration: generation,
+        });
         stopped.push({ sessionId, worktreeDir, name: portal.name });
         audit({
-          msg: "portal_orphan_reaped",
+          msg: "portal_reaped",
           session_id: sessionId,
           portal: portal.name,
+          reason,
         });
       } catch (error) {
         console.warn(
@@ -798,6 +1434,67 @@ export async function reapOrphanedPortalServices(
     }
   }
   return { stopped };
+}
+
+/** Archive only the named session's services, never a sibling's Portal in a
+ * shared checkout. Legacy ownerless records are handled by the full reaper. */
+export async function stopArchivedSessionPortals(
+  sessionId: string,
+  options: {
+    findSession?: (id: string) => Promise<ArchivedPortalOwner | undefined>;
+  } = {},
+): Promise<void> {
+  const findSession = options.findSession ?? findMergedSession;
+  const session = await findSession(sessionId);
+  if (!session || session.runner || session.sandbox?.sandboxId) return;
+  // A Portal record carries the id its session ran under, which may be the
+  // canonical id or an alias merged into it. Every spelling owns the Portal.
+  const ownerIds = new Set(portalOwnerIds(session));
+  const dirs = new Set([
+    session.worktreeDir,
+    ...(session.attachedRepos ?? []).map((repo) => repo.dir),
+  ]);
+  for (const dir of dirs) {
+    if (!dir) continue;
+    for (const portal of await readHostPortalRegistry(dir)) {
+      if (
+        !portal.sessionId ||
+        !ownerIds.has(portal.sessionId) ||
+        portal.state === "stopped"
+      )
+        continue;
+      await stopPortalService({
+        sessionId: session.id,
+        worktreeDir: dir,
+        name: portal.name,
+        expectedGeneration: portalGeneration(portal),
+      });
+    }
+  }
+}
+
+type ArchivedPortalOwner = Pick<
+  UnifiedSession,
+  "id" | "worktreeDir" | "attachedRepos" | "aliasIds" | "runner" | "sandbox"
+>;
+
+/**
+ * The direct detail lookup answers a Slack or Linear id with that file's own
+ * row, alias and all, so archiving through an alias saw an owner id no Portal
+ * record carried. The merged list projection is the one place a historical
+ * alias resolves to the canonical session that absorbed it.
+ */
+async function findMergedSession(
+  sessionId: string,
+): Promise<ArchivedPortalOwner | undefined> {
+  const { findSessionAsync, getCachedSessionsAsync } =
+    await import("./session-cache");
+  const merged = (await getCachedSessionsAsync()).find(
+    (session) =>
+      session.id === sessionId || session.aliasIds?.includes(sessionId),
+  );
+  // A session the list has not observed yet has no aliases to merge.
+  return merged ?? findSessionAsync(sessionId);
 }
 
 /**
@@ -811,22 +1508,25 @@ export async function migrateUnscopedPortalServices(
 ): Promise<PortalContainmentMigrationResult> {
   if (!systemdUserScopesAvailable()) return { migrated: [] };
   const owners = new Map<string, Set<string>>();
-  const addOwner = (dir: string | null | undefined, sessionId: string) => {
+  const addOwner = async (
+    dir: string | null | undefined,
+    session: PortalOwnerSession,
+  ) => {
     if (!dir) return;
-    const key = canonicalDir(dir);
+    const key = await canonicalDir(dir);
     const set = owners.get(key) ?? new Set<string>();
-    set.add(sessionId);
+    for (const id of portalOwnerIds(session)) set.add(id);
     owners.set(key, set);
   };
   for (const session of sessions) {
-    addOwner(session.worktreeDir, session.id);
+    await addOwner(session.worktreeDir, session);
     for (const repo of session.attachedRepos ?? [])
-      addOwner(repo.dir, session.id);
+      await addOwner(repo.dir, session);
   }
 
   const migrated: PortalContainmentMigrationResult["migrated"] = [];
   for (const [worktreeDir, liveOwners] of owners) {
-    const records = readPortalRegistry(worktreeDir);
+    const records = await readHostPortalRegistry(worktreeDir);
     for (const portal of portalsNeedingContainment(records, true)) {
       const owned = portal.sessionId
         ? liveOwners.has(portal.sessionId)
@@ -863,50 +1563,42 @@ let portalReconcileInFlight = false;
 
 /** Reconcile Portal process groups after boot and every five minutes. */
 export function startPortalReaper(
-  getSessions: () => readonly PortalOwnerSession[] = () => [],
+  getSessions: () => Promise<readonly PortalOwnerSession[]>,
 ): void {
   if (portalReapTimer) return;
-  const run = () => {
+  const run = async () => {
     if (portalReconcileInFlight) return;
-    let sessions: readonly PortalOwnerSession[];
-    try {
-      sessions = getSessions();
-    } catch (error) {
-      console.error(
-        "[portals] session snapshot failed; skipping orphan reap:",
-        error,
-      );
-      return;
-    }
     portalReconcileInFlight = true;
-    void reapOrphanedPortalServices(sessions)
-      .then(async ({ stopped }) => {
-        if (stopped.length)
-          console.log(
-            `[portals] reaped ${stopped.length} orphaned Portal service(s)`,
-          );
-        const { migrated } = await migrateUnscopedPortalServices(sessions);
-        if (migrated.length)
-          console.log(
-            `[portals] migrated ${migrated.length} Portal service(s) into private scopes`,
-          );
-      })
-      .catch((error) =>
-        console.error("[portals] reconciliation failed:", error),
-      )
-      .finally(() => {
-        portalReconcileInFlight = false;
-      });
+    try {
+      const sessions = await getSessions();
+      const { stopped } = await reapOrphanedPortalServices(sessions);
+      if (stopped.length)
+        console.log(`[portals] reaped ${stopped.length} Portal service(s)`);
+      const { slept } = await sleepIdlePortalServices(sessions);
+      if (slept.length)
+        console.log(`[portals] slept ${slept.length} idle Portal service(s)`);
+      const { migrated } = await migrateUnscopedPortalServices(
+        sessions.filter((session) => !session.archived),
+      );
+      if (migrated.length)
+        console.log(
+          `[portals] migrated ${migrated.length} Portal service(s) into private scopes`,
+        );
+    } catch (error) {
+      console.error("[portals] reconciliation failed:", error);
+    } finally {
+      portalReconcileInFlight = false;
+    }
   };
-  run();
-  portalReapTimer = setInterval(run, PORTAL_REAP_INTERVAL_MS);
+  void run();
+  portalReapTimer = setInterval(() => void run(), PORTAL_REAP_INTERVAL_MS);
   portalReapTimer.unref?.();
   console.log(
-    `[portals] orphan reaper started (every ${PORTAL_REAP_INTERVAL_MS / 60_000}m)`,
+    `[portals] lifecycle reaper started (every ${PORTAL_REAP_INTERVAL_MS / 60_000}m)`,
   );
 }
 
-export async function restartPortalService(input: {
+export function restartPortalService(input: {
   sessionId: string;
   worktreeDir: string;
   name: string;
@@ -914,28 +1606,38 @@ export async function restartPortalService(input: {
   readyTimeoutMs?: number;
 }): Promise<PortalRecord & { url: string }> {
   const name = validateName(input.name);
-  const current = readPortalRegistry(input.worktreeDir).find(
-    (record) => record.name === name,
-  );
-  if (!current) throw new Error(`Portal '${name}' does not exist.`);
-  await stopPortalService(input);
-  return startPortalService({
-    ...input,
-    name,
-    key: current.key,
-    command: current.command,
-    port: current.port,
-    description: current.description,
+  // One transaction: nothing may stop or start this Portal between the stop
+  // of the old process and the registration of its replacement.
+  return withHostPortalOperation(input.worktreeDir, name, async () => {
+    const current = (await readHostPortalRegistry(input.worktreeDir)).find(
+      (record) => record.name === name,
+    );
+    if (!current) throw new Error(`Portal '${name}' does not exist.`);
+    await stopHostPortal(input);
+    return startHostPortal({
+      ...input,
+      name,
+      key: current.key,
+      command: current.command,
+      port: current.port,
+      description: current.description,
+      defaultPath: current.defaultPath,
+      readyTimeoutMs: input.readyTimeoutMs ?? current.readyTimeoutMs,
+      shutdownGraceMs: current.shutdownGraceMs,
+    });
   });
 }
 
-export function setPortalPath(
+export async function setPortalPath(
   worktreeDir: string,
   path: string,
   name?: string,
-): PortalRecord[] {
-  const next = withPortalPath(readPortalRegistry(worktreeDir), path, name);
-  writePortalRegistry(worktreeDir, next);
+): Promise<PortalRecord[]> {
+  let next: PortalRecord[] = [];
+  await updateHostPortalRegistry(worktreeDir, (records) => {
+    next = withPortalPath(records, path, name);
+    return next;
+  });
   return next;
 }
 

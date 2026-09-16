@@ -1,4 +1,5 @@
 import React from "react";
+import type { UnreadChat } from "./unread-chats";
 import type { UnifiedSession, Workspace } from "./types";
 
 export type OpenNextSidebarItem = () => boolean;
@@ -21,6 +22,8 @@ export interface Props {
   selectedId: string | null;
   /** True while the pull request list is open: highlights its entry. */
   prsActive: boolean;
+  /** True while the Issues page is open: highlights its entry. */
+  issuesActive: boolean;
   /**
    * True while the Feed page is open: highlights its entry. Note this is the
    * Feed *tool*, not the sidebar's `feeds` (the Slack/Linear/GitHub sources,
@@ -41,6 +44,7 @@ export interface Props {
   supportTinderActive: boolean;
   /** True while the recurring Reports surface is open. */
   reportsActive: boolean;
+  databasesActive: boolean;
   /** True while the Analytics surface is open. */
   analyticsActive: boolean;
   /**
@@ -64,8 +68,8 @@ export interface Props {
   archivedActive: boolean;
   /** True while the catch-up deck is open — highlights its entry. */
   catchUpActive: boolean;
-  /** Report whether Next can open attention work or another rendered chat. */
-  onNextChatAvailableChange?: (available: boolean) => void;
+  /** Report unread destinations, including collapsed groups and sibling tabs. */
+  onUnreadChatsChange?: (chats: UnreadChat[]) => void;
   /**
    * Archive a session. `openNext` opens the rendered sidebar item after it, or
    * the previous item when it is last. It returns false when no item remains.

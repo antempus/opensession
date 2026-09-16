@@ -191,8 +191,11 @@ export function demoSessions(opts: {
   worktreeDir: string;
   /** The generated base repo (clean checkout on main). */
   repoDir: string;
+  /** Where the generator wrote the stills the hero session shows
+   *  (generate.ts retryStill); served by the /media route. */
+  mediaDir: string;
 }): DemoSessionFixture[] {
-  const { now, worktreeDir, repoDir } = opts;
+  const { now, worktreeDir, repoDir, mediaDir } = opts;
   const min = 60_000;
   const sessions: DemoSessionFixture[] = [];
 
@@ -287,9 +290,71 @@ export function demoSessions(opts: {
           t0 + 140_000,
         ),
         transcriptLineAssistantText(
-          "Fixed and verified — 100/100 green. The loop now honors the configured retry budget. I committed the change on `demo/fix-flaky-upload` and opened a PR with the regression note in the description.",
+          "Fixed and verified — 100/100 green. The loop now honors the configured retry budget. I committed the change on `demo/fix-flaky-upload` and opened a PR with the regression note in the description.\n\n" +
+            "Where the flakes were coming from, per attempt across the 50 reruns:\n\n" +
+            "```vega-lite\n" +
+            JSON.stringify({
+              title: "Upload retries per attempt, 50 reruns",
+              mark: "bar",
+              data: {
+                values: [
+                  { attempt: "1st", build: "before", succeeded: 31 },
+                  { attempt: "2nd", build: "before", succeeded: 18 },
+                  { attempt: "3rd", build: "before", succeeded: 0 },
+                  { attempt: "1st", build: "after", succeeded: 30 },
+                  { attempt: "2nd", build: "after", succeeded: 17 },
+                  { attempt: "3rd", build: "after", succeeded: 3 },
+                ],
+              },
+              encoding: {
+                x: { field: "attempt", type: "nominal", title: "Attempt" },
+                xOffset: { field: "build", title: "Build" },
+                y: {
+                  field: "succeeded",
+                  type: "quantitative",
+                  title: "Runs that succeeded",
+                },
+                color: { field: "build", title: "Build" },
+              },
+            }) +
+            "\n```",
           "demo-pr-a3",
           iso(t0 + 170_000),
+          MODEL_FABLE,
+        ),
+        // Media in place: an image marker with a caption and a before/after
+        // compare marker, rendered where they are written (docs/blocks.md).
+        transcriptLineAssistantText(
+          "Proof that the third attempt now runs. The retry timeline from the reruns, before and after the fix:\n\n" +
+            `OPENSESSION_COMPARE: ${mediaDir}/retry-before.png ${mediaDir}/retry-after.png\n` +
+            "Attempts per run: before on the left, after on the right\n\n" +
+            `OPENSESSION_IMAGE: ${mediaDir}/retry-after.png\n` +
+            "All three attempts run and the third one succeeds\n\n" +
+            "Both stills come from the 100-run rerun above.",
+          "demo-pr-a4",
+          iso(t0 + 180_000),
+          MODEL_FABLE,
+        ),
+        // Blocks that talk back to the session: a file tree whose rows open
+        // the changed file, and quick replies that send as the next turn.
+        transcriptLineAssistantText(
+          "The fix touches these files:\n\n" +
+            "```tree\n" +
+            "acme-todo/\n" +
+            "├── src/\n" +
+            "│   ├── upload.ts  # retry loop\n" +
+            "│   └── upload.test.ts\n" +
+            "├── NOTES.md\n" +
+            "└── package.json\n" +
+            "```\n\n" +
+            "How do you want to proceed?\n\n" +
+            "```choices\n" +
+            "- Merge the PR\n" +
+            "- Add a test for the terminal error\n" +
+            "- Explain the fix again\n" +
+            "```",
+          "demo-pr-a5",
+          iso(t0 + 190_000),
           MODEL_FABLE,
         ),
       ],
@@ -972,14 +1037,103 @@ export function demoReplayScript(): Array<() => JsonlLine[]> {
       { command: "bun run gateway:dev --smoke /health" },
       "span api-gateway:/health 3.1ms ok\nsmoke passed",
     ),
+    // A sessions MCP call: the row links to the session it names.
+    step(
+      9,
+      "opensession-sessions_get_session",
+      { id: "bks-demo-pr", transcript_lines: 4 },
+      '🟢 *Fix flaky upload retry test*  `bks-demo-pr`\n   done · opensession · code · branch demo/fix-flaky-upload · createdBy="Alex" · 2h ago\n   PR open https://github.com/acme/acme-todo/pull/128\n\n*Recent transcript:*\n• tool:Bash: Using bash\n• tool_result: 100 pass 0 fail\n• assistant: Fixed and verified — 100/100 green.',
+    ),
+    // A suggested task: the agent proposes a follow-up it will not start, and
+    // the turn renders it as a card with "Start session".
+    step(
+      10,
+      "opensession-sessions_suggest_task",
+      {
+        title: "Tag gateway spans with the tenant id",
+        description:
+          "Every route span now exists but none carries the tenant, so a trace cannot be filtered per customer. Add the attribute where the middleware already resolves the tenant, and cover it with one test.",
+        instructions:
+          "In src/gateway/router.ts the registerRoute wrapper opens a span per route. Read the tenant id from the request context that src/gateway/tenant.ts resolves in middleware and set it as the `tenant.id` span attribute. Keep the wrapper the single instrumentation point; do not touch individual handlers. Add a test in src/gateway/tracing.test.ts asserting the attribute is present on a /health span. Report the files changed and the test output.",
+        repo: "acme-todo",
+        mode: "code",
+      },
+      'Suggested task recorded: "Tag gateway spans with the tenant id". It appears as a card in this session with a "Start session" button; nothing runs until a person presses it.',
+    ),
     say(
       "demo-live-a4",
-      "Traces verified end-to-end on the hot paths. Next loop: tag spans with tenant id and wire the sampler config.",
+      "Traces verified end-to-end on the hot paths. I left a suggested task for tagging spans with the tenant id; the sampler config is the other follow-up.",
     ),
   ];
 }
 
 // ── Stores beyond the session dir ──────────────────────────────────────────────
+
+/** Open issues for the Issues page. One already has the live demo session
+ *  so the list shows a running row; the others are still waiting. */
+export function demoIssues(now: number) {
+  const at = (hoursAgo: number) => new Date(now - hoursAgo * 3600_000);
+  const issue = (
+    number: number,
+    title: string,
+    body: string,
+    opts: {
+      hoursAgo: number;
+      author: string;
+      labels?: string[];
+      comments?: number;
+      sessionId?: string;
+    },
+  ) => ({
+    repo: DEMO_REPO_ID,
+    ghRepo: DEMO_GH_REPO,
+    number,
+    title,
+    url: `https://github.com/${DEMO_GH_REPO}/issues/${number}`,
+    body,
+    author: opts.author,
+    person: null,
+    labels: opts.labels ?? [],
+    assignees: [],
+    comments: opts.comments ?? 0,
+    createdAt: at(opts.hoursAgo + 6).toISOString(),
+    updatedAt: at(opts.hoursAgo).toISOString(),
+    sessionId: opts.sessionId ?? `bks-ghpr-${number}-issue`,
+    assigned: (opts.labels ?? []).includes("os"),
+  });
+  return [
+    issue(
+      131,
+      "Upload retries stall after the third attempt",
+      "Large uploads that fail three times stop retrying and the progress bar sits at 92% until the tab is reloaded.\n\n**Steps**\n\n1. Throttle the network to Slow 3G\n2. Upload a 40 MB file\n3. Watch the retry counter\n\nExpected: the upload resumes or reports the failure.",
+      {
+        hoursAgo: 1,
+        author: "kent",
+        labels: ["bug", "os"],
+        comments: 3,
+        sessionId: DEMO_LIVE_SESSION_ID,
+      },
+    ),
+    issue(
+      129,
+      "Add keyboard shortcut for archiving a todo",
+      "`e` should archive the focused todo, matching the shortcut sheet in Settings.",
+      { hoursAgo: 9, author: "maya", labels: ["enhancement"], comments: 1 },
+    ),
+    issue(
+      124,
+      "Dark mode: due-date chips lose contrast",
+      "The amber due-date chip on a dark background is 2.9:1. Needs the tokenized amber, not the raw hex.",
+      { hoursAgo: 30, author: "kent", labels: ["design"] },
+    ),
+    issue(118, "Document the export format", "", {
+      hoursAgo: 80,
+      author: "sam",
+      labels: ["docs"],
+      comments: 4,
+    }),
+  ];
+}
 
 export function demoAutomations(now: number) {
   const iso8 = (agoMin: number) => iso(now - agoMin * 60_000);

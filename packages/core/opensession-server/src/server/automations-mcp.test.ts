@@ -13,6 +13,8 @@ describe("automation MCP fallback", () => {
 
     expect(Object.keys(servers).sort()).toEqual([
       "opensession-audit",
+      "opensession-charts",
+      "opensession-databases",
       "opensession-health",
       "opensession-report",
       "opensession-turn",

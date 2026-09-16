@@ -78,6 +78,10 @@ export interface UnifiedSession {
   createdByLogin?: string;
   /** Legacy UI-facing alias for createdBy. */
   startedBy: string | null;
+  /** The last person who prompted the session, when it was not the creator
+   * alone. With `startedBy`, this is who a senderless turn acts for
+   * (`sessionPrincipal` in session-actors.ts). */
+  lastPromptedBy?: string | null;
   title: string;
   lastActivity: string;
   createdAt: string;
@@ -212,6 +216,8 @@ export interface UnifiedSession {
    */
   slim?: boolean;
   plainThreadId?: string;
+  /** Plain discussion (Ask Sidekick) this session answers; every turn is mirrored there. */
+  plainDiscussionId?: string;
   /** Generic external-object linkage (feed items: videos, …) — the
    *  successor to per-source foreign keys like plainThreadId (see
    *  the feeds design). A session can carry several. */
@@ -312,6 +318,8 @@ export interface UnifiedSession {
    *  posts here) — a reply in one of these threads drives THIS session instead
    *  of starting a new one (thread index in slack-links.ts). */
   slackThreads?: Array<{ channel: string; threadTs: string }>;
+  /** Slack intake identity; execution still belongs to a native session. */
+  slackOrigin?: SlackSessionOrigin;
   // Source-specific
   linearIssue?: { identifier: string; title: string; url?: string };
   slackThread?: { channel: string; threadTs: string };
@@ -338,6 +346,14 @@ export interface UnifiedSession {
       | "needs_attention";
     lastLifecycleError?: string;
   };
+  /** The last workspace checkpoint a Sandbox session pushed to origin
+   * (sandbox/checkpoint.ts). Kept beside `sandbox` rather than inside it so
+   * lifecycle writers that replace the whole `sandbox` object cannot drop it. */
+  sandboxCheckpoint?: SandboxCheckpointRecord;
+  /** The Sandbox that runs this session's Portals while the session itself
+   * stays on this machine (portal-sandbox.ts). Never set beside a workspace
+   * Sandbox, whose Portals run in it. */
+  portalSandbox?: PortalSandboxRecord;
   /** Persistent, explicitly trusted machine selected for this session. Unlike
    * a Sandbox, a Runner is not an isolation boundary. */
   runner?: {
@@ -354,7 +370,16 @@ export interface UnifiedSession {
 // src/agents/slack/state.ts) narrows it to the fields the loop always has.
 // saveSession merges over whatever is already on disk rather than projecting a
 // fixed field list, so keys written by other writers survive a write.
+export interface SlackSessionOrigin {
+  sessionKey: string;
+  channel: string;
+  threadTs: string;
+  messageTs: string;
+}
+
 export interface SlackSessionFile {
+  /** Legacy Slack runs used code mode; explicit ask sessions remain read-only. */
+  mode?: "ask" | "code";
   branch?: string | null;
   userId?: string;
   message?: string;
@@ -561,6 +586,12 @@ export interface NativeSessionFile {
    *  one-time boot migration (resolved from createdBy via the identity
    *  table). Absent on automation sessions and unresolvable creators. */
   createdByLogin?: string;
+  /** The last person who sent a prompt into this session. Machine senders
+   *  never land here. A turn nobody sent (a review handoff, an auto-continue,
+   *  a queue drain) commits on this person's behalf, falling back to
+   *  `createdBy`, so a session one teammate started and another took over
+   *  credits the one now steering it. */
+  lastPromptedBy?: string;
   createdAt: string;
   lastActivity: string;
   title?: string;
@@ -608,10 +639,12 @@ export interface NativeSessionFile {
   automationEvent?: string;
 
   plainThreadId?: string; // Plain thread this session is triaging
+  plainDiscussionId?: string; // Plain discussion (Ask Sidekick) this session answers
   externalRefs?: ExternalRef[]; // generic feed-item linkage (the feeds design)
   model?: string; // model id for this session's runs; unset = default
   /** Original selection displaced by an automatic usage fallback. `null` means
-   *  the session inherited the instance default; retried on the next prompt. */
+   *  the session inherited the instance default; retried on the first prompt
+   *  at least one hour after the latest modelHistory switch. */
   autoFallbackModel?: string | null;
   /** Workspace model-preset instructions captured when this session was created. */
   presetNote?: string;
@@ -650,6 +683,8 @@ export interface NativeSessionFile {
   };
   /** Slack threads this session posted to (see UnifiedSession.slackThreads). */
   slackThreads?: Array<{ channel: string; threadTs: string }>;
+  /** Slack intake identity; execution still belongs to a native session. */
+  slackOrigin?: SlackSessionOrigin;
   mcpServers?: string[]; // External MCP servers to load for this session; empty = none (minimal context)
   /** Sandbox opt-in (see docs/self-hosting-sandboxes.md): recorded at create time when the
    *  creator asked for a sandbox. `provider` is the effective provider id at
@@ -669,6 +704,10 @@ export interface NativeSessionFile {
       | "needs_attention";
     lastLifecycleError?: string;
   };
+  /** See UnifiedSession.sandboxCheckpoint. */
+  sandboxCheckpoint?: SandboxCheckpointRecord;
+  /** See UnifiedSession.portalSandbox. */
+  portalSandbox?: PortalSandboxRecord;
   runner?: {
     id: string;
     name: string;
@@ -676,6 +715,30 @@ export interface NativeSessionFile {
     lifecycle?: "preparing" | "awake" | "offline" | "needs_attention";
     lastLifecycleError?: string;
   };
+}
+
+/** A synthetic commit on origin holding the session branch tip (`head`) plus
+ * the working tree as it was (`tree`), reachable from `ref`. Restoring it
+ * anywhere reproduces the branch with the same uncommitted changes. */
+export interface SandboxCheckpointRecord {
+  ref: string;
+  commit: string;
+  head: string;
+  tree: string;
+  branch: string;
+  at: string;
+}
+
+/** A Sandbox provisioned only to run a host session's Portals: its workspace
+ * is a clone of the session branch landed on the session's checkpoints, never
+ * the agent's checkout. `syncedCommit` is the checkpoint commit its checkout
+ * last landed on. */
+export interface PortalSandboxRecord {
+  provider: string;
+  sandboxId?: string;
+  lifecycle?: "preparing" | "awake" | "sleeping" | "waking" | "needs_attention";
+  lastLifecycleError?: string;
+  syncedCommit?: string;
 }
 
 // Moved to the protocol package; re-exported for existing import sites.

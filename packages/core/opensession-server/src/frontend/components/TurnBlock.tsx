@@ -1,3 +1,4 @@
+import { agentMessageText } from "../lib/agent-message";
 import React, { useState, useEffect, useRef } from "react";
 import type { TranscriptEntry } from "../lib/types";
 import {
@@ -10,7 +11,18 @@ import {
   toolSummary,
   useToolPathRoots,
 } from "./ToolCallBlock";
-import { ClampedBody, EntryImages, EntryVideos } from "./MessageBubble";
+import {
+  MessageBubble,
+  ClampedBody,
+  EntryImages,
+  EntryVideos,
+} from "./MessageBubble";
+import { SuggestedTaskCard } from "./SuggestedTaskCard";
+import {
+  suggestedTaskOf,
+  type SuggestedTask,
+} from "@tellahq/opensession-protocol/tool-presentation";
+import { unplacedMedia } from "../lib/placed-media";
 import { IconChevronDown, IconStack } from "./icons";
 import { cn } from "../ui/cn";
 import { Fold } from "../ui/fold";
@@ -86,7 +98,9 @@ export const TurnBlock = function TurnBlock({
   sessionId,
 }: Props) {
   const pathRoots = useToolPathRoots();
-  const tools = items.filter((it) => it.type === "tool_use");
+  const allTools = items.filter((it) => it.type === "tool_use");
+  const tools = allTools.filter((it) => agentMessageText(it) === null);
+  const agentMessages = items.filter((it) => agentMessageText(it) !== null);
   const messages = items.filter((it) => it.type === "assistant");
   const lastMessage = messages[messages.length - 1];
   const activeReasoning =
@@ -145,7 +159,7 @@ export const TurnBlock = function TurnBlock({
 
   const timing = blockTiming(items, toolResults);
   const duration = timing.duration;
-  const lastTool = tools[tools.length - 1];
+  const lastTool = allTools[allTools.length - 1];
   // The collapsed live line names the current activity: the thought the rail
   // ends on, otherwise its newest step.
   const lastItem = items[items.length - 1];
@@ -171,14 +185,14 @@ export const TurnBlock = function TurnBlock({
   // as a plain Edit or Write call. Keep the parsed files for the hover card,
   // but let the server-derived aggregate own the summary's total.
   const toolAggregate =
-    tools.length > 0 ? toolRunAggregate(tools, toolResults, live) : null;
+    allTools.length > 0 ? toolRunAggregate(allTools, toolResults, live) : null;
   const additions = toolAggregate?.additions ?? 0;
   const deletions = toolAggregate?.deletions ?? 0;
   // A tool-only turn has no inner summary row anymore, so keep the small bits
   // of aggregate status that do add information on the one remaining row.
   const toolOnlyAggregate = !hasNarration ? toolAggregate : null;
 
-  const countsLabel =
+  const workCountsLabel =
     tools.length > 0
       ? `${tools.length} step${tools.length === 1 ? "" : "s"}`
       : messages.length > 0
@@ -186,6 +200,14 @@ export const TurnBlock = function TurnBlock({
         : "";
   // One run of faint meta rather than three separately-shrinking ones, so the
   // line collapses by dropping characters off its tail instead of overflowing.
+  const countsLabel = [
+    workCountsLabel,
+    agentMessages.length
+      ? `${agentMessages.length} agent message${agentMessages.length === 1 ? "" : "s"}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const metaLabel = [!live && duration, countsLabel]
     .filter(Boolean)
     .join(" · ");
@@ -195,12 +217,15 @@ export const TurnBlock = function TurnBlock({
   // keep their latest heading while retaining prose and media. Narration stays
   // as ordinary readable output inside the work rail.
   const sections: Array<
+    | { kind: "message"; entry: TranscriptEntry }
     | { kind: "tools"; items: TranscriptEntry[] }
     | { kind: "reasoning"; items: TranscriptEntry[] }
     | { kind: "narration"; entry: TranscriptEntry }
   > = [];
   for (const entry of items) {
-    if (entry.type === "tool_use") {
+    if (agentMessageText(entry) !== null) {
+      sections.push({ kind: "message", entry });
+    } else if (entry.type === "tool_use") {
       const last = sections[sections.length - 1];
       if (last?.kind === "tools") last.items.push(entry);
       else sections.push({ kind: "tools", items: [entry] });
@@ -219,6 +244,10 @@ export const TurnBlock = function TurnBlock({
   const featured = expanded
     ? { images: [], videos: [] }
     : featuredTurnMedia(items, toolResults);
+  // Also survives the fold, and unlike media stays put when the fold opens:
+  // the row inside only names the suggestion, the card is the only place to
+  // read it and start it, so it never shows twice.
+  const suggested = suggestedTurnTasks(items);
 
   return (
     <div
@@ -306,7 +335,18 @@ export const TurnBlock = function TurnBlock({
             className="absolute inset-y-0 -left-2 w-4 cursor-pointer border-0 bg-transparent p-0 after:absolute after:inset-y-0 after:left-1/2 after:border-l after:border-transparent after:transition-colors hover:after:border-line-strong focus-visible:after:border-line-strong"
           />
           {sections.map((sec) =>
-            sec.kind === "reasoning" ? (
+            sec.kind === "message" ? (
+              <MessageBubble
+                key={sec.entry.id}
+                entry={sec.entry}
+                sessionId={sessionId}
+                toolResult={
+                  sec.entry.toolUseId
+                    ? toolResults.get(sec.entry.toolUseId)
+                    : undefined
+                }
+              />
+            ) : sec.kind === "reasoning" ? (
               <ReasoningMessage
                 key={sec.items[0].id}
                 entries={sec.items}
@@ -354,6 +394,16 @@ export const TurnBlock = function TurnBlock({
         <div className="pl-[7px] pr-1">
           <EntryImages images={featured.images} sessionId={sessionId} />
           <EntryVideos videos={featured.videos} />
+        </div>
+      )}
+
+      {/* A proposal addressed to the reader: the agent suggests, the person
+          starts it. See suggestedTurnTasks. */}
+      {suggested.length > 0 && (
+        <div className="mt-1 space-y-2 pl-[7px] pr-1">
+          {suggested.map(({ id, task }) => (
+            <SuggestedTaskCard key={id} task={task} />
+          ))}
         </div>
       )}
     </div>
@@ -715,8 +765,11 @@ function NarrationMessage({
         entry={entry}
         sessionId={sessionId}
       />
-      <EntryImages images={entry.images} sessionId={sessionId} />
-      <EntryVideos videos={entry.videos} />
+      <EntryImages
+        images={unplacedMedia(entry.images, entry.content)}
+        sessionId={sessionId}
+      />
+      <EntryVideos videos={unplacedMedia(entry.videos, entry.content)} />
     </div>
   );
 }
@@ -826,6 +879,25 @@ function featuredTurnMedia(
     }
   }
   return { images, videos };
+}
+
+/**
+ * The follow-ups a turn proposed with `suggest_task`, in call order. Like a
+ * featured screenshot, a suggestion is an artifact addressed to the reader
+ * rather than a step of the work, so the fold hides the steps and keeps the
+ * card. The proposal lives entirely in the call's input, which is why a
+ * still-pending call already renders one.
+ */
+function suggestedTurnTasks(
+  items: TranscriptEntry[],
+): Array<{ id: string; task: SuggestedTask }> {
+  const out: Array<{ id: string; task: SuggestedTask }> = [];
+  for (const entry of items) {
+    if (entry.type !== "tool_use") continue;
+    const task = suggestedTaskOf(entry.toolName || "", entry.toolInput);
+    if (task) out.push({ id: entry.id, task });
+  }
+  return out;
 }
 
 function turnBlockPropsEqual(prev: Props, next: Props): boolean {

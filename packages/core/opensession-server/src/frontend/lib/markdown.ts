@@ -1,11 +1,21 @@
 import { Marked, type Token, type TokenizerThis, type Tokens } from "marked";
+import { type CalloutIconKind, calloutIconMarkup } from "../components/icons";
 import { BASE_PATH } from "./base";
 import { sanitizeHtmlFragment } from "./html-sanitize";
+import { hexSwatchColor } from "./palette-block";
+import {
+  displayMathBlockStart,
+  inlineMathStart,
+  matchDisplayMathBlock,
+  matchInlineMath,
+  mathPlaceholder,
+} from "./math-block";
 import { prStatusDisplay, type PrStatusInput } from "./pr-status";
 import { repoLabel } from "./repo-label";
 import { cleanSessionTitle } from "./session-title";
 import { INTERNAL_ORIGINS, UUIDV7, internalUrlTarget } from "./session-url";
 import { sessionAssetRawUrl } from "./api/sessions";
+import { expandIconMarkup } from "../components/icons";
 
 // Dedicated marked instance for session messages so this config doesn't leak
 // into other markdown (wiki, etc.). Two customisations:
@@ -22,6 +32,43 @@ function attr(v: string | null | undefined): string {
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+const VIDEO_HREF_RE = /\.(mp4|webm|mov|m4v)([?#]|$)/i;
+/** Media streamed by this server (routes/media.ts): the form the server
+ *  writes an OPENSESSION_IMAGE/_VIDEO line into (transcript-media.ts). */
+const SESSION_MEDIA_HREF_RE = /^\/media\?path=/;
+
+function videoMarkup(href: string, title = ""): string {
+  return `<video class="md-video" src="${attr(href)}"${title} controls playsinline preload="metadata"></video>`;
+}
+
+/**
+ * A paragraph that is nothing but one image of session media is the agent
+ * showing something where it wrote it: render it as a figure, its alt text
+ * as the caption, at the width the figure styles give it (base-markdown.css).
+ * A video gets the expand button a trailing-row player has (MessageBubble
+ * EntryVideos), opened by the delegated lightbox handler; the player's own
+ * controls take every other click. Any other image, PR prose included,
+ * keeps the plain inline rendering.
+ */
+function sessionMediaFigure(token: Tokens.Paragraph): string | null {
+  if (token.tokens.length !== 1) return null;
+  const image = token.tokens[0];
+  if (image.type !== "image" || !SESSION_MEDIA_HREF_RE.test(image.href))
+    return null;
+  const caption = String(image.text ?? "").trim();
+  const media = VIDEO_HREF_RE.test(image.href)
+    ? `<div class="md-video-wrap">${videoMarkup(image.href)}` +
+      `<button type="button" class="md-video-expand" data-md-expand="video" aria-label="Expand" title="Expand">${expandIconMarkup()}</button>` +
+      `</div>`
+    : `<a href="${attr(image.href)}" target="_blank" rel="noopener noreferrer" class="md-image-link">` +
+      `<img class="md-image" src="${attr(image.href)}" alt="${attr(caption)}" loading="lazy" />` +
+      `</a>`;
+  const figcaption = caption
+    ? `<figcaption class="md-figcaption">${attr(caption)}</figcaption>`
+    : "";
+  return `<figure class="md-figure">${media}${figcaption}</figure>\n`;
 }
 
 type AssetReferenceRegistry = {
@@ -203,8 +250,10 @@ const AUTOMATION_ID_BARE = new RegExp(`(?:^|[^\\w/-])(?=auto-${UUIDV7})`, "i");
 // Chip labels. A raw `bks-<uuid>` is 40 characters of noise in the middle of a
 // sentence, so a chip shows the name of the work it points at when we know it.
 // The app shell registers what it already polls (App.tsx); anything not in that
-// list (archived, deleted, not yet polled) falls back to a shortened id.
+// list (archived, deleted, not yet polled) falls back to the stable agent name.
 interface SessionName {
+  id: string;
+  parentSessionId?: string;
   /** What the chip shows: a human session's workspace, or a worker's task. */
   label: string;
   /** The session's own title, when it differs from the label. Tooltip only:
@@ -229,10 +278,14 @@ const sessionTitleListeners = new Set<() => void>();
 /** Sessions whose agent is mid-run, for the chip's live dot. */
 let runningSessions = new Set<string>();
 const SESSION_TITLE_MAX = 38;
-const SESSION_ID_SHORT = 12; // `os-019fb3ad2` / `bks-019fb3ad`
+
+function knownSessionMetadata(id: string): SessionName | undefined {
+  return sessionTitles.get(id) ?? resolvedSessionTitles.get(id);
+}
 
 function knownSessionName(id: string): SessionName | undefined {
-  return sessionTitles.get(id) ?? resolvedSessionTitles.get(id);
+  const metadata = knownSessionMetadata(id);
+  return metadata?.label ? metadata : undefined;
 }
 
 function flushSessionTitleRequests(): void {
@@ -247,7 +300,8 @@ function flushSessionTitleRequests(): void {
 
 function queueSessionTitleRequest(id: string): void {
   if (
-    knownSessionName(id) ||
+    sessionTitles.has(id) ||
+    resolvedSessionTitles.has(id) ||
     unavailableSessionIds.has(id) ||
     queuedSessionTitleRequests.has(id) ||
     inFlightSessionTitleRequests.has(id)
@@ -284,10 +338,11 @@ export interface ResolvedSessionTitle {
   tabTitle?: string | null;
   aliases?: readonly string[];
   archived?: boolean;
+  parentSessionId?: string;
 }
 
 /** Publish lightweight metadata fetched for references outside the live list.
- *  A missing title marks a deleted/unknown id so it keeps the honest id label. */
+ *  A missing title marks a deleted/unknown id so it keeps its generated agent name. */
 export function setResolvedSessionTitles(
   entries: Iterable<ResolvedSessionTitle>,
 ): void {
@@ -296,12 +351,16 @@ export function setResolvedSessionTitles(
     inFlightSessionTitleRequests.delete(entry.requestedId);
     queuedSessionTitleRequests.delete(entry.requestedId);
     const label = cleanSessionTitle(String(entry.title ?? "").trim());
-    if (!label) {
+    if (!label && !entry.id) {
       unavailableSessionIds.add(entry.requestedId);
       continue;
     }
     const tab = cleanSessionTitle(String(entry.tabTitle ?? "").trim());
-    const name: SessionName = { label };
+    const name: SessionName = {
+      label,
+      id: entry.id ?? entry.requestedId,
+      parentSessionId: entry.parentSessionId,
+    };
     if (tab && tab !== label) name.tab = tab;
     if (entry.archived) name.archived = true;
     const ids = [entry.requestedId, entry.id, ...(entry.aliases ?? [])].filter(
@@ -312,6 +371,8 @@ export function setResolvedSessionTitles(
       const had = resolvedSessionTitles.get(id);
       if (
         !had ||
+        had.id !== name.id ||
+        had.parentSessionId !== name.parentSessionId ||
         had.label !== name.label ||
         had.tab !== name.tab ||
         had.archived !== name.archived
@@ -357,24 +418,31 @@ export function setSessionTitles(
       boolean?,
       (string | null)?,
       (readonly string[])?,
+      string?,
     ]
   >,
 ): void {
   const next = new Map<string, SessionName>();
   const running = new Set<string>();
-  for (const [id, title, isRunning, tabTitle, aliases] of entries) {
+  for (const [
+    id,
+    title,
+    isRunning,
+    tabTitle,
+    aliases,
+    parentSessionId,
+  ] of entries) {
     const label = cleanSessionTitle(String(title ?? "").trim());
     const tab = cleanSessionTitle(String(tabTitle ?? "").trim());
     const ids = [id, ...(aliases ?? [])].filter(Boolean);
-    const name: SessionName = { label };
+    const name: SessionName = { label, id, parentSessionId };
     if (tab && tab !== label) name.tab = tab;
-    if (label)
-      for (const knownId of ids) {
-        next.set(knownId, name);
-        queuedSessionTitleRequests.delete(knownId);
-        inFlightSessionTitleRequests.delete(knownId);
-        unavailableSessionIds.delete(knownId);
-      }
+    for (const knownId of ids) {
+      next.set(knownId, name);
+      queuedSessionTitleRequests.delete(knownId);
+      inFlightSessionTitleRequests.delete(knownId);
+      unavailableSessionIds.delete(knownId);
+    }
     if (isRunning) for (const knownId of ids) running.add(knownId);
   }
   runningSessions = running;
@@ -386,7 +454,13 @@ export function setSessionTitles(
     let same = true;
     for (const [id, name] of next) {
       const had = sessionTitles.get(id);
-      if (!had || had.label !== name.label || had.tab !== name.tab) {
+      if (
+        !had ||
+        had.id !== name.id ||
+        had.parentSessionId !== name.parentSessionId ||
+        had.label !== name.label ||
+        had.tab !== name.tab
+      ) {
         same = false;
         break;
       }
@@ -521,22 +595,33 @@ function syncRenderedSessionTitles(): void {
     "a.session-link[data-session-id]",
   )) {
     const id = anchor.dataset.sessionId;
-    if (!id) continue;
+    if (!id || anchor.dataset.sessionLabel === "authored") continue;
     const name = knownSessionName(id);
-    if (!name) {
-      queueSessionTitleRequest(id);
-      continue;
-    }
+    if (!name) queueSessionTitleRequest(id);
     const label = anchor.querySelector<HTMLElement>(".session-link-label");
     if (!label) continue;
-    label.textContent = sessionLabel(name.label);
+    label.textContent = name ? sessionLabel(name.label) : sessionAgentName(id);
     delete anchor.dataset.sessionLabel;
-    if (name.archived) anchor.dataset.sessionArchived = "";
+    if (name?.archived) anchor.dataset.sessionArchived = "";
     else delete anchor.dataset.sessionArchived;
     const icon = anchor.querySelector<HTMLElement>(".session-link-icon");
-    if (icon) icon.innerHTML = sessionIconSvg(name.archived);
+    if (icon) icon.innerHTML = sessionIconSvg(name?.archived);
     anchor.title = sessionTip(id);
   }
+}
+
+/** Agent references name their session's work, never a generated persona. */
+export function sessionAgentName(id: string): string {
+  const row = knownSessionMetadata(id);
+  if (!row) queueSessionTitleRequest(id);
+  return row?.tab || row?.label || (row ? "Untitled session" : "Session");
+}
+
+/** Full task title for agent hover details, not a workspace label or short chip. */
+export function sessionAgentTitle(id: string): string {
+  const row = knownSessionMetadata(id);
+  if (!row) queueSessionTitleRequest(id);
+  return row?.tab || row?.label || "";
 }
 
 /**
@@ -546,27 +631,17 @@ function syncRenderedSessionTitles(): void {
 export function sessionTitleFor(id: string): string | undefined {
   const name = knownSessionName(id);
   if (!name) queueSessionTitleRequest(id);
-  return name?.label;
+  return name?.label ?? sessionAgentName(id);
 }
 
 /** Whether a resolved session reference points into archived history. */
 export function sessionArchivedFor(id: string): boolean {
-  return knownSessionName(id)?.archived === true;
+  return knownSessionMetadata(id)?.archived === true;
 }
 
 /** The name shown for a stable workspace mention in a composer draft. */
 export function workspaceTitleFor(id: string): string | undefined {
   return workspaceTitles.get(id);
-}
-
-export function shortSessionId(id: string): string {
-  // Legacy `bks-<slug>` ids are already short and cutting them mid-word reads
-  // worse than showing the whole thing; only uuid-shaped ids get abbreviated.
-  // The trailing-dash trim keeps the cut off a segment boundary — the two
-  // prefixes differ in length, so a fixed cut lands mid-separator for one.
-  return id.length <= 20
-    ? id
-    : `${id.slice(0, SESSION_ID_SHORT).replace(/-+$/, "")}…`;
 }
 
 // The chip's leading glyph names the destination state: a conversation for
@@ -598,7 +673,7 @@ function sessionChipIcon(archived?: boolean): string {
 function sessionChip(
   id: string,
   label: string,
-  opts: { href?: string; tip?: string; idLabel?: boolean; archived?: boolean },
+  opts: { href?: string; tip?: string; archived?: boolean; authored?: boolean },
 ): string {
   // With an href it's a real link (cmd/middle-click open a tab); without one
   // the delegated click handler is the only way in, so it needs the button role
@@ -608,7 +683,7 @@ function sessionChip(
     : `role="button" tabindex="0" `;
   return (
     `<a ${anchor}class="session-link" data-session-id="${attr(id)}"` +
-    `${opts.idLabel ? ' data-session-label="id"' : ""}` +
+    `${opts.authored ? ' data-session-label="authored"' : ""}` +
     `${opts.archived ? " data-session-archived" : ""}` +
     // Baked from the current set so a fresh chip is right on first paint;
     // syncRenderedSessionRuns corrects it from then on.
@@ -627,14 +702,12 @@ function sessionLabel(title: string): string {
 function sessionLink(id: string, href?: string): string {
   const name = knownSessionName(id);
   if (!name) queueSessionTitleRequest(id);
-  const label = name ? sessionLabel(name.label) : shortSessionId(id);
-  // The label is lossy either way (truncated title, abbreviated id), so the
-  // full id always stays in the tooltip. data-session-label marks the id
-  // fallback for the monospace treatment.
+  const label = name ? sessionLabel(name.label) : sessionAgentName(id);
+  // Unknown, deleted, and not-yet-loaded references still get a readable name.
+  // The canonical ID stays in the link target and data attribute, never the label.
   return sessionChip(id, attr(label), {
     href,
     tip: sessionTip(id),
-    idLabel: !name,
     archived: name?.archived,
   });
 }
@@ -665,9 +738,9 @@ function sessionTip(id: string): string {
     : name?.archived
       ? " · archived"
       : "";
-  if (!name) return `Open session ${id}${status}`;
+  if (!name) return `Open ${sessionAgentName(id)}${status}`;
   const tab = name.tab ? ` · ${name.tab}` : "";
-  return `Open ${name.label}${tab} (${id})${status}`;
+  return `Open ${name.label}${tab}${status}`;
 }
 
 // Agents write pull requests the GitHub way — a bare `#5528`, sometimes
@@ -705,8 +778,15 @@ const BARE_PR_MIN_DIGITS = 4;
 // tokenizer only sees the source from its own match position on. It must be
 // followed by a space or the `#` itself, so a repo whose id merely starts
 // with those letters (`prisma#12`) is read as the qualifier it is.
+//
+// GitHub numbers issues and pull requests from one sequence, so `#1234` on
+// its own cannot say which it is, and this renderer reads it as a PR: the
+// review surface is where a transcript's numbers overwhelmingly point. An
+// `issue` cue is the author saying otherwise (the run instructions ask for
+// exactly that form), and it turns the mention into an issue chip that opens
+// the issue on GitHub rather than a review page that has nothing to show.
 const PR_MENTION_SRC =
-  `([Pp][Rr]s?(?:\\s+|(?=#)))?` +
+  `((?:[Pp][Rr]s?|[Ii]ssues?)(?:\\s+|(?=#)))?` +
   `((?:[A-Za-z0-9][\\w.-]*/)?[A-Za-z0-9][\\w.-]*)?` +
   `#(\\d{1,${PR_NUMBER_MAX_DIGITS}})(?!\\w)`;
 const PR_MENTION_EXACT = new RegExp(`^${PR_MENTION_SRC}`);
@@ -763,6 +843,11 @@ function prRefTitle(
   return `Open the review for ${repoLabel(repo)} #${number}${
     state ? ` · ${state.label}` : ""
   }`;
+}
+
+/** Whether a mention's cue word names an issue rather than a pull request. */
+function isIssueCue(cue: string): boolean {
+  return /^i/i.test(cue);
 }
 
 /**
@@ -976,10 +1061,36 @@ function prMentionLink(
   );
 }
 
-/** A GitHub PR page that belongs to a repo this instance serves. */
-function githubPrTarget(
+/**
+ * An issue chip. There is no issue surface here, so the chip opens the issue
+ * on GitHub in a new tab; a repo with no GitHub name has nowhere to send it,
+ * and the caller leaves the mention as text. Its own class and data
+ * attributes on purpose: the document-level PR handler (useAppDocumentInteractions)
+ * keys on `data-pr-number`, and an issue must not be routed into a review.
+ */
+function issueMentionLink(
+  repo: string,
+  number: string,
+  label: string,
+): string | null {
+  const ghRepo = knownRepos.get(repo);
+  if (!ghRepo) return null;
+  const href = `https://github.com/${ghRepo}/issues/${number}`;
+  return (
+    `<a href="${attr(href)}" class="issue-ref" data-issue-repo="${attr(repo)}"` +
+    ` data-issue-number="${attr(number)}" target="_blank" rel="noopener noreferrer"` +
+    ` title="${attr(`Open issue #${number} in ${repoLabel(repo)} on GitHub`)}">` +
+    `<span class="issue-ref-icon" aria-hidden="true">` +
+    `<svg viewBox="0 0 24 24" fill="none">` +
+    `<circle cx="12" cy="12" r="8.25"/><circle cx="12" cy="12" r="2.25"/>` +
+    `</svg></span><span class="issue-ref-label">${attr(label)}</span></a>`
+  );
+}
+
+/** A GitHub PR or issue page that belongs to a repo this instance serves. */
+function githubRefTarget(
   href: string | null | undefined,
-): { repo: string; number: string } | null {
+): { repo: string; number: string; kind: "pr" | "issue" } | null {
   if (!href) return null;
   let url: URL;
   try {
@@ -993,12 +1104,15 @@ function githubPrTarget(
     url.hash
   )
     return null;
-  const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d{1,5})\/?$/.exec(url.pathname);
+  const match = /^\/([^/]+)\/([^/]+)\/(pull|issues)\/(\d{1,5})\/?$/.exec(
+    url.pathname,
+  );
   if (!match) return null;
   const githubRepo = `${match[1]}/${match[2]}`.toLowerCase();
+  const kind = match[3] === "pull" ? "pr" : "issue";
   for (const [repo, configuredGithubRepo] of knownRepos) {
     if (configuredGithubRepo?.toLowerCase() === githubRepo)
-      return { repo, number: match[3] };
+      return { repo, number: match[4]!, kind };
   }
   return null;
 }
@@ -1014,6 +1128,12 @@ function githubPrTarget(
 // Two DIFFERENT pull requests side by side are two references and stay two
 // chips — the repo and the number both have to match, resolved through the
 // same helpers the chips themselves resolve through.
+//
+// An issue written twice collapses the same way. The URL is the one form
+// that says what the number is, so an uncued mention next to an issue URL
+// keeps the URL (which chips as the issue it is) rather than the mention
+// (which would chip as a PR); a mention cued the other way is left alone,
+// since the author contradicted themselves and both readings should show.
 const DUPLICATE_PR_PAIR = new RegExp(
   // The character in front, captured rather than looked behind: a mention glued
   // to a word (or to another `#`) is not a mention, and re-emitting the guard
@@ -1022,12 +1142,12 @@ const DUPLICATE_PR_PAIR = new RegExp(
     // Bold wraps a mention without changing what it is. A code span does: a
     // mention in backticks renders as code and never chips, so collapsing
     // there would delete the only linkable form. It is left alone.
-    `(?<mention>(?<cue>[Pp][Rr]s?[ \\t]+)?(?<wrap>\\*\\*)?` +
+    `(?<mention>(?<cue>(?:[Pp][Rr]s?|[Ii]ssues?)[ \\t]+)?(?<wrap>\\*\\*)?` +
     `(?<qualifier>(?:[A-Za-z0-9][\\w.-]*/)?[A-Za-z0-9][\\w.-]*)?` +
     `#(?<number>\\d{1,${PR_NUMBER_MAX_DIGITS}})\\k<wrap>?)` +
     // What joins the two: a dash/middot/colon, an opening paren, or just space.
     `(?<sep>[ \\t]*[—–·:|-][ \\t]*|[ \\t]*\\([ \\t]*|[ \\t]+)` +
-    `<?(?<url>https?://(?:www\\.)?github\\.com/[\\w.-]+/[\\w.-]+/pull/\\d{1,${PR_NUMBER_MAX_DIGITS}})/?>?` +
+    `<?(?<url>https?://(?:www\\.)?github\\.com/[\\w.-]+/[\\w.-]+/(?:pull|issues)/\\d{1,${PR_NUMBER_MAX_DIGITS}})/?>?` +
     `(?<close>[ \\t]*\\))?`,
   "gm",
 );
@@ -1043,7 +1163,7 @@ function outsideCodeFences(src: string, fn: (chunk: string) => string): string {
 
 /** Collapse `repo#123 — https://github.com/owner/repo/pull/123` to one chip. */
 function collapseDuplicatePrReferences(src: string): string {
-  if (!src.includes("/pull/")) return src;
+  if (!src.includes("/pull/") && !src.includes("/issues/")) return src;
   return outsideCodeFences(src, (chunk) =>
     chunk.replace(
       DUPLICATE_PR_PAIR,
@@ -1060,16 +1180,20 @@ function collapseDuplicatePrReferences(src: string): string {
         close: string | undefined,
       ) => {
         if (!mention || !number || !url) return match;
-        const target = githubPrTarget(url);
+        const target = githubRefTarget(url);
         if (!target) return match;
         const repo = prMentionRepo(qualifier);
         if (repo !== target.repo || number !== target.number) return match;
-        // A mention that wouldn't chip on its own is prose, and dropping the URL
-        // next to it would leave the reference with nothing to open.
-        if (!qualifier && !cue && !bareMentionLinks(repo, number)) return match;
         // An unbalanced parenthesis means the separator wasn't one.
         if (sep?.includes("(") && !close) return match;
         const trailing = sep?.includes("(") ? "" : (close ?? "");
+        if (target.kind === "issue") {
+          if (cue && !isIssueCue(cue)) return match;
+          if (!cue) return `${lead ?? ""}${url}${trailing}`;
+        } else if (cue && isIssueCue(cue)) return match;
+        // A mention that wouldn't chip on its own is prose, and dropping the URL
+        // next to it would leave the reference with nothing to open.
+        if (!qualifier && !cue && !bareMentionLinks(repo, number)) return match;
         return `${lead ?? ""}${mention}${trailing}`;
       },
     ),
@@ -1193,6 +1317,75 @@ function flattenChips(tokens: Token[] | undefined): void {
   }
 }
 
+/**
+ * GitHub's admonition syntax: a blockquote whose first line is exactly
+ * `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]`, the rest
+ * of the quote being the body (docs/blocks.md, "Callouts"). Models write
+ * these constantly, and PR bodies carry them too. The marker has to be the
+ * whole first line: `> [!NOTE] inline text` is an ordinary quote on GitHub
+ * and stays one here.
+ */
+const CALLOUT_TITLES: Record<CalloutIconKind, string> = {
+  note: "Note",
+  tip: "Tip",
+  important: "Important",
+  warning: "Warning",
+  caution: "Caution",
+};
+const CALLOUT_MARKER = /^\[!(note|tip|important|warning|caution)\](\n|$)/i;
+/** The marker's name, lowercased, to its kind. */
+const CALLOUT_KINDS = new Map<string, CalloutIconKind>([
+  ["note", "note"],
+  ["tip", "tip"],
+  ["important", "important"],
+  ["warning", "warning"],
+  ["caution", "caution"],
+]);
+
+interface Callout {
+  kind: CalloutIconKind;
+  /** The quote's block tokens with the marker line taken out. */
+  body: Token[];
+}
+
+/** The callout a blockquote is, if its first line is a marker. Never mutates
+ *  the tokens marked handed over: the rewritten paragraph is a copy. */
+function calloutOf(quote: Tokens.Blockquote): Callout | null {
+  const [first, ...rest] = quote.tokens;
+  if (first?.type !== "paragraph") return null;
+  const [lead, ...inline] = first.tokens ?? [];
+  if (lead?.type !== "text") return null;
+  const m = CALLOUT_MARKER.exec(lead.text);
+  if (!m) return null;
+  const kind = CALLOUT_KINDS.get(m[1]!.toLowerCase());
+  if (!kind) return null;
+  let after = inline;
+  if (m[2] === "") {
+    // With `breaks` on, the line end after the marker is a <br> token of its
+    // own rather than a newline in the text; it goes with the marker. A
+    // marker that ends the text token but not the line (`[!NOTE]**bold**`)
+    // is prose, not a title.
+    if (after[0]?.type === "br") after = after.slice(1);
+    else if (after.length > 0) return null;
+  }
+  const remainder = lead.text.slice(m[0].length);
+  const bodyInline: Token[] = remainder
+    ? [{ ...lead, raw: remainder, text: remainder }, ...after]
+    : after;
+  const body: Token[] = bodyInline.length
+    ? [
+        {
+          ...first,
+          raw: first.raw.replace(CALLOUT_MARKER, ""),
+          text: first.text.replace(CALLOUT_MARKER, ""),
+          tokens: bodyInline,
+        },
+        ...rest,
+      ]
+    : rest;
+  return { kind, body };
+}
+
 // An auto-linked (or <bracketed>) bare URL: marked hands the raw URL over as
 // the link text. Trailing-slash tolerant so `…/session/bks-x/` still counts.
 function isBareUrlLink(token: Tokens.Link): boolean {
@@ -1237,6 +1430,20 @@ md.use({
         ? sanitizeHtmlFragment(raw)
         : attr(raw);
     },
+    // A GitHub callout renders as a titled block in its kind's colour
+    // (styles/blocks/callout.css); every other blockquote falls through to
+    // marked's own renderer, untouched.
+    blockquote(token: Tokens.Blockquote) {
+      const callout = calloutOf(token);
+      if (!callout) return false;
+      const { kind, body } = callout;
+      return (
+        `<div class="md-callout md-callout-${kind}">` +
+        `<div class="md-callout-title">${calloutIconMarkup(kind, 16)}${CALLOUT_TITLES[kind]}</div>` +
+        this.parser.parse(body) +
+        `</div>\n`
+      );
+    },
     link(token: Tokens.Link) {
       // `[PR #5528](https://github.com/…)` is everyday agent output, and the
       // chip extensions fire inside a link's own text just as they do in
@@ -1244,12 +1451,16 @@ md.use({
       // silently tears apart. The explicit link wins: inside it, chips degrade
       // back to the text they were written as.
       flattenChips(token.tokens);
-      const githubPr = githubPrTarget(token.href);
-      if (githubPr) {
+      const githubRef = githubRefTarget(token.href);
+      if (githubRef) {
+        const word = githubRef.kind === "pr" ? "PR" : "issue";
         const label = isBareUrlLink(token)
-          ? `PR #${githubPr.number}`
-          : String(token.text || `PR #${githubPr.number}`);
-        return prMentionLink(githubPr.repo, githubPr.number, label);
+          ? `${word} #${githubRef.number}`
+          : String(token.text || `${word} #${githubRef.number}`);
+        if (githubRef.kind === "pr")
+          return prMentionLink(githubRef.repo, githubRef.number, label);
+        const issue = issueMentionLink(githubRef.repo, githubRef.number, label);
+        if (issue) return issue;
       }
       // A pasted commit URL is the same reference written the long way, so it
       // renders as the same thing. Only a bare URL: a link someone LABELLED is
@@ -1309,6 +1520,7 @@ md.use({
           if (SESSION_ID_EXACT.test(label))
             return sessionLink(internal.sessionId, token.href);
           return sessionChip(internal.sessionId, text, {
+            authored: true,
             href: token.href,
             tip: token.title || sessionTip(internal.sessionId),
           });
@@ -1325,7 +1537,18 @@ md.use({
       if (!renderInLink && SESSION_ID_EXACT.test(t)) return sessionLink(t);
       if (!renderInLink && AUTOMATION_ID_EXACT.test(t))
         return automationChip(t);
+      // A hex colour gets a swatch chip. The style is built from the
+      // validated, lowercased hex only, never from the span's raw text.
+      const swatch = hexSwatchColor(t);
+      if (swatch)
+        return `<code><span class="md-color-chip" style="background:${swatch}"></span>${attr(t)}</code>`;
       return `<code>${attr(t)}</code>`;
+    },
+    paragraph(token: Tokens.Paragraph) {
+      return (
+        sessionMediaFigure(token) ??
+        `<p>${this.parser.parseInline(token.tokens)}</p>\n`
+      );
     },
     image(token: Tokens.Image) {
       const title = token.title ? ` title="${attr(token.title)}"` : "";
@@ -1333,8 +1556,8 @@ md.use({
       // linking to a new tab — play them inline instead. Clicks on .md-image
       // open the media lightbox (delegated handler in MediaLightbox.tsx); the
       // wrapping <a> stays for cmd/middle-click open-in-tab.
-      if (/\.(mp4|webm|mov|m4v)([?#]|$)/i.test(token.href ?? "")) {
-        return `<video class="md-video" src="${attr(token.href)}"${title} controls playsinline preload="metadata"></video>`;
+      if (VIDEO_HREF_RE.test(token.href ?? "")) {
+        return videoMarkup(token.href, title);
       }
       // Image syntax around a GitHub user attachment is an image (a video
       // attachment is always embedded as a bare URL) — swap in the proxy
@@ -1350,6 +1573,34 @@ md.use({
   // Bare session ids in prose (not wrapped in backticks) also link. Strict
   // uuidv7 shape so it only fires on real ids.
   extensions: [
+    // Math (lib/math-block.ts). A `$$` block on its own lines becomes the
+    // same code token a ```math fence is, so the fence upgrader typesets
+    // both and a body that is never upgraded still shows readable source.
+    {
+      name: "mathBlock",
+      level: "block",
+      start: displayMathBlockStart,
+      tokenizer(src: string) {
+        const m = matchDisplayMathBlock(src);
+        if (!m) return undefined;
+        return { type: "code", raw: m.raw, lang: "math", text: m.source };
+      },
+    },
+    // `$x^2$` in prose: a placeholder carrying the escaped source, upgraded
+    // after mount. The grammar is strict about prices; see math-block.ts.
+    {
+      name: "mathInline",
+      level: "inline",
+      start: inlineMathStart,
+      tokenizer(src: string) {
+        const m = matchInlineMath(src);
+        if (!m) return undefined;
+        return { type: "mathInline", raw: m.raw, math: m };
+      },
+      renderer(token: Tokens.Generic) {
+        return mathPlaceholder(token.math);
+      },
+    },
     {
       name: "assetPath",
       level: "inline",
@@ -1485,6 +1736,9 @@ md.use({
         // Same for a short number with nothing but its digits to go on.
         if (!cue && !qualifier && !bareMentionLinks(repo, number))
           return { type: "text", raw, text: raw };
+        // And for an issue in a repo GitHub doesn't know: no page to open.
+        if (isIssueCue(cue) && !knownRepos.get(repo))
+          return { type: "text", raw, text: raw };
         return {
           type: "prMention",
           raw,
@@ -1497,14 +1751,16 @@ md.use({
       renderer(token: Tokens.Generic) {
         // The cue stays prose: it reads as `PR` + a chip labelled `#92`, so a
         // chip already carrying a PR icon doesn't also spell the word out.
+        const label = token.raw.slice(token.cue.length);
+        if (isIssueCue(token.cue)) {
+          return (
+            attr(token.cue) +
+            (issueMentionLink(token.repo, token.number, label) ?? attr(label))
+          );
+        }
         return (
           attr(token.cue) +
-          prMentionLink(
-            token.repo,
-            token.number,
-            token.raw.slice(token.cue.length),
-            token.unqualified,
-          )
+          prMentionLink(token.repo, token.number, label, token.unqualified)
         );
       },
     },
@@ -1603,6 +1859,72 @@ export function renderMarkdown(src: string, ctx?: MarkdownContext): string {
     }
   }
   return out;
+}
+
+// marked's block pass is linear, but its inline pass is superlinear in the
+// length of one run of inline text: a single 128 KB paragraph takes ~2s and
+// 512 KB ~30s, while a 100 KB table of short rows renders in ~12ms and a
+// 500 KB fenced diff in ~6ms. So what makes a message unaffordable is one
+// giant block, not its total size. A run this long is a minified dump, a
+// base64 blob, an unfenced JSON payload: machine output, not prose. ~200ms
+// at the limit, in line with the 24 KB head every bubble already parses.
+const MD_INLINE_RUN_MAX = 32 * 1024;
+// A ceiling on the whole document so a message of many affordable blocks
+// still stays within a few hundred milliseconds.
+const MD_AFFORDABLE_MAX = 512 * 1024;
+
+/**
+ * Whether renderMarkdown can render this source without freezing the tab.
+ * Runs only marked's block pass, which is what decides how the inline pass
+ * would be split, and checks the longest piece it would hand over.
+ */
+export function markdownAffordable(src: string): boolean {
+  if (src.length > MD_AFFORDABLE_MAX) return false;
+  if (src.length <= MD_INLINE_RUN_MAX) return true;
+  let blocks: Token[];
+  try {
+    blocks = new md.Lexer(md.defaults).blockTokens(
+      src.replace(/\r\n|\r/g, "\n"),
+      [],
+    );
+  } catch {
+    return false;
+  }
+  return longestInlineRun(blocks) <= MD_INLINE_RUN_MAX;
+}
+
+/**
+ * The longest text the inline lexer would tokenize as one unit: a paragraph,
+ * a heading, a list item's line, or a table cell. Code and raw HTML never
+ * reach it, and a container's own `text` (a blockquote, a list item) is just
+ * the source of the blocks nested inside it.
+ */
+function longestInlineRun(tokens: Token[]): number {
+  let longest = 0;
+  for (const token of tokens) {
+    switch (token.type) {
+      case "code":
+      case "html":
+        continue;
+      case "paragraph":
+      case "heading":
+      case "text":
+        longest = Math.max(longest, token.text.length);
+        break;
+      case "table":
+        for (const cell of [...token.header, ...token.rows.flat()]) {
+          longest = Math.max(longest, cell.text.length);
+        }
+        continue;
+      case "list":
+        longest = Math.max(longest, longestInlineRun(token.items));
+        continue;
+    }
+    if ("tokens" in token && token.tokens) {
+      longest = Math.max(longest, longestInlineRun(token.tokens));
+    }
+  }
+  return longest;
 }
 
 /**

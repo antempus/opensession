@@ -8,7 +8,12 @@ type ReplayableIntent = {
 };
 
 function plainThreadIdOf(intent: ReplayableIntent): string | null {
-  if (intent.trigger !== "event" || !intent.eventContext) return null;
+  if (
+    intent.coalescePlainThread === false ||
+    intent.trigger !== "event" ||
+    !intent.eventContext
+  )
+    return null;
   try {
     const parsed = JSON.parse(intent.eventContext);
     return typeof parsed?.threadId === "string" ? parsed.threadId : null;
@@ -26,14 +31,14 @@ function plainThreadIdOf(intent: ReplayableIntent): string | null {
  * 7 of them for one ticket. Replaying each would open one triage session per
  * attempt. Two rules, keyed by (automation, thread):
  *
- * - Pending against pending: every Plain intent takes part, flagged or not,
+ * - Pending against pending: Plain intents take part unless explicitly opted out,
  *   so intents written before `coalescePlainThread` existed (the outage's
  *   own) still collapse. The earliest-accepted intent replays.
  * - Pending against a live session (`liveThreadSessions`: thread id ->
  *   session id): only intents flagged `coalescePlainThread` (the automatic
  *   webhook and support-card launches) are dropped. An explicit retrigger of
- *   a Plain session never sets the flag, so it replays even though the
- *   session it was retriggered from is still live. The live session's own
+ *   a Plain session sets the flag to false and is excluded entirely, so the
+ *   retrigger replays even if its original session is live. The live session's own
  *   intent, which an interrupted run still owns, is the replay for its key.
  *
  * Returns intent session id -> reason.

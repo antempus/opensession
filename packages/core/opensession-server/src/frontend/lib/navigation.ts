@@ -1,3 +1,4 @@
+import type { UnreadChat } from "./unread-chats";
 import type { NewSessionPrefill } from "./new-session-link";
 import type { PortalTarget } from "./portals";
 import type { ReviewQueueItem } from "./review-queue";
@@ -25,9 +26,12 @@ export interface NavigationReportTarget {
 
 export interface NavigationActions {
   goBack(): void;
-  openNextChat(): void;
+  openNextChat(id?: string): void;
+  unreadChats: readonly UnreadChat[];
+  allChatsRead: boolean;
 
   openPrs(): void;
+  openIssues(): void;
   openFeed(): void;
   openSettings(section?: SettingsSectionKey): void;
   openTasks(): void;
@@ -36,6 +40,7 @@ export interface NavigationActions {
   openPlain(): void;
   openSupportTinder(): void;
   openReports(target?: NavigationReportTarget): void;
+  openDatabases(databaseId?: string): void;
   openAnalytics(): void;
   openArchived(): void;
   openCatchUp(): void;

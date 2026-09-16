@@ -6,6 +6,51 @@ import {
 } from "./run-instructions";
 
 describe("buildRunInstructions", () => {
+  test("preserves attribution without imposing a blanket Git publishing restriction", () => {
+    const prompt = buildRunInstructions({ isAsk: false, hasSession: true });
+
+    expect(prompt).toContain(
+      "End each PR body with the attribution footer from the session context and follow its assignee rule.",
+    );
+    expect(prompt).toContain(
+      "Add the `Co-authored-by` trailer from the session context to every commit.",
+    );
+    expect(prompt).not.toContain(
+      "Never merge, approve, or push the default branch.",
+    );
+  });
+
+  // Runs answered a pasted screenshot with "upload it in the session's Assets
+  // tab", a step no person can take. With the assets tools wired, the standing
+  // instructions say where a chat attachment lands and that Assets is not an
+  // inbox; without them there is no Assets tab to be misled by.
+  test("explains chat attachments and that nobody can upload to Assets", () => {
+    const prompt = buildRunInstructions({
+      isAsk: false,
+      hasSession: true,
+      inProcessMcp: { "opensession-assets": {} },
+    });
+    expect(prompt).toContain("## Attachments");
+    expect(prompt).toContain(
+      "every file saved to disk at the path a note on that turn lists",
+    );
+    expect(prompt).toContain("nobody can upload there, so never ask for that");
+    expect(prompt).not.toContain("not reachable from the Sandbox");
+
+    const sandboxed = buildRunInstructions({
+      isAsk: true,
+      sandboxed: true,
+      inProcessMcp: { "opensession-assets": {} },
+    });
+    expect(sandboxed).toContain(
+      "Open Session host paths are not reachable from the Sandbox; use the scratch copies the note lists.",
+    );
+
+    expect(
+      buildRunInstructions({ isAsk: false, hasSession: true }),
+    ).not.toContain("## Attachments");
+  });
+
   test("limits automatic reviewers to unattended automation pull requests", async () => {
     const prompt = buildRunInstructions({
       isAsk: false,
@@ -73,13 +118,23 @@ describe("buildRunInstructions", () => {
       "## Media",
     ]);
     expect(prompt).toContain(
-      "For PRs outside the current primary repository, write `<repo>#<number>`, never bare `#<number>`.",
+      "For PRs outside the current primary repository, write `<repo>#<number>`, never bare `#<number>`. " +
+        "A bare `#<number>` reads as a PR; write GitHub issues as `issue #<number>`.",
     );
     expect(prompt).toContain("`tella-stage` `lease_editor_fixture`");
     expect(prompt).toContain("this Open Session id as `leaseKey`");
     expect(prompt).toContain("pass only its `leaseId`");
     expect(prompt).not.toContain("## Sandbox");
-    expect(prompt.length).toBeLessThan(1_500);
+    expect(prompt).toContain(
+      "Follow repository branching and publication rules.",
+    );
+    expect(prompt).not.toContain(
+      "Never merge, approve, or push the default branch",
+    );
+    expect(prompt).not.toContain("open_pull_request");
+    // The Media section names every block form the transcript renders live;
+    // that is the one list the model cannot learn from a skill.
+    expect(prompt.length).toBeLessThan(2_000);
   });
 
   test("tells a sandboxed run where it is, in one shared paragraph", () => {
@@ -138,7 +193,7 @@ describe("buildSessionContext", () => {
       /PR attribution footer: Started by Jaap Frolich in \[this .* session\]\(.*\/session\/os-test\)/,
     );
     expect(ctx).toContain(
-      "PRs open under @jfrolich's account through open_pull_request; do not add an assignee.",
+      "PRs use @jfrolich's account through gh; do not add an assignee.",
     );
     expect(ctx).toContain(
       "Commit trailer: Co-authored-by: Jaap Frolich <jaap@example.com>",

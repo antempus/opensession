@@ -8,6 +8,12 @@
  * cache in session-cache.ts.
  */
 
+import {
+  mirrorSlackSessionReply,
+  SLACK_SESSION_NOTE,
+} from "../agents/slack/session-reply";
+
+import { deskTextNavigation } from "./desk-text-navigation";
 import type { McpScope } from "./runner-shared";
 import { randomUUIDv7 } from "bun";
 import { existsSync, mkdirSync, readFileSync } from "fs";
@@ -30,7 +36,7 @@ import { syncAgentSessionEngine } from "./agent-session-sync";
 import { cancelAgentWait } from "./agent-waits";
 import { runAgentHosted } from "./host-client";
 import { getRunState, transitionRunState } from "./run-state";
-import { resolveSessionRunInputs } from "./session-run-inputs";
+import { resolveSessionRunInputs, runAccountSpec } from "./session-run-inputs";
 import { defaultRepo } from "./config";
 import { isDevInstance } from "./dev-mode";
 import {
@@ -58,7 +64,13 @@ import {
 import { cacheMissNotice } from "@tellahq/opensession-protocol/notices";
 import { RESTART_QUEUE_NOTICE_MESSAGE } from "@tellahq/opensession-protocol/session";
 import { dropSandboxPreviewRoutes } from "./preview";
-import { restoreSandboxPortals } from "./session-sandbox";
+import { activeSandboxFor, restoreSandboxPortals } from "./session-sandbox";
+import { checkpointSessionWorkspace } from "./sandbox/checkpoint";
+import { settleSessionLifecycle } from "./sandbox/lifecycle-lane";
+import {
+  portalSandboxProvider,
+  syncPortalSandboxAfterTurn,
+} from "./portal-sandbox";
 import {
   wrapContext,
   stripContext,
@@ -140,9 +152,9 @@ import {
   worktreeHeadBranch,
 } from "./worktree";
 import { createGoalSelfMcpServer } from "../agents/slack/goal-tools";
-import { sendSlackMessage } from "../agents/slack/slack-api";
 import { runHostsDir, type RunHostSpec } from "../runner-host/protocol";
 import { maybeLaunchRunnerRun } from "./runner-session";
+import type { StagedAttachment } from "./prompt-attachments";
 import {
   shouldPersistModelSwitch,
   type ImageInput,
@@ -201,6 +213,7 @@ import {
 import { isShuttingDown } from "./shutdown-state";
 import {
   parseImageDataUrls,
+  readPromptFiles,
   stageFileAttachments,
   withUploadsNote,
 } from "./uploads";
@@ -209,8 +222,19 @@ import {
   retrievedMemoryNoteFor,
   sessionRepoIds,
 } from "./session-repos";
-import { automationSessionMcp, interactiveMcpServers } from "./interactive-mcp";
+import {
+  automationSessionMcp,
+  interactiveMcpServers,
+  plainDiscussionSessionMcp,
+} from "./interactive-mcp";
 import { makeAskHandler, settleRestoredAskAfterRecovery } from "./asks";
+import {
+  forgetPlainDiscussionRun,
+  lastAssistantReply,
+  plainDiscussionToolResult,
+  plainDiscussionToolUse,
+  settlePlainDiscussionTurn,
+} from "../agents/plain/discussion-mirror";
 import {
   registerSessionEffectExecutor,
   SessionEffectDeferredError,
@@ -534,7 +558,12 @@ import {
   ORPHANED_STEER_PROMPT,
   WEDGE_RETRY_PROMPT,
 } from "./auto-continue";
-import { SYSTEM_RESTART_USER } from "./session-actors";
+import {
+  humanPrompter,
+  loopActor,
+  sessionPrincipal,
+  SYSTEM_RESTART_USER,
+} from "./session-actors";
 
 const g = globalThis as any;
 
@@ -706,6 +735,7 @@ export async function steerQueuedPrompt(
       undefined,
       undefined,
       promptEntryId,
+      [item.id],
     ).catch(async (e) => {
       console.error(`[queue] Send-now delivery failed for ${sessionId}:`, e);
       await failPromptDispatch(sessionId, promptEntryId);
@@ -1122,7 +1152,7 @@ export async function recordRecoveredRunEvent(
         shouldPersistModelSwitch(event) &&
         syncAgentSessionEngine(session, { model: event.toModel })
       ) {
-        publishSessionChange(session.id);
+        await publishSessionChange(session.id);
       }
     } else if (
       (event.type === "init" || event.type === "done") &&
@@ -1138,7 +1168,7 @@ export async function recordRecoveredRunEvent(
             : { engineSessionId: event.sessionId },
         )
       )
-        publishSessionChange(session.id);
+        await publishSessionChange(session.id);
       if (session.worktreeDir)
         attachSessionWatchersToEngineTranscript(
           osSessionId,
@@ -1241,14 +1271,14 @@ export async function recordRecoveredRunEvent(
           (t) => t.channel === post.channel && t.threadTs === post.threadTs,
         )
       ) {
-        touchNativeSession(osSessionId, {
+        await touchNativeSession(osSessionId, {
           slackThreads: [
             ...threads,
             { channel: post.channel, threadTs: post.threadTs },
           ],
         });
         linkThreadInIndex(osSessionId, post.channel, post.threadTs);
-        publishSessionChange(osSessionId);
+        await publishSessionChange(osSessionId);
       }
     }
     if (event.type === "done" || event.type === "error")
@@ -1263,7 +1293,7 @@ export async function recordRecoveredRunEvent(
     const reason = `auto-switch — ${modelLabel(event.fromModel)} ${event.switchReason || "out of credits"}`;
     // Conditional: a /model sent while this recovered run was in flight must
     // not be reverted by its fallback (see persistAutoModelSwitch).
-    void persistAutoModelSwitch({
+    await persistAutoModelSwitch({
       sessionId: osSessionId,
       expectedModel: session.model,
       model: to,
@@ -1277,8 +1307,48 @@ export async function recordRecoveredRunEvent(
     return;
   }
 
+  if (event.type === "init" || event.type === "done") {
+    const engineSessionId = event.sessionId || "";
+    const model = event.model || session.model;
+    const provider = event.provider || providerFor(model);
+    // Recovery must export a rotated engine id before announcing completion
+    // or releasing queued prompts that resume from the session file.
+    await touchNativeSession(osSessionId, {
+      ...(engineSessionId ? engineSessionPatch(provider, engineSessionId) : {}),
+      ...(engineSessionId && event.provider
+        ? { lastEngineProvider: event.provider }
+        : {}),
+      ...(event.model ? { lastEngineModel: event.model } : {}),
+    });
+    if (engineSessionId && session.worktreeDir) {
+      attachSessionWatchersToEngineTranscript(
+        osSessionId,
+        provider,
+        session.worktreeDir,
+        engineSessionId,
+      );
+    }
+    await publishSessionChange(osSessionId);
+  }
+
   if (event.type === "done" || event.type === "error") {
     recoveredFeedStarted.delete(osSessionId);
+    // A discussion turn that outlived a gateway restart still owes Plain its
+    // answer and IDLE. The in-memory reply is gone with the old process, so
+    // the complete final text comes from the transcript the host proxied.
+    if (session.plainDiscussionId) {
+      const runKey = `recovered:${osSessionId}`;
+      const assistantText = lastAssistantReply(
+        await mergedSessionTranscriptAsync(session).catch(() => []),
+      );
+      settlePlainDiscussionTurn(session.plainDiscussionId, runKey, {
+        assistantText,
+        endedWithError: event.type === "error",
+        runFailure:
+          event.type === "error" ? event.content || "run failed" : null,
+      });
+      forgetPlainDiscussionRun(runKey);
+    }
     // Exact steer-delivered events already retired anything the engine read.
     // Every remaining receipt becomes the immediate next turn, even after a
     // clean finish: the run may have ended between buffering and its next step.
@@ -1300,29 +1370,7 @@ export async function recordRecoveredRunEvent(
       isRunning: false,
     });
     onHumanAsksSessionIdle(osSessionId);
-    if (event.type === "error") return;
   }
-
-  if (event.type !== "init" && event.type !== "done") return;
-  const engineSessionId = event.sessionId || "";
-  const model = event.model || session.model;
-  const provider = event.provider || providerFor(model);
-  touchNativeSession(osSessionId, {
-    ...(engineSessionId ? engineSessionPatch(provider, engineSessionId) : {}),
-    ...(engineSessionId && event.provider
-      ? { lastEngineProvider: event.provider }
-      : {}),
-    ...(event.model ? { lastEngineModel: event.model } : {}),
-  });
-  if (engineSessionId && session.worktreeDir) {
-    attachSessionWatchersToEngineTranscript(
-      osSessionId,
-      provider,
-      session.worktreeDir,
-      engineSessionId,
-    );
-  }
-  publishSessionChange(osSessionId);
 }
 
 /**
@@ -1822,9 +1870,15 @@ export function sandboxRunSecuritySpec(
   session: UnifiedSession,
   opts: {
     isAutomationSession: boolean;
+    promptEntryId?: string;
     user?: string;
+    accountUser?: string;
     mcpServers?: McpScope;
     deniedTools?: Record<string, string>;
+    /** The automation-bar server names this turn proxies over run-rpc
+     *  (`Object.keys(automationSessionMcp(...))`, computed once by the
+     *  caller). Only read for a non-descendant automation-owned turn. */
+    automationProxyMcpServers?: string[];
   },
 ): Pick<
   RunHostSpec,
@@ -1836,18 +1890,33 @@ export function sandboxRunSecuritySpec(
   | "aws"
   | "user"
   | "mcpGrantUser"
+  | "accountUser"
   | "journalKind"
   | "trustProfile"
 > {
   const descendant = session.automationDescendantPolicy;
   return {
     mcpServers: opts.isAutomationSession ? (opts.mcpServers ?? []) : [],
-    proxyMcpServers: opts.isAutomationSession
+    // Descendants proxy nothing; other automation-owned turns proxy exactly
+    // the automation-bar set the run-rpc fallback builder serves them.
+    proxyMcpServers: descendant
       ? []
-      : [
-          ...Object.keys(interactiveMcpServers(opts.user, session.id)),
-          ...(session.goalId ? ["opensession-goal-self"] : []),
-        ],
+      : opts.isAutomationSession
+        ? (opts.automationProxyMcpServers ?? [])
+        : session.plainDiscussionId
+          ? Object.keys(
+              plainDiscussionSessionMcp(session.id, session.plainDiscussionId),
+            )
+          : [
+              ...Object.keys(
+                interactiveMcpServers(
+                  opts.user,
+                  session.id,
+                  opts.promptEntryId,
+                ),
+              ),
+              ...(session.goalId ? ["opensession-goal-self"] : []),
+            ],
     reposNote: undefined,
     deniedTools: opts.deniedTools,
     publicationPolicy: descendant
@@ -1857,11 +1926,16 @@ export function sandboxRunSecuritySpec(
           headBranch: session.branch || "",
         }
       : undefined,
-    aws: !opts.isAutomationSession,
+    // No AWS credentials for untrusted text: automation runs and Plain
+    // discussion sessions (which read customer ticket text).
+    aws: !opts.isAutomationSession && !session.plainDiscussionId,
     user: opts.isAutomationSession ? undefined : opts.user,
     mcpGrantUser: opts.isAutomationSession
       ? undefined
       : session.createdByLogin || undefined,
+    // The person pressing send may spend their own subscription even in an
+    // automation-owned session; the identity stops at account selection.
+    accountUser: opts.accountUser,
     journalKind: opts.isAutomationSession ? "automation" : "prompt",
     trustProfile: opts.isAutomationSession ? "automation" : "interactive",
   };
@@ -1881,10 +1955,19 @@ export async function maybeLaunchSandboxedRun(
     promptCarriesHandoff?: boolean;
     cwd: string;
     user?: string;
+    accountUser?: string;
+    /** The person who sent this turn themselves (RunInputs.humanPrompter);
+     *  undefined for machine turns and scheduled ticks. Run-rpc only. */
+    humanPrompter?: string;
     images?: ImageInput[];
+    /** Server-staged file attachments; a remote sandbox gets their bytes in
+     *  the spec because it cannot read the server's uploads dir. */
+    attachments?: StagedAttachment[];
     mcpServers?: McpScope;
     deniedTools?: Record<string, string>;
     isAutomationSession: boolean;
+    /** See sandboxRunSecuritySpec. */
+    automationProxyMcpServers?: string[];
     startToken?: string;
   },
 ): Promise<
@@ -2006,6 +2089,17 @@ export async function maybeLaunchSandboxedRun(
               attachedDirs: (session.attachedRepos || [])
                 .map((r) => r.dir)
                 .filter(Boolean),
+              // A replacement Sandbox continues from the last checkpoint; an
+              // existing disk ignores this.
+              ...(session.sandboxCheckpoint
+                ? {
+                    restoreCheckpoint: {
+                      ref: session.sandboxCheckpoint.ref,
+                      commit: session.sandboxCheckpoint.commit,
+                      branch: session.sandboxCheckpoint.branch,
+                    },
+                  }
+                : {}),
             }),
       },
       {
@@ -2104,6 +2198,8 @@ export async function maybeLaunchSandboxedRun(
     registerRunToken(rpcToken, {
       sessionId: session.id,
       user: opts.isAutomationSession ? undefined : opts.user,
+      humanPrompter: opts.humanPrompter,
+      promptEntryId: opts.promptEntryId,
     });
     // Detached sandbox hosts cannot read the server's workspace store. Resolve
     // the picker-only workspace preset before crossing that boundary. A preset
@@ -2151,6 +2247,7 @@ export async function maybeLaunchSandboxedRun(
       model: portablePreset?.model ?? session.model,
       selectedModel: portablePreset?.selectedModel,
       images: opts.images,
+      files: await readPromptFiles(opts.attachments),
       // Interactive remote sandboxes keep Open Session's in-process tools
       // through proxyMcpServers below, but cannot run the host's external MCP
       // commands or reuse its dynamic OAuth state. Sending "all" made every
@@ -2165,20 +2262,17 @@ export async function maybeLaunchSandboxedRun(
       confirmTools: STRIPE_CONFIRM_TOOLS,
       author: commitAuthorFor(
         opts.isAutomationSession ? undefined : opts.user,
-        opts.isAutomationSession ? undefined : session.startedBy,
+        opts.isAutomationSession ? undefined : sessionPrincipal(session),
       ),
       fallbackModel: opts.isAutomationSession
         ? undefined
         : interactiveFallbackModel(session.model),
       effort: portablePreset?.effort ?? session.effort,
       fastMode: session.fastMode,
-      accountId: disposableAutomationResume
-        ? owningAutomation?.accountId
-        : session.accountId,
-      accountStrict: disposableAutomationResume ? true : undefined,
-      usageCredits: disposableAutomationResume
-        ? owningAutomation?.usageCredits
-        : undefined,
+      pstackMode: session.pstackMode,
+      // A disposable automation resume carries the automation's hard pin for
+      // its own turns; a person's takeover turn carries none (runAccountSpec).
+      ...runAccountSpec(session, opts, owningAutomation),
     };
     if (isAgentSessionCancelled(session.id, opts.startToken)) {
       unregisterRunToken(rpcToken);
@@ -2498,6 +2592,12 @@ export async function runSessionPrompt(
 ): Promise<void> {
   // Any explicit new run lifts a user stop — the queue may drain again.
   stoppedSessions.delete(sessionId);
+  // A lifecycle operation still in flight (a checkpoint from the previous
+  // turn, a move, a rebuild, a manual save or sleep) reads or replaces the
+  // workspace; the agent must not start under it. Resolves at once when none
+  // is. Waiting here, before the reservation below, keeps the reservation
+  // from making that operation refuse.
+  await settleSessionLifecycle(sessionId);
   // A direct send to a sandbox can spend minutes provisioning before its run
   // journal exists. Give it the same durable dispatch record as a queue drain,
   // so a restart during provisioning requeues the complete prompt.
@@ -2551,6 +2651,18 @@ export async function runSessionPrompt(
     watchExternalRunAndDrain(sessionId);
     throw new RunPreparationDeferredError(sessionId);
   }
+  // The reservation is what a lifecycle operation checks before it touches
+  // the workspace. One that claimed the session's lane between the wait
+  // above and this reservation either saw the reservation and refused, or
+  // is finishing now: hold the reservation (nothing else is admitted) and
+  // let it land its final session update before this turn reads the session
+  // it runs in.
+  await settleSessionLifecycle(sessionId);
+  const finishDeskNavigation = deskTextNavigation.begin(
+    sessionId,
+    durablePromptEntryId,
+    sourceMessageIds,
+  );
   try {
     await runSessionPromptInner(
       sessionId,
@@ -2582,8 +2694,24 @@ export async function runSessionPrompt(
     // dispatch in and must retain it for the caller to restore atomically.
     if (!promptEntryId)
       await acknowledgePromptDispatch(sessionId, durablePromptEntryId);
+    // A throw is the one terminal path the run loop cannot settle itself:
+    // the discussion still gets its IDLE (and the failure, unless the throw
+    // came from a Stop). No-op when the loop already mirrored this run.
+    settlePlainDiscussionTurn(
+      findSession(sessionId)?.plainDiscussionId,
+      startToken,
+      isAgentSessionCancelled(sessionId, startToken)
+        ? { assistantText: "", endedWithError: false, runFailure: null }
+        : {
+            assistantText: "",
+            endedWithError: true,
+            runFailure: e instanceof Error ? e.message : String(e),
+          },
+    );
     throw e;
   } finally {
+    forgetPlainDiscussionRun(startToken);
+    finishDeskNavigation();
     unmarkSessionStarting(sessionId, startToken);
   }
 }
@@ -2616,6 +2744,31 @@ async function runSessionPromptInner(
   // A fresh human prompt re-arms the announce-then-stop guard (the nudge's
   // own delivery keeps the flag, capping it at one consecutive auto-continue).
   if (user !== AUTO_CONTINUE_USER) autoContinueNudged.delete(sessionId);
+
+  // A person's prompt makes them the one this session acts for: the next
+  // turn nobody sends (a review handoff, an auto-continue, a queue drain)
+  // commits on their behalf, not the creator's (sessionPrincipal). Recorded
+  // before the turn so a run that dies mid-way still leaves it behind, and
+  // never allowed to block the turn: attribution is not worth a lost prompt.
+  const prompter = humanPrompter(user);
+  if (
+    prompter &&
+    session.source === "opensession" &&
+    session.lastPromptedBy !== prompter
+  ) {
+    try {
+      await updateSessionFile(sessionId, (data) => ({
+        ...data,
+        lastPromptedBy: prompter,
+      }));
+      session.lastPromptedBy = prompter;
+    } catch (error) {
+      console.warn(
+        `[run] could not record ${sessionId}'s prompter:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
 
   // The engine session id depends on the session's model: codex models resume
   // the codex thread, claude models the claude session. A missing engine id
@@ -2875,7 +3028,9 @@ async function runSessionPromptInner(
       prompt = `${wrapContext(buildSessionContextNote(attachedDigests), "attached-session-excerpt")}\n\n${prompt}`;
   }
   // Non-image attachments: stage to disk and tell the agent where they landed.
-  prompt = withUploadsNote(prompt, stageFileAttachments(sessionId, rawFiles));
+  // A host on another machine also gets the bytes (see the launchers below).
+  const attachments = stageFileAttachments(sessionId, rawFiles);
+  prompt = withUploadsNote(prompt, attachments);
   // The goal guides the model on every turn, but it is session-level system
   // context, not text the person added to this message. Fence it so the model
   // sees it while transcript projections keep the user bubble unchanged.
@@ -2891,6 +3046,7 @@ async function runSessionPromptInner(
   // every MCP server and drop the customer/identity write denials. The whole
   // decision lives in session-run-inputs.ts so the effective-config endpoint
   // reads the same answer this turn runs with.
+  if (slackReplyTo) prompt += "\n\n" + SLACK_SESSION_NOTE;
   const runInputs = await resolveSessionRunInputs(session, { user });
   const isAutomationSession = runInputs.isAutomationSession;
   const mcpServers = runInputs.mcpServers;
@@ -3005,7 +3161,18 @@ async function runSessionPromptInner(
           (entry) => entry.id !== durablePromptEntryId,
         )
       : undefined;
-  if (isAgentSessionCancelled(session.id, startToken)) return;
+  // Every terminal path of this run settles its Plain discussion through the
+  // same idempotent finalizer (see settlePlainDiscussionTurn); the wrapper's
+  // catch covers throws under this key.
+  const plainRunKey = startToken ?? sessionId;
+  if (isAgentSessionCancelled(session.id, startToken)) {
+    settlePlainDiscussionTurn(session.plainDiscussionId, plainRunKey, {
+      assistantText: "",
+      endedWithError: false,
+      runFailure: null,
+    });
+    return;
+  }
   if (
     session.automationDescendantPolicy &&
     !session.runner?.id &&
@@ -3014,17 +3181,35 @@ async function runSessionPromptInner(
     throw new Error(
       "Automation descendants require a sandbox or an explicitly isolated Runner",
     );
+  // Resolved once, before a backend is chosen: the automation-bar server set
+  // is a catalog read, and the Runner, sandbox and hosted proxy name lists,
+  // the run-rpc fallback and the in-process mount below must all describe
+  // the same set. A person's own turn in an automation-owned session
+  // (runInputs.humanPrompter: undefined for the automation's ticks, every
+  // machine actor and a scheduled /loop tick sent in a person's name) adds
+  // the scoped spawn suite so the session can start the work they asked for;
+  // the automation's MCP allowlist and denials still apply. Sandboxed
+  // descendants carry none of it.
+  const automationMcp =
+    isAutomationSession && !session.automationDescendantPolicy
+      ? await automationSessionMcp(session, sessionId, {
+          humanPrompter: runInputs.humanPrompter,
+        })
+      : {};
+  const automationProxyMcpServers = Object.keys(automationMcp);
   const runnerRun = await maybeLaunchRunnerRun(session, {
     prompt,
     hostId: startToken,
     shouldCancel: () => isAgentSessionCancelled(session.id, startToken),
     engineSessionId: engineSessionId || undefined,
     images,
+    attachments,
     mcpServers: mcpServers ?? "all",
     user,
     reposNote: isAutomationSession
       ? undefined
       : await buildSessionNote(session, user),
+    automationProxyMcpServers,
   });
   const sandboxRun = runnerRun
     ? null
@@ -3036,10 +3221,14 @@ async function runSessionPromptInner(
         promptCarriesHandoff: !!switchHandoff,
         cwd,
         user,
+        accountUser: runInputs.accountUser,
+        humanPrompter: runInputs.humanPrompter,
         images,
+        attachments,
         mcpServers: mcpServers ?? "all",
         deniedTools,
         isAutomationSession,
+        automationProxyMcpServers,
         startToken,
       });
 
@@ -3074,6 +3263,11 @@ async function runSessionPromptInner(
       sessionId,
       isRunning: false,
     });
+    settlePlainDiscussionTurn(session.plainDiscussionId, plainRunKey, {
+      assistantText: "",
+      endedWithError: true,
+      runFailure: msg,
+    });
     return;
   }
 
@@ -3089,12 +3283,31 @@ async function runSessionPromptInner(
   // scoping intact: proxy names come from the same fail-closed automation
   // set the run-rpc fallback builder serves, while the repos note and MCP
   // grant identity are withheld.
-  // Resolved once: the automation-bar server set is a catalog read, and the
-  // proxy name list, the run-rpc fallback and the in-process mount below must
-  // all describe the same set.
-  const automationMcp = isAutomationSession
-    ? await automationSessionMcp(session, sessionId)
-    : {};
+  // The in-process opensession-* set this turn carries, rebuilt per call
+  // because an McpServer holds exactly one transport. Self-management tools
+  // for normal sessions; withheld from automation sessions (and their
+  // interactive resumes), same gate as deniedTools above. Automation-owned
+  // sessions keep their automation-bar set (papercuts + report/workflows
+  // rebuild + the selfImprove pair, plus a person's own spawn suite — the
+  // same fail-closed set the hosted path proxies and run-rpc's fallback
+  // builder serves, resolved once above as automationMcp) so a Slack thread
+  // reply reaches a session with the same tools its unattended run had. A
+  // Plain discussion session gets only its approval server: it reads
+  // untrusted ticket text. A goal-driven session also gets its own
+  // opensession-goal-self controls, so an interactive turn (a human steering
+  // it in the UI) can set the next wake, append to the ledger, or
+  // pause/finish — the same tools the headless wake has.
+  const inProcessMcpForTurn = (): Record<string, unknown> =>
+    isAutomationSession
+      ? automationMcp
+      : session.plainDiscussionId
+        ? plainDiscussionSessionMcp(sessionId, session.plainDiscussionId)
+        : session.goalId
+          ? {
+              ...interactiveMcpServers(user, sessionId, durablePromptEntryId),
+              "opensession-goal-self": createGoalSelfMcpServer(session.goalId),
+            }
+          : interactiveMcpServers(user, sessionId, durablePromptEntryId);
   const hostedRun =
     !runnerRun && !sandboxRun && routedEngine === "pi"
       ? runAgentHosted({
@@ -3117,12 +3330,7 @@ async function runSessionPromptInner(
           mcpServers: mcpServers ?? "all",
           proxyMcpServers: session.automationDescendantPolicy
             ? []
-            : isAutomationSession
-              ? Object.keys(automationMcp)
-              : [
-                  ...Object.keys(interactiveMcpServers(user, sessionId)),
-                  ...(session.goalId ? ["opensession-goal-self"] : []),
-                ],
+            : Object.keys(inProcessMcpForTurn()),
           reposNote: isAutomationSession
             ? undefined
             : await buildSessionNote(session, user),
@@ -3135,28 +3343,22 @@ async function runSessionPromptInner(
               }
             : undefined,
           confirmTools: STRIPE_CONFIRM_TOOLS,
-          aws: !isAutomationSession,
-          author: commitAuthorFor(user, session.startedBy),
+          aws: !isAutomationSession && !session.plainDiscussionId,
+          author: commitAuthorFor(user, sessionPrincipal(session)),
           user: runInputs.user,
+          accountUser: runInputs.accountUser,
           fallbackModel: interactiveFallbackModel(session.model),
           effort: session.effort,
           fastMode: session.fastMode,
-          accountId: session.accountId,
+          pstackMode: session.pstackMode,
+          // Session pin, except for a person's turn in an automation-owned
+          // session: they pay personal-first with the pool as backup.
+          ...runAccountSpec(session, runInputs),
           trustProfile: isAutomationSession ? "automation" : "interactive",
           journalKind: "prompt",
           onAskUser: makeAskHandler(sessionId),
           onSteerFailed: (text) => requeueFailedSteer(session.id, text, user),
-          fallbackInProcessMcp: () =>
-            isAutomationSession
-              ? automationMcp
-              : session.goalId
-                ? {
-                    ...interactiveMcpServers(user, sessionId),
-                    "opensession-goal-self": createGoalSelfMcpServer(
-                      session.goalId,
-                    ),
-                  }
-                : interactiveMcpServers(user, sessionId),
+          fallbackInProcessMcp: inProcessMcpForTurn,
         })
       : null;
 
@@ -3193,9 +3395,12 @@ async function runSessionPromptInner(
       // Reasoning effort from the composer pill, persisted on the session.
       effort: session.effort,
       fastMode: session.fastMode,
+      pstackMode: session.pstackMode,
       // Pinned subscription for this session (claude-runner prefers it, pool
-      // fallback on exhaustion). Ignored by Codex models.
-      accountId: session.accountId,
+      // fallback on exhaustion). Ignored by Codex models. A person's turn in
+      // an automation-owned session carries no pin, so their own subscription
+      // is tried before the automation's account and the pool.
+      ...runAccountSpec(session, runInputs),
       // Only switch models when a fallback is explicitly configured. By default,
       // usage exhaustion stops the run so the human can choose what to do.
       fallbackModel: interactiveFallbackModel(session.model),
@@ -3212,28 +3417,10 @@ async function runSessionPromptInner(
           ? switchHandoffEntries
           : undefined,
       mcpServers: mcpServers ?? "all",
-      // Self-management tools for normal sessions; withheld from automation
-      // sessions (and their interactive resumes), same gate as deniedTools
-      // above. Automation-owned sessions keep their automation-bar set
-      // (papercuts + report/workflows rebuild + the selfImprove pair, the
-      // same fail-closed set the hosted path proxies and run-rpc's fallback
-      // builder serves) so a Slack thread reply reaches a session with the
-      // same tools its unattended run had.
-      // A goal-driven session also gets its own opensession-goal-self controls, so an
-      // interactive turn (a human steering it in the UI) can set the next wake,
-      // append to the ledger, or pause/finish — the same tools the headless wake has.
+      // See inProcessMcpForTurn above for what each session kind carries.
       inProcessMcp: session.automationDescendantPolicy
         ? {}
-        : isAutomationSession
-          ? automationMcp
-          : session.goalId
-            ? {
-                ...interactiveMcpServers(user, sessionId),
-                "opensession-goal-self": createGoalSelfMcpServer(
-                  session.goalId,
-                ),
-              }
-            : interactiveMcpServers(user, sessionId),
+        : inProcessMcpForTurn(),
       reposNote: isAutomationSession
         ? undefined
         : await buildSessionNote(session, user),
@@ -3246,14 +3433,20 @@ async function runSessionPromptInner(
           }
         : undefined,
       confirmTools: STRIPE_CONFIRM_TOOLS,
-      aws: !isAutomationSession, // automation descendants never receive AWS credentials
+      // Automation descendants and Plain discussion sessions (untrusted
+      // ticket text) never receive AWS credentials.
+      aws: !isAutomationSession && !session.plainDiscussionId,
       // Attribute any commits this turn makes to whoever sent the prompt, or
-      // to whoever the session belongs to when nobody did (an auto-continue,
-      // a restart resume, a queue drain).
-      author: commitAuthorFor(user, session.startedBy),
+      // to the person the session acts for when nobody did (an auto-continue,
+      // a restart resume, a queue drain): the last person who prompted it,
+      // else its creator.
+      author: commitAuthorFor(user, sessionPrincipal(session)),
       // Gate per-user MCP servers (allowedUsers) to the prompt's author. Automation
       // sessions pass no user, so they never see a user-restricted server.
       user: runInputs.user,
+      // The person who sent the prompt may spend their own subscription even
+      // when the session is automation-owned (the pool stays the backup).
+      accountUser: runInputs.accountUser,
       // The creator grant also gives provider routing a safe human identity for
       // synthetic continuations such as worker reports and restart recovery.
       mcpGrantUser: runInputs.mcpGrantUser,
@@ -3273,7 +3466,7 @@ async function runSessionPromptInner(
           // watching yet. Persist + attach NOW — waiting for the run to end
           // (the old behavior) left the entire turn invisible to viewers.
           if (session.source === "opensession") {
-            touchNativeSession(session.id, {
+            await touchNativeSession(session.id, {
               ...engineSessionPatch(effectiveProvider, finalSessionId),
               lastEngineProvider: effectiveProvider,
               ...(effectiveModel
@@ -3282,7 +3475,7 @@ async function runSessionPromptInner(
                   }
                 : {}),
             });
-            publishSessionChange(session.id); // new watchers must see the new transcriptPath
+            await publishSessionChange(session.id); // new watchers must see the new transcriptPath
           } else if (
             // Slack/linear-source sessions need the same persistence, into
             // the owning agent's store — otherwise a fallback/rotation-minted
@@ -3299,7 +3492,7 @@ async function runSessionPromptInner(
                 : { engineSessionId: finalSessionId },
             )
           ) {
-            publishSessionChange(session.id);
+            await publishSessionChange(session.id);
           }
           attachSessionWatchersToEngineTranscript(
             sessionId,
@@ -3340,7 +3533,7 @@ async function runSessionPromptInner(
           });
         }
         if (persistSwitch && session.source === "opensession") {
-          void persistAutoModelSwitch({
+          await persistAutoModelSwitch({
             sessionId: session.id,
             expectedModel: lastPersistedModel,
             model: to,
@@ -3363,7 +3556,7 @@ async function runSessionPromptInner(
           // Keep the slack/linear store's model in step so the next turn
           // (from the loop or the UI) resumes on the fallback, not the
           // exhausted model. The new engine id follows via the init event.
-          publishSessionChange(session.id);
+          await publishSessionChange(session.id);
         }
         if (persistSwitch)
           broadcastToSession(sessionId, {
@@ -3377,6 +3570,7 @@ async function runSessionPromptInner(
       }
       case "tool_use":
         toolUseCount++;
+        plainDiscussionToolUse(session.plainDiscussionId, event);
         broadcastToSession(sessionId, {
           type: "stream_tool_use",
           sessionId,
@@ -3392,6 +3586,7 @@ async function runSessionPromptInner(
         });
         break;
       case "tool_result":
+        plainDiscussionToolResult(session.plainDiscussionId, event);
         broadcastToSession(sessionId, {
           type: "stream_tool_result",
           sessionId,
@@ -3485,7 +3680,7 @@ async function runSessionPromptInner(
             } catch {}
           }
         }
-        publishSessionChange(sessionId);
+        await publishSessionChange(sessionId);
         break;
       case "error":
         // "Session is busy" = we lost the start race to a concurrent run (the
@@ -3561,7 +3756,9 @@ async function runSessionPromptInner(
       session.branch && !isSharedCheckoutDir(session.worktreeDir)
         ? worktreeHeadBranch(session.worktreeDir)
         : null;
-    touchNativeSession(session.id, {
+    // Export the engine identity and usage before settling or draining the
+    // next prompt, whose resume inputs can still come from the session file.
+    await touchNativeSession(session.id, {
       ...engineSessionPatch(effectiveProvider, finalSessionId),
       lastEngineProvider: effectiveProvider,
       ...(effectiveModel ? { lastEngineModel: effectiveModel } : {}),
@@ -3582,6 +3779,53 @@ async function runSessionPromptInner(
         ? { piSessionId: finalSessionId }
         : { engineSessionId: finalSessionId },
     );
+  }
+
+  // Push the workspace checkpoint to origin (sandbox/checkpoint.ts) so the
+  // session's work survives a lost or replaced Sandbox and can move to another
+  // machine. Claimed on the session's checkpoint lane BEFORE the run settles
+  // below: from the moment the session reads as idle, the next turn waits on
+  // that lane (runSessionPrompt), so no turn edits the tree while the capture
+  // reads it. Detached from the reply otherwise; the failure is logged, not
+  // surfaced as a turn error. Never waking: the Sandbox just ran the turn.
+  if (
+    !endedWithError &&
+    sandboxRun?.sandboxId &&
+    isRunnableSandboxProvider(sandboxRun.sandboxProvider)
+  ) {
+    void checkpointSessionWorkspace(session, (current) =>
+      activeSandboxFor(current as UnifiedSession),
+    )
+      .then((outcome) => {
+        if (outcome.state === "skipped")
+          console.log(
+            `[sandbox] ${sessionId}: checkpoint skipped (${outcome.reason})`,
+          );
+      })
+      .catch((error) => {
+        console.warn(
+          `[sandbox] ${sessionId}: workspace checkpoint failed:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+  } else if (
+    !endedWithError &&
+    !runnerRun &&
+    !sandboxRun &&
+    session.source === "opensession" &&
+    session.worktreeDir &&
+    (session.portalSandbox || portalSandboxProvider(session))
+  ) {
+    // The same capture for a session on this machine whose dev server runs
+    // in a Portal Sandbox (portal-sandbox.ts): the turn's edits are
+    // checkpointed and landed there, so the running app shows them. Same
+    // lane, same timing; a sleeping Portal Sandbox catches up when it wakes.
+    void syncPortalSandboxAfterTurn(session).catch((error) => {
+      console.warn(
+        `[sandbox] ${sessionId}: Portal Sandbox not refreshed:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    });
   }
 
   // A terminal failure keeps the session in the "Needs input" bucket until a
@@ -3622,13 +3866,24 @@ async function runSessionPromptInner(
   // Mirror the agent's reply back to Slack: a turn that came from a Slack thread
   // (a reply under a message this session posted — see slackReplyTo plumbing)
   // answers in that thread.
-  if (!endedWithError && assistantText.trim() && slackReplyTo) {
-    void sendSlackMessage(
-      slackReplyTo.channel,
-      assistantText.trim().slice(0, 38000),
-      slackReplyTo.threadTs,
-    ).catch(() => {});
-  }
+  await mirrorSlackSessionReply(slackReplyTo, {
+    sessionId,
+    localMedia:
+      !isAutomationSession &&
+      !session.plainDiscussionId &&
+      !session.sandbox?.provider &&
+      !session.runner,
+    assistantText,
+    error: endedWithError ? runFailure || "Run failed" : null,
+  });
+
+  // A session answering a Plain discussion posts the turn there and reports
+  // itself idle, whoever started the turn.
+  settlePlainDiscussionTurn(session.plainDiscussionId, plainRunKey, {
+    assistantText,
+    endedWithError,
+    runFailure,
+  });
 
   // Announce-then-stop guard (shared with the create path — see
   // maybeQueueAutoContinue). runSessionPromptAndDrain delivers what it queues.
@@ -3803,7 +4058,7 @@ export function startLoopTicker(): void {
       void runSessionPromptAndDrain(
         session.id,
         loop.prompt,
-        loop.setBy ? `${loop.setBy} (loop)` : "loop",
+        loopActor(loop.setBy),
       ).catch((e) =>
         console.error(`[loop] Loop prompt failed for ${session.id}:`, e),
       );

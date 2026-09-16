@@ -1,7 +1,8 @@
-import React, { useState } from "react";
+import { useAgentMessageSummary } from "../hooks/useAgentMessageSummary";
+import React, { useId, useState } from "react";
 import { z } from "zod";
 import type { TranscriptEntry } from "../lib/types";
-import { renderMarkdown } from "../lib/markdown";
+import { markdownAffordable, renderMarkdown } from "../lib/markdown";
 import { MarkdownBody, useMarkdownRepo } from "./MarkdownBody";
 import { classifyEntry } from "@tellahq/opensession-protocol/notices";
 import type { NoticeIcon as NoticeIconName } from "@tellahq/opensession-protocol/notices";
@@ -16,11 +17,23 @@ import { assetPathForMediaSrc } from "../lib/asset-preview";
 import { fullTime, shortTime } from "../lib/time";
 import { UserAvatar } from "./UserAvatar";
 import { openGalleryFrom } from "../lib/media-lightbox-gallery";
-import { IconExpand, IconFileText2, IconPencil } from "./icons";
+import { unplacedMedia } from "../lib/placed-media";
+import {
+  IconArrowRight,
+  IconChevronDown,
+  IconExpand,
+  IconFileText2,
+  IconPencil,
+} from "./icons";
 import { Collapsible, collapsiblePanelClasses } from "../ui/collapsible";
 import { pastedTextLineLabel } from "@tellahq/opensession-protocol/pasted-text";
 import { personKey } from "../lib/review-queue";
 import { AnsweredAskCard } from "./AnsweredAskCard";
+import { AgentIdentity } from "./AgentIdentity";
+import {
+  agentDeliveryStatus,
+  outgoingAgentMessage,
+} from "../lib/agent-message";
 
 import {
   fileChipCard,
@@ -51,17 +64,23 @@ import {
 import { cn } from "../ui/cn";
 import { reasoningBody, reasoningDisplay } from "../lib/reasoning-display";
 import { transcriptEnterClass } from "../lib/transcript-motion";
+import {
+  MESSAGE_COLLAPSE_CHARS,
+  MESSAGE_PREVIEW_CHARS,
+} from "../../shared/message-preview";
 
 // Only this much of a message is markdown-parsed eagerly. marked is
 // superlinear on input size (~25ms at 10KB, ~400ms at 80KB, seconds past
 // 200KB), and a transcript can hold dozens of giant machine-written entries
 // (automation prompts embedding a full PR diff) — parsing them all on open is
 // what made "Loading transcript…" hang for minutes on such sessions. Longer
-// contents render their head plus a "Show full message" expander.
-const EAGER_MD_CHARS = 6000;
-// Expanded content still renders as markdown up to this size; past it the
-// content is machine payload, not prose — a plain <pre> shows it instantly.
-const FULL_MD_CHARS = 32 * 1024;
+// contents render their head plus a "Show full message" expander. The
+// budget lives in shared/message-preview.ts so the wire clamp matches it.
+// Near-limit messages render in full using the shared collapse threshold.
+// Expanded content still renders as markdown when marked can afford it: the
+// cost is in a single giant block, not the total size, so a 100 KB table or
+// report stays markdown while a message that is one huge blob shows in a
+// plain <pre> instantly.
 const sessionEntryResponseSchema = z.object({ content: z.string() });
 
 function sizeLabel(chars: number): string {
@@ -79,6 +98,7 @@ export function ClampedBody({
   entry,
   sessionId,
   transformContent,
+  summary,
 }: {
   content: string;
   className: string;
@@ -86,32 +106,35 @@ export function ClampedBody({
   sessionId?: string;
   /** Display-only repair applied again after a clamped entry hydrates. */
   transformContent?: (content: string) => string;
+  /** Derived one-line preview; expansion uses the same full-content path. */
+  summary?: { text: string; label: string };
 }) {
   const wireClamped = !!entry?.contentClamped;
   const fullLength = entry?.contentLength ?? content.length;
-  const isLong = wireClamped || content.length > EAGER_MD_CHARS;
+  const isLong = wireClamped || content.length >= MESSAGE_COLLAPSE_CHARS;
   const [showAll, setShowAll] = useState(false);
   const [fetched, setFetched] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
+  const bodyId = useId();
 
   // Cut the eager head at a line boundary so we don't render half a line of
   // a diff/log as its own paragraph.
   const head = (() => {
     if (!isLong || showAll) return content;
-    const slice = content.slice(0, EAGER_MD_CHARS);
+    const slice = content.slice(0, MESSAGE_PREVIEW_CHARS);
     const nl = slice.lastIndexOf("\n");
-    return nl > EAGER_MD_CHARS / 2 ? slice.slice(0, nl) : slice;
+    return nl > MESSAGE_PREVIEW_CHARS / 2 ? slice.slice(0, nl) : slice;
   })();
 
   const rawShown = showAll ? (fetched ?? content) : head;
   const shown = transformContent ? transformContent(rawShown) : rawShown;
-  // Giant expanded payloads skip markdown entirely — see FULL_MD_CHARS.
-  const asMarkdown = shown.length <= FULL_MD_CHARS;
+  // The head is always within budget; only an expanded body can be too big.
+  const asMarkdown = !showAll || markdownAffordable(shown);
   const repo = useMarkdownRepo();
   const assetPaths = useOpenAssetPaths();
-  const html = asMarkdown
-    ? renderMarkdown(shown, { repo, sessionId, assetPaths })
-    : "";
+  const markdown = { repo, sessionId, assetPaths };
+  const html =
+    asMarkdown && (!summary || showAll) ? renderMarkdown(shown, markdown) : "";
 
   const expand = async () => {
     if (wireClamped && !fetched && entry && sessionId) {
@@ -136,27 +159,57 @@ export function ClampedBody({
     setShowAll(true);
   };
 
+  const body = asMarkdown ? (
+    <MarkdownBody className={className} html={html || ""} markdown={markdown} />
+  ) : (
+    // Huge expanded blobs retain the existing affordable plain-text fallback.
+    <pre className="my-1 max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface p-3 font-sans text-label leading-relaxed text-fg">
+      {shown}
+    </pre>
+  );
+
   return (
     <>
-      {asMarkdown ? (
-        <MarkdownBody className={className} html={html || ""} />
+      {summary ? (
+        <>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={fetching}
+            aria-expanded={showAll}
+            aria-controls={bodyId}
+            aria-label={`${showAll ? "Collapse" : "Expand"} message: ${summary.text}`}
+            title={`${summary.label}\n${summary.text}`}
+            onClick={showAll ? () => setShowAll(false) : expand}
+            icon={
+              <IconChevronDown
+                size={16}
+                className={showAll ? undefined : "-rotate-90"}
+              />
+            }
+            className="w-full min-w-0 justify-start border-0 px-0 text-left text-label font-normal text-dim phone:min-h-11"
+          >
+            <span className="min-w-0 truncate">
+              {fetching ? "Loading message…" : summary.text}
+            </span>
+          </Button>
+          <div
+            id={bodyId}
+            hidden={!showAll}
+            className={showAll ? "my-2" : undefined}
+          >
+            {showAll ? body : null}
+          </div>
+        </>
       ) : (
-        // A <pre> only for the preserved whitespace: this branch renders a
-        // message too long for the markdown pass, which is prose, not code.
-        // `font-sans` is load-bearing — the app ships no Tailwind Preflight,
-        // so the UA's `pre { font-family: monospace }` applies otherwise.
-        <pre
-          className={
-            "my-1 max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface p-3 font-sans text-label leading-relaxed text-fg"
-          }
-        >
-          {shown}
-        </pre>
+        body
       )}
-      {isLong && (
+      {!summary && isLong && (
         <Button
           variant="ghost"
           size="sm"
+          disabled={fetching}
+          aria-expanded={showAll}
           onClick={showAll ? () => setShowAll(false) : expand}
           className="mt-1 min-h-0 justify-start whitespace-normal rounded-md border-0 px-2 py-1 text-left font-sans text-label font-medium leading-normal hover:bg-hover/40"
         >
@@ -171,13 +224,42 @@ export function ClampedBody({
   );
 }
 
+function AgentMessageBody({
+  entry,
+  content,
+  outgoing,
+  sessionId,
+}: {
+  entry: TranscriptEntry;
+  content: string;
+  outgoing: boolean;
+  sessionId?: string;
+}) {
+  const summary = useAgentMessageSummary(sessionId, entry.id, content);
+  return (
+    <ClampedBody
+      summary={summary}
+      className={cn(msgBody, "markdown text-fg")}
+      content={content}
+      entry={outgoing ? undefined : entry}
+      sessionId={sessionId}
+      transformContent={
+        outgoing
+          ? undefined
+          : (full) =>
+              classifyEntry({ ...entry, notice: undefined, content: full })
+                .content
+      }
+    />
+  );
+}
+
 /**
  * The one way a transcript renders something that isn't a message.
  *
- * Every operational line goes through here — a runner notice, a recap, a
- * context compaction, a worker's report, review findings, a heads-up from
- * another session, a restart resume. The server decides which of those an
- * entry is (classifyEntry in the protocol's notices.ts) and hands back a
+ * Operational lines go through here: runner notices, recaps, compactions,
+ * review findings, and restart resumes. Agent correspondence renders as chat.
+ * The server decides which of those an entry is (classifyEntry in the protocol's notices.ts) and hands back a
  * title, a tone, and at most one body and one action; this component is the
  * only place that decides what any of them LOOK like. Adding a tenth kind of
  * notice must not add a tenth rendering.
@@ -433,6 +515,8 @@ function BubbleMeta({ ts, onEdit }: { ts?: string; onEdit?: () => void }) {
 
 interface Props {
   entry: TranscriptEntry;
+  /** Delivery evidence for an outgoing agent message. */
+  toolResult?: TranscriptEntry;
   /** This message was inserted at the live edge in the current build. */
   enter?: boolean;
   /** Provider reasoning summary, including legacy rows inferred by the turn
@@ -704,6 +788,7 @@ function PastedTextCard({
 // markdown/highlighting.
 export const MessageBubble = function MessageBubble({
   entry,
+  toolResult,
   enter = false,
   reasoning = false,
   pendingDelivery = false,
@@ -732,7 +817,100 @@ export const MessageBubble = function MessageBubble({
   if (e.notice?.kind === "ask" && e.notice.ask)
     return <AnsweredAskCard record={e.notice.ask} entryId={e.id} />;
 
-  // Anything else that isn't a message is a notice, whatever produced it.
+  const outgoing = outgoingAgentMessage(e);
+  const deliveryStatus = agentDeliveryStatus(toolResult);
+  const peerMessage =
+    e.notice?.kind === "session-notice" || e.notice?.kind === "worker-report";
+  if (outgoing || peerMessage) {
+    const senderId = outgoing ? sessionId : e.notice?.link?.sessionId;
+    return (
+      <div
+        className={cn(msgRow, enterClass)}
+        data-eid={e.id}
+        data-agent-message={outgoing ? "outgoing" : "incoming"}
+        role="group"
+        aria-label={
+          outgoing ? "Outgoing agent message" : "Incoming agent message"
+        }
+      >
+        <div
+          className={cn(
+            "mb-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-meta text-faint",
+            outgoing && "justify-end",
+          )}
+          data-agent-message-header=""
+        >
+          <AgentIdentity
+            sessionId={senderId}
+            linked
+            current={!!senderId && senderId === sessionId}
+          />
+          {(outgoing?.to || sessionId) && (
+            <>
+              <span className="inline-flex shrink-0 items-center">
+                <IconArrowRight className="size-4" />
+                <span className="sr-only">to</span>
+              </span>
+              <AgentIdentity
+                sessionId={outgoing?.to ?? sessionId}
+                linked
+                current={(outgoing?.to ?? sessionId) === sessionId}
+              />
+            </>
+          )}
+          {outgoing && (
+            <span
+              className={deliveryStatus === "Not sent" ? "text-red" : undefined}
+            >
+              {deliveryStatus}
+            </span>
+          )}
+          <MsgTime ts={e.timestamp} />
+        </div>
+        {e.notice?.kind === "worker-report" && (
+          <span className="mb-1 text-meta text-faint">Worker report</span>
+        )}
+        <div
+          className={cn(
+            msgBubbleUser,
+            "flex w-fit min-w-0 flex-col rounded-xl px-2.5 py-0.5",
+            outgoing ? "bg-accent/10" : "self-start",
+          )}
+        >
+          <AgentMessageBody
+            entry={entry}
+            content={outgoing?.content ?? displayContent}
+            outgoing={!!outgoing}
+            sessionId={sessionId}
+          />
+        </div>
+        {outgoing && toolResult && (
+          <Collapsible.Root className="mt-1 self-end">
+            <Collapsible.Trigger className="rounded-control py-1 text-meta text-faint hover:text-fg phone:min-h-11">
+              Delivery details
+            </Collapsible.Trigger>
+            <Collapsible.Panel className={collapsiblePanelClasses}>
+              <ClampedBody
+                content={toolResult.content}
+                entry={toolResult}
+                sessionId={sessionId}
+                className={cn(msgBody, "markdown text-dim")}
+              />
+            </Collapsible.Panel>
+          </Collapsible.Root>
+        )}
+        <EntryImages
+          images={unplacedMedia(e.images, e.content)}
+          sessionId={sessionId}
+        />
+        <EntryVideos videos={unplacedMedia(e.videos, e.content)} />
+        <EntryFiles files={e.files} />
+        <EntryPastedTexts entry={e} sessionId={sessionId} />
+      </div>
+    );
+  }
+
+  // Operational events remain notices; agent correspondence is conversation.
   if (e.notice)
     return (
       <NoticeRow
@@ -879,8 +1057,8 @@ export const MessageBubble = function MessageBubble({
     );
   }
 
-  // assistant — no speaker label: every left-aligned bubble is the agent, so
-  // the name row was pure noise above each answer.
+  // Ordinary replies need no speaker label: the conversation header identifies
+  // this agent. Only agent-to-agent messages need the extra routing context.
   return (
     <div className={cn(msgRow, enterClass)} data-eid={e.id}>
       <ClampedBody
@@ -889,8 +1067,11 @@ export const MessageBubble = function MessageBubble({
         entry={e}
         sessionId={sessionId}
       />
-      <EntryImages images={e.images} sessionId={sessionId} />
-      <EntryVideos videos={e.videos} />
+      <EntryImages
+        images={unplacedMedia(e.images, e.content)}
+        sessionId={sessionId}
+      />
+      <EntryVideos videos={unplacedMedia(e.videos, e.content)} />
     </div>
   );
 };

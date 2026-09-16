@@ -26,6 +26,7 @@ import { handleSandboxesRoutes } from "./sandboxes";
 import { handleSessionsRoutes } from "./sessions";
 import { handleShippedChangeRoutes } from "./shipped-changes";
 import { handlePrRoutes } from "./pr";
+import { handleIssuesRoutes } from "./issues";
 import { handleSessionGitRoutes } from "./session-git";
 import { handleSessionBranchRoutes } from "./session-branch";
 import { handlePreviewRoutes } from "./preview";
@@ -48,8 +49,10 @@ import { handlePapercutsRoutes } from "./papercuts";
 import { handleLibraryRoutes } from "./library";
 import { handleTodosRoutes } from "./todos";
 import { handleDeskVoiceRoutes } from "./desk-voice";
+import { handleDeskNavigationRoutes } from "./desk-navigation";
 import { handleWorkflowsRoutes } from "./workflows";
 import { handleReportsRoutes } from "./reports";
+import { handleDatabasesRoutes } from "./databases";
 import { handleAnalyticsRoutes } from "./analytics";
 import { handleSearchRoutes } from "./search";
 import { handleSetupRoutes } from "./setup";
@@ -88,6 +91,7 @@ export const routeHandlers: RouteHandler[] = [
   handleShippedChangeRoutes,
   handleSessionsRoutes,
   handlePrRoutes,
+  handleIssuesRoutes,
   handleSessionGitRoutes,
   handleSessionBranchRoutes,
   handlePreviewRoutes,
@@ -110,8 +114,10 @@ export const routeHandlers: RouteHandler[] = [
   handleLibraryRoutes,
   handleTodosRoutes,
   handleDeskVoiceRoutes,
+  handleDeskNavigationRoutes,
   handleWorkflowsRoutes,
   handleReportsRoutes,
+  handleDatabasesRoutes,
   handleAnalyticsRoutes,
   handleSearchRoutes,
   handleSetupRoutes,

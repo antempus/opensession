@@ -78,7 +78,7 @@ export function buildTranscriptRanges(
       current.assistantChars += entry.contentLength;
       current.lastAssistantChars = entry.contentLength;
       current.lastTurnRole = "assistant";
-    } else if (entry.role === "tool_use") {
+    } else if (entry.role === "tool_use" || entry.role === "agent_message") {
       current.toolUseCount++;
       current.lastTurnRole = "tool_use";
     }
@@ -115,22 +115,56 @@ function messageEstimate(chars: number, floor: number): number {
   return Math.min(720, Math.max(floor, 56 + Math.ceil(chars / 110) * 20));
 }
 
-/** Merge a newly committed durable frame into an existing complete outline. */
+/**
+ * Merge a newly committed durable frame into an existing complete outline.
+ *
+ * The outline is seq-sorted and immutable: a changed merge returns a new
+ * array and never touches `current` or `incoming`; an unchanged merge returns
+ * `current` itself so callers can compare identity. Live appends are by far
+ * the common frame and always extend the tail with strictly increasing new
+ * seqs, so that case concatenates without building the seq map or sorting.
+ * Everything else (an equal or stale row, a historical replacement, a frame
+ * out of order or with duplicates) takes the complete keyed merge. Only the
+ * map and sort are skipped: the concatenation still copies the outline.
+ */
 export function mergeTranscriptIndexEntries(
   current: TranscriptIndexEntry[],
   incoming: TranscriptIndexEntry[],
 ): TranscriptIndexEntry[] {
   if (!incoming.length) return current;
+  if (isStrictlyNewTail(current, incoming)) return [...current, ...incoming];
   const bySeq = new Map(current.map((entry) => [entry.seq, entry]));
   let changed = false;
   for (const entry of incoming) {
     const previous = bySeq.get(entry.seq);
-    if (!previous || entry.changeSeq > previous.changeSeq) {
+    if (
+      !previous ||
+      entry.changeSeq > previous.changeSeq ||
+      (entry.changeSeq === previous.changeSeq &&
+        previous.role === "notice" &&
+        entry.role === "agent_message")
+    ) {
       bySeq.set(entry.seq, entry);
       changed = true;
     }
   }
   return changed ? [...bySeq.values()].sort((a, b) => a.seq - b.seq) : current;
+}
+
+/** Every incoming seq is above the current tail and strictly ascending, so
+ * the frame is pure new history and appending it keeps the outline sorted. */
+function isStrictlyNewTail(
+  current: readonly TranscriptIndexEntry[],
+  incoming: readonly TranscriptIndexEntry[],
+): boolean {
+  let previousSeq = current.length
+    ? current[current.length - 1]!.seq
+    : Number.NEGATIVE_INFINITY;
+  for (const entry of incoming) {
+    if (!(entry.seq > previousSeq)) return false;
+    previousSeq = entry.seq;
+  }
+  return true;
 }
 
 /** Structural index row carried implicitly by a durable append payload. */
@@ -151,6 +185,11 @@ export function transcriptIndexEntryFromPayload(entry: {
     role = "review_handoff";
     const match = entry.notice.title?.match(/PR #(\d+)/);
     if (match) reviewPrNumber = Number(match[1]);
+  } else if (
+    entry.notice?.kind === "session-notice" ||
+    entry.notice?.kind === "worker-report"
+  ) {
+    role = "agent_message";
   } else if (entry.notice) {
     role = "notice";
   } else if (entry.type === "user") {

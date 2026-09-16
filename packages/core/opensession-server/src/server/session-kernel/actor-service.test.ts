@@ -44,14 +44,23 @@ afterAll(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-async function rpc(request: KernelActorTransportEnvelope["request"]) {
-  if (!serviceEpoch && request.t !== "hello")
-    await rpc({
-      t: "hello",
-      rpcId: "test-handshake",
-      version: SESSION_KERNEL_ACTOR_VERSION,
-    });
-  const response = await fetch(`${service.url}/rpc`, {
+async function rpc(
+  request: KernelActorTransportEnvelope["request"],
+  target = service,
+) {
+  let epoch = target === service ? serviceEpoch : undefined;
+  if (!epoch && request.t !== "hello") {
+    const ready = await rpc(
+      {
+        t: "hello",
+        rpcId: "test-handshake",
+        version: SESSION_KERNEL_ACTOR_VERSION,
+      },
+      target,
+    );
+    epoch = ready.serviceEpoch;
+  }
+  const response = await fetch(`${target.url}/rpc`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -60,13 +69,14 @@ async function rpc(request: KernelActorTransportEnvelope["request"]) {
     body: JSON.stringify({
       version: SESSION_KERNEL_TRANSPORT_VERSION,
       actorVersion: SESSION_KERNEL_ACTOR_VERSION,
-      ...(serviceEpoch ? { serviceEpoch } : {}),
+      ...(epoch ? { serviceEpoch: epoch } : {}),
       request,
     }),
   });
   expect(response.status).toBe(200);
   const body = (await response.json()) as Record<string, any>;
-  if (body.t === "ready") serviceEpoch = body.serviceEpoch;
+  if (body.t === "ready" && target === service)
+    serviceEpoch = body.serviceEpoch;
   return body;
 }
 
@@ -292,7 +302,42 @@ describe("session kernel actor service", () => {
     ).toBe(true);
   });
 
-  test("restarts the catalog lane instead of the service after a read timeout", async () => {
+  test("spreads catalog reads over session lanes and leaves lane zero free", async () => {
+    const ready = async () =>
+      (await (await fetch(`${service.url}/ready`)).json()) as {
+        lanes: Array<{ index: number; turnsCompleted: number }>;
+      };
+    const before = await ready();
+    const beforeByLane = new Map(
+      before.lanes.map((lane) => [lane.index, lane.turnsCompleted]),
+    );
+    const catalogTurnsBefore = beforeByLane.get(0);
+    if (catalogTurnsBefore === undefined)
+      throw new Error("Missing catalog lane");
+
+    await Promise.all(
+      Array.from({ length: 128 }, (_, index) =>
+        rpc({
+          t: "call",
+          rpcId: `catalog-read-pool-${index}`,
+          outputBytes: 256 * 1024,
+          request: { t: "store", method: "askEntries", args: [] },
+        }),
+      ),
+    );
+
+    const after = await ready();
+    expect(after.lanes[0]?.turnsCompleted).toBe(catalogTurnsBefore);
+    const sessionLaneDeltas = after.lanes
+      .slice(1)
+      .map((lane) => lane.turnsCompleted - (beforeByLane.get(lane.index) ?? 0));
+    expect(sessionLaneDeltas.reduce((sum, delta) => sum + delta, 0)).toBe(128);
+    expect(
+      sessionLaneDeltas.filter((delta) => delta > 0).length,
+    ).toBeGreaterThan(1);
+  });
+
+  test("restarts a catalog read lane instead of the service after a timeout", async () => {
     const isolatedService = await startSessionKernelService({
       port: 0,
       token,
@@ -340,7 +385,7 @@ describe("session kernel actor service", () => {
       });
       expect(timedOut.status).toBe(429);
       expect(await timedOut.json()).toMatchObject({
-        error: "Session actor lane 0 response timed out",
+        error: "Session actor lane 1 response timed out",
       });
 
       let ready: Response | undefined;
@@ -556,6 +601,7 @@ describe("session kernel actor service", () => {
       service = await startSessionKernelService({
         port,
         token,
+        workerCount: 4,
         responseTimeoutMs: 700,
         databasePath: join(stateDir, "sessions", "session-kernel.sqlite"),
       });
@@ -723,6 +769,10 @@ describe("session kernel actor service", () => {
   });
 
   test("reports per-lane occupancy and cumulative counters on /ready", async () => {
+    type LaneReport = {
+      workers: { capacity: number };
+      lanes: Array<Record<string, unknown>>;
+    };
     // Complete at least one turn so counters have advanced.
     await rpc({
       t: "call",
@@ -730,10 +780,19 @@ describe("session kernel actor service", () => {
       outputBytes: 256 * 1024,
       request: { t: "store", method: "stats", args: [] },
     });
-    const ready = (await (await fetch(`${service.url}/ready`)).json()) as {
-      workers: { capacity: number };
-      lanes: Array<Record<string, unknown>>;
-    };
+    // A lane whose earlier turn overran the fixture budget on a slow host is
+    // replaced in the background and reports ready:false, restarting:false
+    // while its worker boots. Wait for every lane to settle first; the lane
+    // shape and counters are what this test is about.
+    let ready: LaneReport | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      ready = (await (
+        await fetch(`${service.url}/ready`)
+      ).json()) as LaneReport;
+      if (ready.lanes.every((lane) => lane.ready && !lane.restarting)) break;
+      await Bun.sleep(50);
+    }
+    if (!ready) throw new Error("no /ready report");
     // Catalog lane (index 0) plus every session lane.
     expect(ready.lanes.length).toBe(ready.workers.capacity + 1);
     for (const lane of ready.lanes) {
@@ -847,58 +906,80 @@ describe("session kernel actor service", () => {
   });
 
   test("returns the first committed mutation result when it exceeds the service buffer", async () => {
-    const sessionId = "large-service-dispatch";
-    const content = "x".repeat(9 * 1024 * 1024);
-    const seeded = await rpc({
-      t: "call",
-      rpcId: "seed-large-service-dispatch",
-      outputBytes: 256 * 1024,
-      request: {
-        t: "reduce",
-        command: {
-          kind: "delivery",
-          commandId: "seed-large-service-dispatch",
+    // The payload/receipt regression is not a 700ms deadline test. Use the
+    // production response budget without weakening the shared timeout fixture.
+    const sharedDatabasePath = process.env.OPENSESSION_SESSION_KERNEL_DB_PATH;
+    const payloadService = await startSessionKernelService({
+      port: 0,
+      token,
+      workerCount: 4,
+      databasePath: join(stateDir, "large-response", "session-kernel.sqlite"),
+    });
+    try {
+      const sessionId = "large-service-dispatch";
+      const content = "x".repeat(9 * 1024 * 1024);
+      const seeded = await rpc(
+        {
+          t: "call",
+          rpcId: "seed-large-service-dispatch",
+          outputBytes: 256 * 1024,
           request: {
-            op: "set",
-            sessionId,
-            slot: "queued",
-            value: [{ id: "large", content }],
+            t: "reduce",
+            command: {
+              kind: "delivery",
+              commandId: "seed-large-service-dispatch",
+              request: {
+                op: "set",
+                sessionId,
+                slot: "queued",
+                value: [{ id: "large", content }],
+              },
+            },
           },
         },
-      },
-    });
-    expect(seeded).toMatchObject({ t: "call_result", status: 1 });
+        payloadService,
+      );
+      expect(seeded).toMatchObject({ t: "call_result", status: 1 });
 
-    const claimed = await rpc({
-      t: "call",
-      rpcId: "claim-large-service-dispatch",
-      outputBytes: 8 * 1024 * 1024,
-      request: {
-        t: "reduce",
-        command: {
-          kind: "delivery",
-          commandId: "claim-large-service-dispatch",
+      const claimed = await rpc(
+        {
+          t: "call",
+          rpcId: "claim-large-service-dispatch",
+          outputBytes: 8 * 1024 * 1024,
           request: {
-            op: "claim_next_dispatch",
-            sessionId,
-            promptEntryId: "large-entry",
+            t: "reduce",
+            command: {
+              kind: "delivery",
+              commandId: "claim-large-service-dispatch",
+              request: {
+                op: "claim_next_dispatch",
+                sessionId,
+                promptEntryId: "large-entry",
+              },
+            },
           },
         },
-      },
-    });
-    expect(claimed).toMatchObject({ t: "call_result", status: 1 });
-    expect(JSON.parse(claimed.body)).toMatchObject({
-      ok: true,
-      result: {
+        payloadService,
+      );
+      expect(claimed).toMatchObject({ t: "call_result", status: 1 });
+      expect(JSON.parse(claimed.body)).toMatchObject({
+        ok: true,
         result: {
-          kind: "deliver",
-          // A one-item batch keeps the queued receipt's durable identity.
-          promptEntryId: "large",
-          items: [{ id: "large", content }],
+          result: {
+            kind: "deliver",
+            // A one-item batch keeps the queued receipt's durable identity.
+            promptEntryId: "large",
+            items: [{ id: "large", content }],
+          },
         },
-      },
-    });
-  });
+      });
+    } finally {
+      payloadService.stop();
+      if (sharedDatabasePath === undefined)
+        delete process.env.OPENSESSION_SESSION_KERNEL_DB_PATH;
+      else process.env.OPENSESSION_SESSION_KERNEL_DB_PATH = sharedDatabasePath;
+    }
+  }, 10_000);
 
   test("a locked session database does not block another session mailbox", async () => {
     for (const sessionId of ["locked-pool-session", "healthy-pool-session"]) {

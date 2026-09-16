@@ -78,6 +78,8 @@ export type SandboxRequest = boolean | "local" | "daytona" | "box";
 
 export interface CreateSessionOpts {
   prompt: string;
+  /** Trusted Slack ingress only, never accepted from model-authored create arguments. */
+  slackOrigin?: import("./types").SlackSessionOrigin;
   /** Stable server-chosen id for an idempotent client create request. */
   id?: string;
   /** Stable caller request id used for durable create receipts. */
@@ -106,6 +108,8 @@ export interface CreateSessionOpts {
   effort?: string;
   /** OpenAI fast-mode flag persisted on the session. */
   fastMode?: boolean;
+  /** Pstack mode persisted on the session: the pstack skill family loads for its runs. */
+  pstackMode?: boolean;
   /** Composer image attachments as `data:image/...;base64,` URLs. */
   images?: string[];
   /** Raw composer file references, already staged through `/api/upload`. */
@@ -153,6 +157,9 @@ export interface CreateSessionOpts {
   reportBack?: boolean;
   /** Display name credited as the creator. */
   user?: string;
+  /** Plain discussion (Ask Sidekick) this session answers: the turn's reply is
+   * posted there and the approval-gated Plain tools are wired in. */
+  plainDiscussionId?: string;
   /**
    * Ask for a sandboxed session (the sandbox rollout plan). `true` = the config
    * default provider; a provider id (including "modal" / "lambda-microvm")

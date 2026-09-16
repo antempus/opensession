@@ -3,6 +3,7 @@ import { createMcpRuntime, type McpRuntime } from "./mcp-runtime";
 import {
   createPortalsMcpServer,
   type PortalsMcpContext,
+  settleBefore,
   settleWithin,
 } from "./portals-mcp";
 
@@ -30,6 +31,7 @@ function fixture(overrides: Partial<VerifiedFixture> = {}): VerifiedFixture {
 async function harness(
   verifyEditorFixture: PortalsMcpContext["verifyEditorFixture"] = async () =>
     fixture(),
+  overrides: Partial<PortalsMcpContext> = {},
 ) {
   const calls: Array<{
     path: string | null;
@@ -54,6 +56,7 @@ async function harness(
     sandbox: async () => null,
     hasSandbox: () => false,
     runner: () => undefined,
+    ...overrides,
   });
   const runtime = await createMcpRuntime({
     mcpServers: [],
@@ -86,6 +89,25 @@ describe("settleWithin", () => {
     await expect(
       settleWithin(Promise.reject(new Error("port taken")), 1_000),
     ).rejects.toThrow("port taken");
+  });
+});
+
+describe("settleBefore", () => {
+  test("answers pending at once when earlier steps spent the whole budget", async () => {
+    const slow = new Promise<string>((resolve) =>
+      setTimeout(() => resolve("late"), 5_000),
+    );
+    const started = Date.now();
+    expect(await settleBefore(slow, Date.now() - 1)).toEqual({
+      settled: false,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("still returns a value that is already there", async () => {
+    expect(
+      await settleBefore(Promise.resolve("ready"), Date.now() - 1),
+    ).toEqual({ settled: true, value: "ready" });
   });
 });
 
@@ -260,6 +282,44 @@ describe("Portals MCP staging routes", () => {
     expect(response.content[0]).toMatchObject({
       type: "text",
       text: expect.stringContaining("/settings/tags"),
+    });
+  });
+});
+
+describe("Simulator Portal MCP", () => {
+  test("the tool is discoverable and refuses Sandbox workspaces without waking them", async () => {
+    let woke = false;
+    const { runtime } = await harness(undefined, {
+      hasSandbox: () => true,
+      sandbox: async () => {
+        woke = true;
+        return null;
+      },
+    });
+    const response = await runtime.callExact(
+      "opensession-portals_start_simulator_portal",
+      { appPath: "Build/App.app" },
+      { toolCallId: "simulator" },
+    );
+    expect(response.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("local Mac workspace"),
+    });
+    expect(woke).toBe(false);
+  });
+
+  test("no workspace cannot create a simulator on the host", async () => {
+    const { runtime } = await harness(undefined, {
+      worktreeDir: () => undefined,
+    });
+    const response = await runtime.callExact(
+      "opensession-portals_start_simulator_portal",
+      { appPath: "App.app" },
+      { toolCallId: "simulator-no-workspace" },
+    );
+    expect(response.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("no workspace"),
     });
   });
 });

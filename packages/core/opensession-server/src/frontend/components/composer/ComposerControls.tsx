@@ -26,6 +26,7 @@ import { composerMorph } from "../../ui/motion";
 import { Tooltip } from "../../ui/tooltip";
 import {
   IconAtSign,
+  IconChecklist,
   IconCrosshair,
   IconNote,
   IconPaperclip,
@@ -34,27 +35,44 @@ import {
 
 export type ComposerMenu = null | "add" | "goal";
 
-type ComposerPressButtonProps = Omit<
-  ComponentPropsWithoutRef<"button">,
-  "onClick" | "onTouchEnd"
-> & { onPress: () => void };
+type ComposerPressButtonProps = ComponentPropsWithoutRef<"button"> & {
+  onPress: () => void;
+};
 
 export const ComposerPressButton = forwardRef<
   HTMLButtonElement,
   ComposerPressButtonProps
->(function ComposerPressButton({ onPress, ...props }, ref) {
+>(function ComposerPressButton(
+  { onPress, onTouchEnd, onClick, ...props },
+  ref,
+) {
   const touchFiredAt = useRef(0);
   return (
     <button
       {...props}
       ref={ref}
       onTouchEnd={(event) => {
+        // A rendered Base UI trigger must receive the release to cancel its
+        // long-press timer. Otherwise even a quick tap opens the menu later.
+        onTouchEnd?.(event);
+        const cancelled = event.defaultPrevented;
         event.preventDefault();
         touchFiredAt.current = Date.now();
+        // Holding for the menu must not also send the draft on release.
+        if (
+          cancelled ||
+          props.disabled ||
+          event.currentTarget.hasAttribute("data-popup-open")
+        ) {
+          return;
+        }
         onPress();
       }}
-      onClick={() => {
-        if (Date.now() - touchFiredAt.current < 700) return;
+      onClick={(event) => {
+        onClick?.(event);
+        if (event.defaultPrevented || Date.now() - touchFiredAt.current < 700) {
+          return;
+        }
         onPress();
       }}
     />
@@ -145,6 +163,8 @@ interface ComposerAddMenuProps {
   noteMode?: boolean;
   onNoteModeChange?: (active: boolean) => void;
   onSetGoal?: (goal: string | null) => void;
+  pstackMode?: boolean;
+  onPstackModeChange?: (on: boolean) => void;
   menuExtra?: (context: { close: () => void }) => ReactNode;
   sendMenu?: (context: {
     text: string;
@@ -175,6 +195,8 @@ export function ComposerAddMenu({
   noteMode,
   onNoteModeChange,
   onSetGoal,
+  pstackMode,
+  onPstackModeChange,
   menuExtra,
   sendMenu,
   outgoingText,
@@ -293,6 +315,29 @@ export function ComposerAddMenu({
               </span>
               <span className="grow whitespace-nowrap">
                 {noteMode ? "Back to prompting" : "Write a team note"}
+              </span>
+            </ComposerPressButton>
+          )}
+          {onPstackModeChange && (
+            <ComposerPressButton
+              type="button"
+              className={composerMenuItem}
+              onPress={() => {
+                setMenu(null);
+                onPstackModeChange(!pstackMode);
+              }}
+              aria-pressed={!!pstackMode}
+              title={
+                pstackMode
+                  ? "Stop loading the pstack playbooks and skills"
+                  : "Load the pstack playbooks and skills for every turn"
+              }
+            >
+              <span className={composerMenuIcon}>
+                <IconChecklist size={22} />
+              </span>
+              <span className="grow whitespace-nowrap">
+                {pstackMode ? "Turn off pstack mode" : "Turn on pstack mode"}
               </span>
             </ComposerPressButton>
           )}

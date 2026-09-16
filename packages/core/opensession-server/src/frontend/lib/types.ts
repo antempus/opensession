@@ -270,6 +270,57 @@ export interface ReportMeta {
   tasks?: Array<{ title: string; prompt: string }>;
 }
 
+/** A named SQLite database Open Session keeps (server/databases-sqlite.ts). */
+export interface DatabaseMeta {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  createdBySessionId?: string;
+  automationId?: string;
+  automationName?: string;
+  sessionIds: string[];
+  lastSessionId?: string;
+  sizeBytes: number;
+  tableCount: number;
+}
+
+export interface DatabaseColumn {
+  name: string;
+  type: string;
+  notNull: boolean;
+  primaryKey: boolean;
+  defaultValue: string | null;
+}
+
+export interface DatabaseTable {
+  name: string;
+  kind: "table" | "view";
+  rowCount: number;
+  columns: DatabaseColumn[];
+}
+
+export interface DatabaseSchema {
+  tables: DatabaseTable[];
+}
+
+export type DatabaseCell = string | number | null;
+
+export interface DatabaseQueryResult {
+  columns: string[];
+  rows: DatabaseCell[][];
+  truncated: boolean;
+}
+
+export interface DatabaseRowsPage {
+  columns: string[];
+  rows: DatabaseCell[][];
+  total: number;
+  offset: number;
+}
+
 export interface ReportGroup {
   automationId: string;
   automationName: string;
@@ -522,6 +573,8 @@ export interface UnifiedSession {
   effort?: string;
   /** OpenAI priority service tier for ChatGPT OAuth Codex runs. */
   fastMode?: boolean;
+  /** Pstack mode: the pstack skill family loads for this session's runs. */
+  pstackMode?: boolean;
   /** Pinned account in the active model provider's pool; unset = auto. */
   accountId?: string;
   /** DETAIL ONLY — see `claudeSessionId`. */
@@ -936,6 +989,15 @@ export type WSServerMessage =
       viewing: Array<{ user: string; sessionId: string }>;
     }
   | { type: "pins_changed"; user: string; pins: string[] }
+  // One of this person's sidebar maps was written from any client. Sent only
+  // to that person's sockets and carries no entries: the receiver re-reads the
+  // map, so a claim made on the phone reaches a desktop window that never
+  // lost visibility. Native clients safely ignore this frame.
+  | {
+      type: "user_map_changed";
+      map: "lanes" | "snoozes" | "hides";
+      user: string;
+    }
   // The materialized session list changed. Web clients refetch their scoped
   // sidebar projection; older and native clients safely ignore this frame.
   | { type: "sessions_invalidated" }
@@ -981,6 +1043,9 @@ export type WSServerMessage =
   // An automation published a report. sessionId is present for reports tied to
   // a run and lets that run's Reports tab refresh immediately.
   | { type: "reports_changed"; automationId: string; sessionId?: string }
+  // A database was created, written, renamed or deleted (databases.ts).
+  // sessionId names the run that did it so that run's Databases tab refreshes.
+  | { type: "databases_changed"; databaseId: string; sessionId?: string }
   // The Desk todo list changed (any mutation, any surface — see todos.ts).
   | { type: "todos_changed"; user: string }
   // Dynamic workflow run snapshot changed (workflow-store broadcasts every

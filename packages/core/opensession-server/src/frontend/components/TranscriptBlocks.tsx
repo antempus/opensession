@@ -16,6 +16,7 @@ import {
   turnScrollAnchor,
 } from "../lib/transcript-block-identity";
 import { MessageBubble } from "./MessageBubble";
+import { agentMessageText } from "../lib/agent-message";
 import { NoteBubble } from "./NoteBubble";
 import { ToolSection, TurnBlock } from "./TurnBlock";
 import {
@@ -487,7 +488,11 @@ const LoadedTranscriptBlocks = function LoadedTranscriptBlocks({
   for (const entry of renderedEntries) {
     if (entry.type === "tool_result") {
       continue; // rendered inside turn blocks via toolResults
-    } else if (entry.type === "assistant" || entry.type === "tool_use") {
+    } else if (
+      agentMessageText(entry) !== null ||
+      entry.type === "assistant" ||
+      entry.type === "tool_use"
+    ) {
       turn.push(entry);
     } else {
       flushTurn();
@@ -615,6 +620,11 @@ const LoadedTranscriptBlocks = function LoadedTranscriptBlocks({
                       reviewBlockRole(inner).kind !== "handoff" ? (
                       <MessageBubble
                         entry={inner.entry}
+                        toolResult={
+                          inner.entry.toolUseId
+                            ? toolResults.get(inner.entry.toolUseId)
+                            : undefined
+                        }
                         enter={
                           optimisticEntryIds.has(inner.entry.id) ||
                           Boolean(
@@ -676,6 +686,11 @@ const LoadedTranscriptBlocks = function LoadedTranscriptBlocks({
         ) : (
           <MessageBubble
             entry={block.entry}
+            toolResult={
+              block.entry.toolUseId
+                ? toolResults.get(block.entry.toolUseId)
+                : undefined
+            }
             enter={
               optimisticEntryIds.has(block.entry.id) ||
               Boolean(isLiveTail && block.entry.type !== "user")
@@ -1241,7 +1256,7 @@ function ReviewTurnSteps({
     | { kind: "message"; entry: TranscriptEntry }
   > = [];
   for (const entry of items) {
-    if (entry.type === "tool_use") {
+    if (entry.type === "tool_use" && agentMessageText(entry) === null) {
       const last = sections[sections.length - 1];
       if (last?.kind === "tools") last.items.push(entry);
       else sections.push({ kind: "tools", items: [entry] });
@@ -1265,6 +1280,11 @@ function ReviewTurnSteps({
       <MessageBubble
         key={section.entry.id}
         entry={section.entry}
+        toolResult={
+          section.entry.toolUseId
+            ? toolResults.get(section.entry.toolUseId)
+            : undefined
+        }
         enter={live && section.entry.type !== "user"}
         reasoning={isLegacyReasoningHeading(section.entry.content)}
         owner={owner}

@@ -29,6 +29,9 @@ import {
   IconPlus,
 } from "./icons";
 import { RepoTile } from "./RepoTile";
+import { GithubRepoAccess } from "./GithubRepoAccess";
+import { newRepoRegistration } from "../lib/new-repo";
+import { NewRepoForm } from "./NewRepoForm";
 import {
   REPO_TILE_COLORS,
   REPO_TILE_INK,
@@ -64,7 +67,9 @@ import { errorMessage } from "../lib/error-message";
 // configured, its org's repos are offered in their own section alongside
 // GitHub. Remote registration clones server-side, so an add can take tens of
 // seconds. Pending state stays owned by the settings panel so it remains
-// visible if the dialog closes. Existing local checkouts register in place.
+// visible if the dialog closes. Existing local checkouts register in place,
+// and a project that exists nowhere yet starts as a new repository here.
+// The New session palette offers that same start from its Project picker.
 
 export function ReposSection({
   repos,
@@ -124,11 +129,7 @@ export function ReposSection({
             disabled={pendingRepo !== null}
             onClick={() => setPickerOpen(true)}
           >
-            {pendingRepo
-              ? pendingRepo.action === "clone"
-                ? "Cloning…"
-                : "Registering…"
-              : "Add repository"}
+            {pendingRepo ? PENDING_VERB[pendingRepo.action] : "Add repository"}
           </Button>
         }
       >
@@ -151,7 +152,7 @@ export function ReposSection({
         >
           <Modal.Header
             title="Add repository"
-            description="Clone a remote repository or register a Git checkout already on the server."
+            description="Clone a remote repository, register a Git checkout already on the server, or start a new one."
           />
           <AddRepoPicker
             inputRef={pickerInput}
@@ -754,12 +755,19 @@ interface CsBrowseResult {
 }
 
 type RepoSource = "github" | "codestorage";
-type AddRepoMode = "remote" | "local";
+type AddRepoMode = "remote" | "local" | "new";
 
 interface PendingRepo {
   label: string;
-  action: "clone" | "register";
+  action: "clone" | "register" | "create";
 }
+
+/** What the Add button and the dialog's wait state say while one is running. */
+const PENDING_VERB: Record<PendingRepo["action"], string> = {
+  clone: "Cloning…",
+  register: "Registering…",
+  create: "Creating…",
+};
 
 interface RepoRegistration {
   pending: PendingRepo;
@@ -835,7 +843,7 @@ function AddRepoPicker({
   const [localPath, setLocalPath] = useState("");
 
   useEffect(() => {
-    if (!pendingRepo && mode === "local") inputRef?.current?.focus();
+    if (!pendingRepo && mode !== "remote") inputRef?.current?.focus();
   }, [mode, pendingRepo, inputRef]);
 
   async function registerRepo(input: RepoRegistration): Promise<void> {
@@ -870,6 +878,15 @@ function AddRepoPicker({
     });
   }
 
+  async function createRepo(name: string, owner: string | undefined) {
+    const label = owner ? `${owner}/${name}` : name;
+    await registerRepo({
+      pending: { label, action: owner ? "clone" : "create" },
+      json: newRepoRegistration(name, owner),
+      successMessage: `${label} ${owner ? "connected" : "created"}`,
+    });
+  }
+
   return (
     // No surface of its own: the dialog is already the card this sits on.
     <div>
@@ -877,7 +894,7 @@ function AddRepoPicker({
         <div className="flex min-h-[240px] flex-col items-center justify-center text-center">
           <LoadingState className="max-w-full [&>div]:max-w-full">
             <span className="max-w-full break-all">
-              {pendingRepo.action === "clone" ? "Cloning " : "Registering "}
+              {PENDING_VERB[pendingRepo.action].slice(0, -1)}{" "}
               {pendingRepo.label}…
             </span>
           </LoadingState>
@@ -893,7 +910,8 @@ function AddRepoPicker({
           label="Repository source"
           value={mode}
           onValueChange={(value) => {
-            if (value === "remote" || value === "local") setMode(value);
+            if (value === "remote" || value === "local" || value === "new")
+              setMode(value);
             setError(null);
           }}
         >
@@ -906,7 +924,17 @@ function AddRepoPicker({
           <SegmentedOption value="local" className="flex flex-1 justify-center">
             Local folder
           </SegmentedOption>
+          <SegmentedOption value="new" className="flex flex-1 justify-center">
+            New
+          </SegmentedOption>
         </Segmented>
+        {mode === "new" && (
+          <NewRepoForm
+            inputRef={inputRef}
+            busy={pendingRepo !== null}
+            onSubmit={createRepo}
+          />
+        )}
         {mode === "local" && (
           <>
             <div className="text-supporting leading-relaxed text-dim">
@@ -961,6 +989,8 @@ function RemoteRepoPicker({
 }) {
   const [browse, setBrowse] = useState<BrowseResult | null>(null);
   const [browseFailed, setBrowseFailed] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   // code.storage list, probed alongside GitHub. Stays null until the probe
   // answers; an unconfigured integration answers `source: null` (no section).
   const [csBrowse, setCsBrowse] = useState<CsBrowseResult | null>(null);
@@ -980,13 +1010,27 @@ function RemoteRepoPicker({
     const loadGithubRepos = async () => {
       try {
         const body = await setupRequest<BrowseResult>(
-          "/api/setup/github/repos",
+          refreshVersion > 0
+            ? "/api/setup/github/repos?refresh=1"
+            : "/api/setup/github/repos",
         );
-        if (!cancelled) setBrowse(body);
+        if (!cancelled) {
+          setBrowse(body);
+          setBrowseFailed(false);
+        }
       } catch {
         if (!cancelled) setBrowseFailed(true);
       }
+      if (!cancelled) setRefreshing(false);
     };
+    void loadGithubRepos();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshVersion]);
+
+  useEffect(() => {
+    let cancelled = false;
     const loadCodeStorageRepos = async () => {
       try {
         const body = await setupRequest<CsBrowseResult>(
@@ -1002,17 +1046,18 @@ function RemoteRepoPicker({
           );
       }
     };
-    void loadGithubRepos();
     void loadCodeStorageRepos();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // The list arrives after the dialog opens, so initialFocus has no field yet.
+  // Focus when the first list arrives, not on refresh: keep keyboard focus on
+  // the refresh button so it can be retried without jumping back to the filter.
+  const githubLoaded = browse !== null || browseFailed;
   useEffect(() => {
-    if (active && (browse || browseFailed)) inputRef?.current?.focus();
-  }, [active, browse, browseFailed, inputRef]);
+    if (active && githubLoaded) inputRef?.current?.focus();
+  }, [active, githubLoaded, inputRef]);
 
   /** Choose the default for GitHub calls that do not name a repository.
    * Repository browsing and repository work still use every installation. */
@@ -1135,8 +1180,7 @@ function RemoteRepoPicker({
           <div className="mt-2 text-meta text-faint">
             {browse.source === "user"
               ? "Browsing the connected account."
-              : `Browsing ${installations.length} GitHub App ${installations.length === 1 ? "installation" : "installations"}. Tokens are scoped by repository owner.`}{" "}
-            Only repositories that credential can reach are listed.
+              : "Only repositories shared with the GitHub App are listed."}
           </div>
         </>
       ) : (
@@ -1186,21 +1230,6 @@ function RemoteRepoPicker({
           {switchError && (
             <InlineAlert className="mt-2">{switchError}</InlineAlert>
           )}
-          {browse?.appConfigured && browse.appInstallUrl && (
-            <Button
-              className="mt-2.5"
-              variant="primary"
-              render={
-                <a
-                  href={browse.appInstallUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                />
-              }
-            >
-              Install GitHub App
-            </Button>
-          )}
           <div className="mt-2.5 flex items-center gap-2">
             <input
               ref={inputRef}
@@ -1224,6 +1253,22 @@ function RemoteRepoPicker({
             </Button>
           </div>
         </>
+      )}
+      {browse && browseFailed && (
+        <InlineAlert className="mt-2">
+          Couldn’t refresh GitHub repositories. Try again.
+        </InlineAlert>
+      )}
+      {(browse?.appConfigured || browse?.source === "app") && (
+        <GithubRepoAccess
+          installations={browse.installations}
+          installUrl={browse.appInstallUrl}
+          refreshing={refreshing}
+          onRefresh={() => {
+            setRefreshing(true);
+            setRefreshVersion((version) => version + 1);
+          }}
+        />
       )}
       {(csConfigured || csError) && (
         <>

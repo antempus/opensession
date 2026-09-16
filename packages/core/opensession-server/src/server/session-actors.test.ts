@@ -3,10 +3,15 @@ import { productMark } from "./config";
 import {
   agentActor,
   delegatedActorParent,
+  humanPrompter,
+  interactivePrompter,
   isMachineActor,
+  isScheduledActor,
   isWorkerActor,
+  loopActor,
   machineActorLabel,
   providerAccountUser,
+  sessionPrincipal,
   workerActor,
 } from "./session-actors";
 
@@ -21,6 +26,8 @@ describe("machine actors", () => {
       "system (restart)",
       "Automation",
       "GitHub",
+      "Plain",
+      "Plain ticket triage (automation)",
       workerActor(SESSION),
       agentActor(SESSION),
     ]) {
@@ -68,6 +75,61 @@ describe("machine actors", () => {
       providerAccountUser(workerActor(SESSION), agentActor(SESSION)),
     ).toBeUndefined();
     expect(providerAccountUser(undefined, "Automation")).toBeUndefined();
+    expect(
+      providerAccountUser("Plain ticket triage (automation)", undefined),
+    ).toBeUndefined();
+  });
+
+  test("only a person becomes a session's recorded prompter", () => {
+    expect(humanPrompter("Michiel")).toBe("Michiel");
+    expect(humanPrompter("  Kent ")).toBe("Kent");
+    for (const sender of [
+      undefined,
+      null,
+      "",
+      "Anonymous",
+      "GitHub",
+      "auto-continue",
+      "system (restart)",
+      workerActor(SESSION),
+    ]) {
+      expect(humanPrompter(sender)).toBeNull();
+    }
+  });
+
+  test("a scheduled loop tick keeps the person's credit but is not their presence", () => {
+    expect(loopActor("Kent")).toBe("Kent (loop)");
+    expect(loopActor(undefined)).toBe("loop");
+    for (const sender of [loopActor("Kent"), loopActor(null), "kent (LOOP)"]) {
+      expect(isScheduledActor(sender)).toBe(true);
+      // Not a machine actor: the session is still Kent's, so the recorded
+      // prompter, commit identity and provider account credit him.
+      expect(isMachineActor(sender)).toBe(false);
+      // But nobody pressed send, so nothing a present person unlocks fires.
+      expect(interactivePrompter(sender)).toBeNull();
+    }
+    expect(humanPrompter(loopActor("Kent"))).toBe("Kent (loop)");
+    expect(isScheduledActor("Kent")).toBe(false);
+    expect(interactivePrompter("Kent")).toBe("Kent");
+    expect(interactivePrompter(workerActor(SESSION))).toBeNull();
+    expect(interactivePrompter("Anonymous")).toBeNull();
+  });
+
+  test("a senderless turn acts for the last person who prompted, else the creator", () => {
+    // tella-fusion#6348: Grant started the session, Michiel took it over,
+    // and the review handoff that followed must commit for Michiel.
+    expect(
+      sessionPrincipal({ startedBy: "Grant", lastPromptedBy: "Michiel" }),
+    ).toBe("Michiel");
+    expect(sessionPrincipal({ startedBy: "Grant" })).toBe("Grant");
+    expect(sessionPrincipal({ startedBy: "Grant", lastPromptedBy: null })).toBe(
+      "Grant",
+    );
+    // A sentinel that somehow got stored is not a person to act for.
+    expect(
+      sessionPrincipal({ startedBy: "Grant", lastPromptedBy: "GitHub" }),
+    ).toBe("Grant");
+    expect(sessionPrincipal({ startedBy: null })).toBeNull();
   });
 
   test("delegated senders collapse to one label, not one row per session", () => {

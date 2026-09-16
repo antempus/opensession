@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SeqEntry } from "./transcript-store";
+import { MESSAGE_COLLAPSE_CHARS } from "../shared/message-preview";
 import {
   clampV2InitEntries,
   INIT_COLLAPSED_MESSAGE_CLAMP_BYTES,
@@ -45,39 +46,86 @@ describe("v2 transcript wire previews", () => {
 
   test("loads intermediate assistant notes separately from visible answers", () => {
     const prompt = entry("u", "user", "prompt");
-    const note = entry("n", "assistant", "n".repeat(3_000));
+    const note = entry("n", "assistant", "n".repeat(8_000));
     const call = entry("t", "tool_use", "Using Read", { toolUseId: "call" });
     const result = entry("r", "tool_result", "result", { toolUseId: "call" });
-    const answer = entry("a", "assistant", "a".repeat(3_000));
+    const answer = entry("a", "assistant", "a".repeat(8_000));
 
     const clamped = clampV2InitEntries([prompt, note, call, result, answer]);
 
     expect(clamped[1]).toMatchObject({
       contentClamped: true,
-      contentLength: 3_000,
+      contentLength: 8_000,
     });
     expect(clamped[1].content).toHaveLength(INIT_COLLAPSED_MESSAGE_CLAMP_BYTES);
     expect(clamped[4]).toBe(answer);
-    expect(clamped[4].content).toHaveLength(3_000);
+    expect(clamped[4].content).toHaveLength(8_000);
+  });
+
+  test("sends short and near-limit intermediate notes whole", () => {
+    const prompt = entry("u", "user", "prompt");
+    const short = entry("s", "assistant", "s".repeat(303));
+    const nearLimit = entry(
+      "n",
+      "assistant",
+      "n".repeat(INIT_COLLAPSED_MESSAGE_CLAMP_BYTES + 500),
+    );
+    const call = entry("t", "tool_use", "Using Read", { toolUseId: "call" });
+    const result = entry("r", "tool_result", "result", { toolUseId: "call" });
+    const answer = entry("a", "assistant", "done");
+
+    const clamped = clampV2InitEntries([
+      prompt,
+      short,
+      nearLimit,
+      call,
+      result,
+      answer,
+    ]);
+
+    expect(clamped[1]).toBe(short);
+    expect(clamped[2]).toBe(nearLimit);
+    expect(clamped[2].contentClamped).toBeUndefined();
   });
 
   test("does not send message text the UI would hide behind its expander", () => {
     const visible = entry("visible", "assistant", "a".repeat(3_000));
-    const long = entry("long", "assistant", "b".repeat(9_000));
+    const long = entry("long", "assistant", "b".repeat(36_000));
 
     const clamped = clampV2InitEntries([visible, long]);
 
     expect(clamped[0]).toBe(visible);
     expect(clamped[1]).toMatchObject({
       contentClamped: true,
-      contentLength: 9_000,
+      contentLength: 36_000,
     });
     expect(clamped[1].content).toHaveLength(INIT_MESSAGE_CLAMP_BYTES);
   });
 
+  test.each([24_000, 24_001, 29_999])(
+    "preserves near-limit visible messages of %i characters",
+    (length) => {
+      const entries = [
+        entry("u", "user", "u".repeat(length)),
+        entry("a", "assistant", "a".repeat(length)),
+      ];
+      expect(clampV2InitEntries(entries)).toBe(entries);
+    },
+  );
+
+  test("clamps at exactly 20% hidden", () => {
+    const entries = [
+      entry("a", "assistant", "a".repeat(MESSAGE_COLLAPSE_CHARS)),
+    ];
+    const [clamped] = clampV2InitEntries(entries);
+    expect(clamped.content).toHaveLength(INIT_MESSAGE_CLAMP_BYTES);
+    expect(clamped.contentClamped).toBe(true);
+    expect(clamped.contentLength).toBe(MESSAGE_COLLAPSE_CHARS);
+  });
+
   test("cuts the uncompressed size of a long 100-message opening batch", () => {
     const entries = Array.from({ length: 100 }, (_, index) =>
-      entry(`a-${index}`, "assistant", "answer ".repeat(1_300)),
+      entry(`a-${index}`, "assistant", "answer ".repeat(5_200)),
     );
     const originalBytes = Buffer.byteLength(JSON.stringify(entries));
     const clampedBytes = Buffer.byteLength(
@@ -97,8 +145,9 @@ describe("v2 transcript wire previews", () => {
       INIT_TOOL_RESULT_CLAMP_BYTES + 512,
     );
     expect(v2SnapshotEntryWeight("assistant", 100_000)).toBe(
-      INIT_MESSAGE_CLAMP_BYTES,
+      MESSAGE_COLLAPSE_CHARS,
     );
+    expect(v2SnapshotEntryWeight("assistant", 29_999)).toBe(29_999);
     expect(v2SnapshotEntryWeight("assistant", 900)).toBe(900);
   });
 });

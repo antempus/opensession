@@ -8,6 +8,7 @@ import React, {
   useRef,
   useState,
   useSyncExternalStore,
+  type MouseEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
@@ -125,7 +126,10 @@ import {
   useSessionViewStateController,
 } from "../hooks/useSessionViewStateController";
 import { useSessionWorkspaceToolsController } from "../hooks/useSessionWorkspaceToolsController";
+import { useRefocusComposerOnWindowFocus } from "../hooks/useRefocusComposerOnWindowFocus";
+import { os1Shell } from "../lib/os1-shell";
 import { useSessionChromeController } from "../hooks/useSessionChromeController";
+import { useSimulatorPortalPlacement } from "../hooks/useSimulatorPortalPlacement";
 import {
   sessionConversationAvailability,
   useSessionConversationActions,
@@ -200,6 +204,8 @@ import {
 } from "../lib/pending-reconcile";
 import { promptOutbox, type PromptOutboxItem } from "../lib/prompt-outbox";
 import { DiffPanel, useSessionDiff } from "./DiffPanel";
+import { useTranscriptBlocks } from "../hooks/useTranscriptBlocks";
+import { revealDiffFileWhenMounted } from "../lib/diff-navigation";
 import { RepoBar } from "./RepoBar";
 import { RepoTile } from "./RepoTile";
 import { SandboxBadge } from "./SandboxBadge";
@@ -609,6 +615,8 @@ export function SessionViewer({
   const {
     loading,
     setLoading,
+    syncing: transcriptSyncing,
+    setSyncing: setTranscriptSyncing,
     historyTruncated,
     setHistoryTruncated,
     loadingHistory,
@@ -732,12 +740,14 @@ export function SessionViewer({
   const { activePanelOpen, setActivePanelOpen } = viewState.panel;
   const { panelPage, setPanelPage } = viewState.panel;
   const { panelTerminalMounted, setPanelTerminalMounted } = viewState.panel;
+  const { pinnedPortal, pinPortal, autoPinPortal } = viewState.panel;
+  const { closePinnedPortal, expandPinnedPortal } = viewState.panel;
   const { assetFiles, refreshAssets, assetPaths } = viewState.assets;
   const { selectedAssetPath, setSelectedAssetPath } = viewState.assets;
   const { overlayAssetPath, setOverlayAssetPath } = viewState.assets;
   const { closeAssetOverlay, promoteAssetToTab } = viewState.assets;
   const { openAssetFromTranscript } = viewState.assets;
-  const { sessionReports, notes, setNotes } = viewState.notes;
+  const { sessionReports, sessionDatabases, notes, setNotes } = viewState.notes;
   const { noteMode, setNoteMode } = viewState.notes;
   const { addSessionAttachments, fileDragActive } = viewState.notes;
   // Intent-aware scrolling: stick to the live edge only while the reader is there,
@@ -801,13 +811,18 @@ export function SessionViewer({
       activePanelOpen,
       infoPageOpen,
     },
-    relations: { subagents, sessionReportCount: sessionReports.length },
+    relations: {
+      subagents,
+      sessionReportCount: sessionReports.length,
+      sessionDatabaseCount: sessionDatabases.length,
+    },
   });
   const workspaceModel = workspaceTools.model;
   const { models, defaultModel, accounts } = workspaceModel;
   const { accountId, effort, fastMode, goalOverride } = workspaceModel;
   const { currentGoal, setEffort, setFastMode } = workspaceModel;
   const { setAccountId, setGoalOverride } = workspaceModel;
+  const { pstackMode, setPstackOverride } = workspaceModel;
   const { workflowRuns, workflowsLoaded, workflowAction, setWorkflowRuns } =
     workspaceTools.workflows;
   const { runningAgents, hasPlain, plainUrl } = workspaceTools.relations;
@@ -816,7 +831,7 @@ export function SessionViewer({
   const { diffState } = workspaceTools.workspace;
   const { archiveShortcutLabel, copyTranscriptLabel } =
     workspaceTools.shortcuts;
-  const { nextChatKeys, newSiblingKeys } = workspaceTools.shortcuts;
+  const { newSiblingKeys } = workspaceTools.shortcuts;
   const { transcriptDownKeys, composerRef } = workspaceTools.shortcuts;
   const stableComposerRef = useRef(composerRef);
   // ⌃⇧↑/⌃⇧↓ page the transcript up/down — keyboard scrolling that works while
@@ -893,6 +908,7 @@ export function SessionViewer({
       viewStore: transcriptViewStore,
       setEntries,
       setLoading,
+      setSyncing: setTranscriptSyncing,
       setHistoryTruncated,
       liveTurnStore,
     },
@@ -1215,6 +1231,7 @@ export function SessionViewer({
       setAccountId,
       setFastMode,
       setGoalOverride,
+      setPstackOverride,
     },
     setters: {
       renameDraft,
@@ -1232,6 +1249,7 @@ export function SessionViewer({
   const { handleOpenSlackComposer, commitRename } = headerActions.actions;
   const { handleModelChange, handleAccountChange, handleSetGoal } =
     headerActions.actions;
+  const { handlePstackModeChange } = headerActions.actions;
   const { showDeleteConfirm, setShowDeleteConfirm, confirm } =
     headerActions.deleteState;
   const { confirmDialog, deleting, setDeleting } = headerActions.deleteState;
@@ -1256,6 +1274,48 @@ export function SessionViewer({
     headerController.layout;
   const { desktopChangesRef, headerW, compactHeader } = headerController.layout;
   const { summaryOpen, setSummaryOpen, isPhone } = headerController.layout;
+  const openPortalInPreferredPlacement = useSimulatorPortalPlacement({
+    sessionId: session.id,
+    focused,
+    isPhone,
+    services: previewStatus?.services ?? [],
+    routedPortal: portalTarget,
+    pinnedPortal,
+    openPortal,
+    openSession,
+    setPanelOpen: setActivePanelOpen,
+    pinPortal,
+    autoPinPortal,
+    expandPinnedPortal,
+  });
+  // Blocks a markdown body builds as plain DOM (quick replies, file trees)
+  // reach the session through the messages click handler, like assets do.
+  const transcriptBlocks = useTranscriptBlocks({
+    sessionId: session.id,
+    messagesRef,
+    entries,
+    diffRepos: diffState.repos,
+    // The isolated send: chip text only, the composer's draft left alone.
+    sendQuickReply: (text) => void handleSend(text, undefined, []),
+    openChangedFile: (path) => {
+      // The same route the workspace summary's "files changed" row takes,
+      // then the diff is scrolled to the file once the pane has mounted.
+      if (isPhone) {
+        setInfoPageOpen(true);
+        setPanelPage("changes");
+      } else {
+        setDesktopPanelPage("changes");
+        setActivePanelOpen(true);
+      }
+      revealDiffFileWhenMounted(
+        () => (isPhone ? document.body : desktopChangesRef.current),
+        path,
+      );
+    },
+  });
+  const handleTranscriptClick = (e: MouseEvent<HTMLDivElement>) => {
+    if (!transcriptBlocks.handleClick(e)) handleMessagesClick(e);
+  };
   const { summaryHasRoom, summaryVisible } = headerController.summary;
   const { summaryStep, summaryStepStyle } = headerController.summary;
   const { focusComposerForQuote } = headerController.composer;
@@ -1293,6 +1353,13 @@ export function SessionViewer({
     if (autoFocusComposer && !isPhone)
       stableComposerRef.current.current?.focus();
   }, [autoFocusComposer, isPhone]);
+  // Coming back to the desktop app lands you typing again. Only the focused
+  // pane of a split takes the caret, and only while its conversation is the
+  // thing on screen rather than a review, terminal, or portal tab.
+  useRefocusComposerOnWindowFocus(
+    focused && !isPhone && !sessionHidden && !!os1Shell()?.desktop,
+    composerRef,
+  );
   useEffect(() => {
     if (!composerPrefillExternal) return;
     stableComposerPrefillRef.current.current(composerPrefillExternal);
@@ -1353,23 +1420,25 @@ export function SessionViewer({
     !ask &&
     !forkFrom &&
     replySuggestions.length > 0;
-  /* Desktop shows reading controls between quick replies and Next. Phone keeps
-	   its existing standalone reading control and centered session toolbar. */
-  const nextAction = showNextChatButton && !!openNextChat;
+  /* Unread navigation attaches to the composer. Only floating reading and
+     reply controls need additional clearance over the transcript. */
+  const nextAction =
+    showNextChatButton &&
+    focused &&
+    (!!openNextChat || navigation.allChatsRead);
   const scrollAction = showScrollToBottom && entries.length > 0;
-  const actionBand = quickReplies || nextAction || scrollAction || isPhone;
+  const actionBand = quickReplies || scrollAction || isPhone;
   const actionClearance = !actionBand
     ? undefined
-    : nextAction || isPhone
+    : isPhone
       ? isPhone && quickReplies
         ? ACTION_WITH_REPLIES_CLEARANCE
         : ACTION_CLEARANCE
       : scrollAction
         ? SCROLL_ACTION_CLEARANCE
         : SUGGESTIONS_CLEARANCE;
-  // This class changes the scroller's bottom padding. Session metadata can make
-  // Next appear after a cached transcript has already settled; re-pin before
-  // that larger scroll height paints, but never move a reader in history.
+  // Floating controls change the scroller's bottom padding. Re-pin before the
+  // larger scroll height paints, but never move a reader in history.
   useLayoutEffect(() => {
     if (readFollowingLive(followingLive)) scrollToLatest("auto");
   }, [actionClearance, followingLive, scrollToLatest]);
@@ -1534,13 +1603,16 @@ export function SessionViewer({
         infoActions={{
           setPreviewStatus,
           portalTarget,
-          openPortal,
+          openPortal: openPortalInPreferredPlacement,
           startDeclaredPortal,
           workflowRuns,
           workflowAction,
           subagents,
           openSubagent,
-          sessionReports,
+          sessionArtifacts: {
+            reports: sessionReports,
+            databases: sessionDatabases,
+          },
           navigation,
           effectiveReview,
           onReviewChange,
@@ -1648,6 +1720,7 @@ export function SessionViewer({
               safety,
             },
             content: {
+              syncing: transcriptSyncing,
               assetPaths,
               toolPathRoots,
               liveSubagents,
@@ -1675,7 +1748,7 @@ export function SessionViewer({
               repairSafetyPause,
               handleFork,
               handleMessagesScroll,
-              handleMessagesClick,
+              handleMessagesClick: handleTranscriptClick,
               cancelIndexAnchorHold,
               scrollToLatest,
               loadAllHistory,
@@ -1720,13 +1793,10 @@ export function SessionViewer({
             replySuggestions,
             pickReplySuggestion,
             transcriptDownKeys,
-            nextChatKeys,
-            openNextChat,
             archiving,
             handleArchive,
             setMobileActionMenuEl,
             openNewWorkspace,
-            showNextChatButton,
           }}
           composer={{
             state: {
@@ -1752,7 +1822,7 @@ export function SessionViewer({
               fastMode,
               accounts,
               accountId,
-              currentGoal,
+              standing: { goal: currentGoal, pstackMode },
               usage,
               composerRef,
               noteMode,
@@ -1778,6 +1848,7 @@ export function SessionViewer({
             moreActions: {
               handleAccountChange,
               handleSetGoal,
+              handlePstackModeChange,
             },
           }}
           layout={{
@@ -1861,7 +1932,25 @@ export function SessionViewer({
             status: previewStatus,
             activePortal: portalTarget,
             onBack: () => setActivePanelOpen(false),
-            onOpenPortal: openPortal,
+            onOpenPortal: openPortalInPreferredPlacement,
+            onPinPortal: isPhone
+              ? undefined
+              : (target) => {
+                  pinPortal(target);
+                  setActivePanelOpen(true);
+                  openSession?.(session.id);
+                },
+            pinnedPortal,
+            onClosePinnedPortal: () => {
+              closePinnedPortal();
+              setActivePanelOpen(false);
+            },
+            onExpandPinnedPortal: () => {
+              const target = expandPinnedPortal();
+              if (!target) return;
+              setActivePanelOpen(false);
+              openPortal?.(target);
+            },
             onStartPortal: startDeclaredPortal,
             onPortalAction: async (name, action) => {
               setPreviewStatus(await portalActionApi(session.id, name, action));

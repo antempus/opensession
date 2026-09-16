@@ -42,8 +42,19 @@ const g = globalThis as any;
 const RPC_TOOL_CALL_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface RunTokenContext {
+  /** Server-owned dispatch identity, never accepted from an MCP request body. */
+  promptEntryId?: string;
   sessionId: string;
   user?: string;
+  /** The person whose prompt this run answers, or undefined for a machine
+   *  turn. Kept apart from `user`, which automation-owned turns drop so the
+   *  `allowedUsers` gate never clears for them: the fallback builder reads
+   *  this to decide whether an automation-owned session's human turn carries
+   *  the scoped spawn suite. Reattach paths register the persisted account
+   *  user here, which may name a scheduled tick (`"Kent (loop)"`);
+   *  automationSessionMcp (interactive-mcp.ts) applies `interactivePrompter`
+   *  at the mount, so that still fails closed. */
+  humanPrompter?: string;
 }
 
 // token → run context. Parked on globalThis (hot reload keeps live runs'
@@ -90,6 +101,8 @@ export function timingSafeEqStr(a: string, b: string): boolean {
 export type InteractiveMcpBuilder = (
   sessionId: string,
   user?: string,
+  promptEntryId?: string,
+  humanPrompter?: string,
 ) => Record<string, any> | Promise<Record<string, any>>;
 
 export function registerInteractiveMcpBuilder(b: InteractiveMcpBuilder): void {
@@ -165,7 +178,14 @@ export async function dispatchRunRpc(
   const perSession = sessionServers.get(ctx.sessionId);
   const cfg =
     perSession?.[serverName] ??
-    (await builder(ctx.sessionId, ctx.user))[serverName];
+    (
+      await builder(
+        ctx.sessionId,
+        ctx.user,
+        ctx.promptEntryId,
+        ctx.humanPrompter,
+      )
+    )[serverName];
   if (!cfg?.instance) {
     // tools/list for a server this session doesn't carry (shared servers list
     // the union of in-process servers in their config) answers with an empty

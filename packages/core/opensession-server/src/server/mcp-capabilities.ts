@@ -18,7 +18,7 @@ export const INTERNAL_MCP_CAPABILITIES = {
   "opensession-sessions": {
     summary: "See and steer other sessions, and spawn worker sessions.",
     guidance:
-      "Create, inspect, steer, or cancel visible sessions and worker tasks. Use this rather than inventing an in-process worker when the user asks for a new session.",
+      "Create, inspect, steer, or cancel visible sessions and worker tasks. Use this rather than inventing an in-process worker when the user asks for a new session. When you notice a well-scoped follow-up outside the current request, record it with suggest_task instead of starting it.",
   },
   "opensession-admin": {
     summary: "Manage automations, MCP connections and channel memory.",
@@ -64,9 +64,9 @@ export const INTERNAL_MCP_CAPABILITIES = {
   },
   "opensession-repos": {
     summary:
-      "Attach or switch repos, link a PR to this session, and label PRs in any registered repo.",
+      "Attach or switch repos, link a PR to this session, label PRs, and check whether a PR is ready to merge.",
     guidance:
-      "Attach or switch repositories and link pull requests while preserving this session's multi-repo context. Use label_pull_request to label a PR in any registered repo, including one your shell cannot reach.",
+      "Attach or switch repositories and link pull requests while preserving this session's multi-repo context. Use label_pull_request to label a PR in any registered repo, including one your shell cannot reach. Use check_pr_ready for one deterministic merge-readiness verdict (checks, reviews, conflicts, draft, branch rules) instead of reading transcripts or raw gh output.",
   },
   "opensession-memory": {
     summary:
@@ -102,6 +102,12 @@ export const INTERNAL_MCP_CAPABILITIES = {
     guidance:
       "Open an editable Slack draft when the task needs human-reviewed communication. The human still presses Send.",
   },
+  "opensession-plain-discussion": {
+    summary:
+      "Reply to the customer or run a Stripe action from a Plain Ask Sidekick discussion, behind the teammate's Approve/Deny card.",
+    guidance:
+      "In a Plain discussion session, send a customer reply or run a proposed Stripe refund/cancellation only through these tools; each waits for the teammate's approval in Plain.",
+  },
   "opensession-ask": {
     summary: "Ask the human a blocking question.",
     guidance:
@@ -116,6 +122,12 @@ export const INTERNAL_MCP_CAPABILITIES = {
     summary: "Per-session scratch assets, previewed in the Assets tab.",
     guidance:
       "Save uncommitted reports, diagrams, visualizations, or sample data that should be previewable from this session. Publish existing workspace files with write_asset.sourcePath, especially binary outputs such as DOCX, PDF, and ZIP files.",
+  },
+  "opensession-charts": {
+    summary:
+      "Validate a Vega-Lite spec and get the ```vega-lite fence that renders as an interactive chart.",
+    guidance:
+      "Show quantitative results as an interactive chart: pass a Vega-Lite spec (and optionally the rows) to make_chart, then paste the returned ```vega-lite fence into your reply. Prefer this to a hand-built HTML chart asset or a static image of a chart.",
   },
   "opensession-todos": {
     summary: "The user's Desk todo list.",
@@ -136,6 +148,12 @@ export const INTERNAL_MCP_CAPABILITIES = {
     summary: "Publish this run's durable HTML report into the Reports view.",
     guidance:
       "Publish the run's finished HTML report into the durable Reports view.",
+  },
+  "opensession-databases": {
+    summary:
+      "Create, fill and query named SQLite databases kept by Open Session, browsed in the Databases view.",
+    guidance:
+      "Keep tabular data that a later turn, session or run will query again (collected metrics, scraped rows, triage state) in a named database: create_database with a schema, insert_rows for bulk data, query_database to read it back. Prefer it to a CSV asset when the data will be updated or joined later.",
   },
   "opensession-turn": {
     summary: 'Say "looked, nothing to report" instead of ending on silence.',
@@ -158,12 +176,6 @@ export const INTERNAL_MCP_CAPABILITIES = {
       "A self-improving automation reading and rewriting its OWN prompt.",
     guidance:
       "Read or improve this automation's own prompt. It cannot modify another automation.",
-  },
-  "opensession-pull-requests": {
-    summary:
-      "Open and edit this session's pull request as the person who asked; propose a merge for them to tap.",
-    guidance:
-      "Use open_pull_request instead of `gh pr create` so the PR carries the person's name. When asked to merge, call propose_merge: you cannot merge, approve, or push the default branch yourself.",
   },
   "opensession-github": {
     summary:

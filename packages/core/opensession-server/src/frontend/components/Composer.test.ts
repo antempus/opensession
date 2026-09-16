@@ -26,11 +26,24 @@ test("composer groups configuration and actions behind a bounded prop API", asyn
     "config",
     "actions",
     "attached",
+    "attachedAction",
     "menuExtra",
     "sendMenu",
   ]);
   expect(types).toContain("export interface ComposerConfig {");
   expect(types).toContain("export interface ComposerActions {");
+});
+
+test("full-width flaps have their own stack outside the compact action", async () => {
+  const component = await source("./Composer.tsx");
+  const queue = await source("./SessionQueue.tsx");
+
+  // The queue squares its top only below another full-width flap. A next-chat
+  // action must not count as that preceding sibling.
+  expect(component).toContain(
+    '{attached && <div className="flex flex-col">{attached}</div>}',
+  );
+  expect(queue).toContain("[&:not(:first-child)]:rounded-t-none");
 });
 
 test("a consumed draft clears persistence before clearing React state", async () => {

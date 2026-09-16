@@ -37,6 +37,26 @@ WEBAPP_PORT=3300
 INSTANT_PORT=5968
 ```
 
+Host Portals survive gateway restarts, but are not permanent services:
+
+- Archiving a session stops its owned host Portals, including those in attached
+  repositories. A sibling session's Portal in a shared checkout is left alone.
+  The five-minute reaper also catches archived and deleted owners missed by an
+  interrupted cleanup.
+- On Linux, a host Portal sleeps after 30 minutes without authenticated Portal
+  requests or an established connection to its service port. WebSockets count
+  as use; session-list and readiness polling do not. A gateway restart grants a
+  fresh idle window. If connection telemetry is unavailable, idle cleanup is
+  skipped rather than risking an active preview. Running owners are protected.
+  A page navigation wakes a sleeping Portal; background requests do not.
+  Archive and orphan cleanup stop Portals permanently, without automatic wake.
+- New host processes are refused when available RAM falls below 5% or 2 GiB,
+  memory full-stall pressure reaches 10% over ten seconds, or the shared user
+  workload slice reaches 90% of its memory soft limit. The existing configurable
+  host Portal count cap and free-memory floor also apply. Existing, matching
+  Portals can still be reused. These are admission guards, not permission to
+  kill another session's active work.
+
 Every listening `*_PORT` service is a Portal. Host services map to
 `https://<host>:<port+6000>`; Sandbox services get an allocated route in
 20000–27999 that relays over the Sandbox's authenticated outbound connection,
@@ -82,19 +102,29 @@ Both pages say nothing about the Sandbox beyond that.
 Current boundary: Portals inherit the instance's authenticated team boundary;
 there is no per-session ACL narrower than that team boundary yet.
 
+### iOS simulators
+
+On a local Mac, agents can use `start_simulator_portal` to open an already-built
+simulator `.app` through an idb-backed viewer. It uses the same authenticated
+Portal routing, with a private simulator and companion per viewer process.
+Desktop users can pin any running Portal beside the conversation; phones retain
+the full-width view. See [iOS simulator Portals](simulator-portals.md) for setup,
+agent arguments and limits.
+
 ## Agent-to-agent communication
 
 Interactive agents receive the `opensession-sessions` tools. Together they
 cover the full worker lifecycle:
 
-| Capability                    | Tool                                           |
-| ----------------------------- | ---------------------------------------------- |
-| Discover and inspect sessions | `list_sessions`, `get_session`                 |
-| Start a peer or worker        | `create_session`, `spawn_task`                 |
-| Send or steer work            | `send_to_session`                              |
-| Answer a blocked worker       | `answer_session_question`                      |
-| Poll and stop delegated work  | `task_status`, `cancel_task`, `cancel_session` |
-| Transfer an artifact          | `send_file_to_session`                         |
+| Capability                     | Tool                                           |
+| ------------------------------ | ---------------------------------------------- |
+| Discover and inspect sessions  | `list_sessions`, `get_session`                 |
+| Start a peer or worker         | `create_session`, `spawn_task`                 |
+| Send or steer work             | `send_to_session`                              |
+| Answer a blocked worker        | `answer_session_question`                      |
+| Poll and stop delegated work   | `task_status`, `cancel_task`, `cancel_session` |
+| Transfer an artifact           | `send_file_to_session`                         |
+| Propose a follow-up, unstarted | `suggest_task`                                 |
 
 `send_to_session` steers a live run when possible and otherwise queues a new
 turn, so a message is not lost at a run boundary. Queued and just-steered

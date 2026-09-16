@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { GITHUB_RUN_AUTH_FILE_ENV, githubRunOwnerLogin } from "./github-auth";
 import { AUTO_CONTINUE_USER, githubCredentialUser } from "./auto-continue";
+import { mergeGuardDenyReason } from "./command-policy";
 import {
   githubCodeRunEnv,
   githubReadRunEnv,
@@ -31,21 +32,69 @@ describe("GitHub publication authority", () => {
     expect(
       runGithubMergeGuard({
         isCode: true,
+        ownerTurn: true,
         ownerLogin: "alex",
         baseBranch: "main",
+        sharedCheckout: false,
       }),
     ).toBeUndefined();
   });
 
-  test("ask and non-person code turns keep their protected branch guard", () => {
-    for (const input of [
-      { isCode: false, ownerLogin: "alex" },
-      { isCode: false, ownerLogin: null },
-      { isCode: true, ownerLogin: null },
+  test("a person's shared-checkout code turn may push without personal GitHub authority", () => {
+    const guard = runGithubMergeGuard({
+      isCode: true,
+      ownerTurn: true,
+      ownerLogin: null,
+      baseBranch: "main",
+      sharedCheckout: true,
+    });
+    expect(guard).toEqual({});
+    for (const command of [
+      "git push origin main",
+      "git push origin HEAD:main",
+      "git push origin HEAD:refs/heads/main",
     ]) {
-      expect(
-        runGithubMergeGuard({ ...input, baseBranch: "production" }),
-      ).toEqual({ baseBranch: "production" });
+      expect(mergeGuardDenyReason(command, guard!)).toBeUndefined();
+    }
+    expect(mergeGuardDenyReason("gh pr merge 12", guard!)).toContain(
+      "cannot merge",
+    );
+    expect(mergeGuardDenyReason("gh pr review 12 --approve", guard!)).toContain(
+      "approving review",
+    );
+  });
+
+  test("an unconnected person's worktree code turn still protects the base branch", () => {
+    const guard = runGithubMergeGuard({
+      isCode: true,
+      ownerTurn: true,
+      ownerLogin: null,
+      baseBranch: "production",
+      sharedCheckout: false,
+    });
+    expect(guard).toEqual({ baseBranch: "production" });
+    expect(
+      mergeGuardDenyReason("git push origin HEAD:production", guard!),
+    ).toContain("protected base branch");
+  });
+
+  test("ask, unattended and machine turns keep protection in either checkout mode", () => {
+    for (const sharedCheckout of [true, false]) {
+      for (const input of [
+        { isCode: false, ownerTurn: true, ownerLogin: "alex" },
+        { isCode: false, ownerTurn: true, ownerLogin: null },
+        { isCode: false, ownerTurn: false, ownerLogin: null },
+        { isCode: true, ownerTurn: false, ownerLogin: null },
+        { isCode: true, ownerTurn: false, ownerLogin: "alex" },
+      ]) {
+        expect(
+          runGithubMergeGuard({
+            ...input,
+            sharedCheckout,
+            baseBranch: "production",
+          }),
+        ).toEqual({ baseBranch: "production" });
+      }
     }
   });
 });
@@ -321,8 +370,10 @@ describe("which credential a run's shell holds", () => {
       const guard = (ownerTurn: boolean) =>
         runGithubMergeGuard({
           isCode: true,
+          ownerTurn,
           ownerLogin: ownerTurn ? githubRunOwnerLogin("Alice") : null,
           baseBranch: "main",
+          sharedCheckout: false,
         });
       const auth = join(dir, "github-auth.json");
       process.env[GITHUB_RUN_AUTH_FILE_ENV] = auth;

@@ -104,6 +104,8 @@ import {
 } from "./worktree-channels";
 import {
   activeSessions,
+  hasSlackCodeWorkspace,
+  updateSlackSessionWorkspace,
   pendingAnswers,
   getSessionKey,
   saveSession,
@@ -719,6 +721,7 @@ export async function processMessage(
       branch: msg.branch || null,
       repoId: msg.repoId || null,
       mode: msg.mode ?? "code",
+      workspaceMode: msg.mode ?? "code",
       // Name it after the message now. The generated summary title below
       // takes ~15s to land, and until it does the UI falls back to the
       // session key — a session called "C0BE8KVFBEX-1787038283.876079".
@@ -739,29 +742,9 @@ export async function processMessage(
     return;
   }
 
-  // A worktree minted upstream for a message that landed in an EXISTING
-  // conversational session must be adopted, not dropped: without this the
-  // branch-named file `wt new-slack` wrote never gets the engine id mirrored
-  // (persistSession keys on session.branch), so it surfaces in the UI as a
-  // dead "No engine session to resume" row — while the run itself executes in
-  // the repo's main checkout (2026-07-25, screen-export-mixed-dims). Never
-  // switch an existing code worktree. An ask checkout must also be replaced
-  // when the user starts a code task; it is not a writable task workspace.
-  if (
-    !createdSession &&
-    msg.worktreeDir &&
-    (!session.worktreeDir || (session.mode === "ask" && msg.mode === "code"))
-  ) {
-    session.worktreeDir = msg.worktreeDir;
-    session.branch = msg.branch || session.branch;
-    if (msg.repoId) session.repoId = msg.repoId;
-    await persistSession(session);
-  }
-
-  if (msg.mode && session.mode !== msg.mode) {
-    session.mode = msg.mode;
-    await persistSession(session);
-  }
+  // Adopt new code workspaces, but never replace an existing task's workspace
+  // merely because its last turn was a read-only question.
+  if (updateSlackSessionWorkspace(session, msg)) await persistSession(session);
 
   if (createdSession) await pinSlackSession(`slack-${sessionKey}`, msg.userId);
 
@@ -1826,7 +1809,7 @@ Please help with this request. Start by exploring the codebase to understand wha
     (await loadSession(sessionKey)) ??
     undefined;
   if (existingCodeSession) activeSessions.set(sessionKey, existingCodeSession);
-  if (existingCodeSession?.worktreeDir && existingCodeSession.mode !== "ask") {
+  if (hasSlackCodeWorkspace(existingCodeSession)) {
     const intro = context
       ? `${userName} tagged me in a Slack thread with this context:\n\n---\n${context}\n---\n\nTheir message: "${cleanText}"`
       : `${userName} tagged me in a Slack channel with this message: "${cleanText}"`;

@@ -369,6 +369,8 @@ export interface UnifiedSession {
 // saveSession merges over whatever is already on disk rather than projecting a
 // fixed field list, so keys written by other writers survive a write.
 export interface SlackSessionFile {
+  /** Allocation kind of worktreeDir, independent of the current turn mode. */
+  workspaceMode?: "ask" | "code";
   /** Legacy Slack runs used code mode; explicit ask sessions remain read-only. */
   mode?: "ask" | "code";
   branch?: string | null;

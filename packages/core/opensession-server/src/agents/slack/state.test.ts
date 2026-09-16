@@ -9,8 +9,14 @@ const scratch = mkdtempSync(join(tmpdir(), "opensession-slack-state-"));
 const previousStateDir = process.env.OPENSESSION_STATE_DIR;
 process.env.OPENSESSION_STATE_DIR = scratch;
 
-const { SESSION_DIR, loadSession, saveSession, getSessionKey } =
-  await import("./state");
+const {
+  SESSION_DIR,
+  loadSession,
+  saveSession,
+  getSessionKey,
+  hasSlackCodeWorkspace,
+  updateSlackSessionWorkspace,
+} = await import("./state");
 const { writeJsonAtomic } = await import("../../server/shared/atomic-write");
 
 afterAll(() => {
@@ -79,5 +85,60 @@ describe("saveSession", () => {
     const loaded = await loadSession(key);
     expect(loaded?.model).toBe("pi/anthropic/claude-opus-5");
     expect(loaded?.claudeSessionId).toBeNull();
+  });
+});
+
+describe("Slack workspace allocation across mode changes", () => {
+  for (const branch of ["task-branch", null]) {
+    test(`code → ask → code preserves ${branch ? "isolated" : "shared"} workspace`, async () => {
+      const s = session({
+        threadTs: `workspace-${branch}`,
+        mode: "code",
+        worktreeDir: "/task",
+        branch,
+      });
+      expect(hasSlackCodeWorkspace(s)).toBe(true);
+      updateSlackSessionWorkspace(s, { mode: "ask" });
+      await saveSession(s);
+      const resumed = (await loadSession(
+        getSessionKey(s.channel, s.threadTs),
+      ))!;
+      expect(resumed.mode).toBe("ask");
+      // The mention guard must reuse this workspace even while mode is ask.
+      expect(hasSlackCodeWorkspace(resumed)).toBe(true);
+      // The adoption guard must also reject an unnecessary replacement.
+      updateSlackSessionWorkspace(resumed, {
+        mode: "code",
+        worktreeDir: "/replacement",
+        branch: "replacement",
+      });
+      expect(resumed).toMatchObject({
+        mode: "code",
+        workspaceMode: "code",
+        worktreeDir: "/task",
+        branch,
+      });
+    });
+  }
+
+  test("an ask-only checkout is replaced for a code task", () => {
+    const s = session({
+      mode: "ask",
+      workspaceMode: "ask",
+      worktreeDir: "/ask",
+    });
+    expect(hasSlackCodeWorkspace(s)).toBe(false);
+    updateSlackSessionWorkspace(s, {
+      mode: "code",
+      worktreeDir: "/task",
+      branch: "task",
+    });
+    expect(s).toMatchObject({
+      mode: "code",
+      workspaceMode: "code",
+      worktreeDir: "/task",
+      branch: "task",
+    });
+    expect(hasSlackCodeWorkspace(s)).toBe(true);
   });
 });

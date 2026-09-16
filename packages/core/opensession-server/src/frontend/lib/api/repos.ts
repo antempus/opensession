@@ -1,4 +1,5 @@
 import { API_BASE, ApiError, request } from "./request";
+import { newRepoRegistration } from "../new-repo";
 import { rememberRepoColors } from "../repo-colors";
 import { rememberRepoCount } from "../repo-count";
 import {
@@ -215,6 +216,53 @@ export async function registerRepoApi(input: {
   });
   notifyReposChanged();
   return repo;
+}
+
+/** What `POST /api/setup/repos` answers for a repository just started:
+ *  enough for a picker to select it before `/repos` reloads. */
+export interface CreatedRepo {
+  id: string;
+  label?: string;
+  defaultBranch?: string;
+  /** `owner/name` when it was created on GitHub; absent for server-only. */
+  ghRepo?: string;
+}
+
+/** Create on this server, or connect a repository the person created on GitHub. */
+export async function registerNewRepoApi(input: {
+  name: string;
+  owner?: string;
+}): Promise<CreatedRepo> {
+  const repo = await request<CreatedRepo>("/setup/repos", {
+    method: "POST",
+    body: newRepoRegistration(input.name, input.owner),
+    label: input.owner
+      ? "Failed to connect the repository"
+      : "Failed to create the repository",
+  });
+  notifyReposChanged();
+  return repo;
+}
+
+export interface GithubOwner {
+  login: string;
+  /** GitHub's account type: "User" or "Organization". */
+  type: string;
+  /** The instance's default installation, when one is pinned. */
+  selected: boolean;
+}
+
+/** The accounts the GitHub App is installed on, for choosing where a new
+ *  repository lives. `owners` is null when the App identity cannot answer
+ *  (no App, or GitHub unreachable), which is "unknown", not "none". */
+export function fetchGithubOwnersApi(): Promise<{
+  appConfigured: boolean;
+  appInstallUrl: string | null;
+  owners: GithubOwner[] | null;
+}> {
+  return request("/setup/github/owners", {
+    label: "Failed to load GitHub accounts",
+  });
 }
 
 export interface AttachedRepo {

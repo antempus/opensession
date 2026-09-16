@@ -12,6 +12,19 @@ Ask runs, unattended runs, and machine-authored turns keep their App-token
 limits and publication guards. Run-scoped `GH_CONFIG_DIR`, bot commit authorship,
 `Co-authored-by` attribution, and audit error handling remain unchanged.
 
+The App grant and every installation-token mint exclude repository
+Administration. New repository creation happens in the person's GitHub
+browser session at `https://github.com/new`; Open Session only connects the
+resulting remote. There is no elevated repository-create token or API path.
+Connected-user tokens inherit the intersection of the App's permissions and
+the person's access, not the installation mint sets. Keeping Administration
+out of the App grant therefore matters for interactive runs too.
+
+If an existing App was granted Administration for the previous automatic
+creation flow, its owner must remove that permission on GitHub. A code
+update cannot reduce an already installed App's grant. Host credential
+isolation remains a separate concern (see "Host hygiene").
+
 The credential rollback shipped in `773380904`; this change completes the
 interactive tooling/policy rollback of `a8ee01aeee`. See
 [GitHub setup](setup/github.md) and [the security model](security-model.md)
@@ -378,8 +391,8 @@ a clear message instead of a 403, and so that the attempt is logged.
   `device_flow_disabled` is handled.
 - Boot logs the credential posture: App permissions per installation, whether
   any retired credential path is still configured, and which rulesets are
-  missing on covered repositories (read via the installation token; the App
-  has no admin permission and should not get one).
+  missing on covered repositories (read via the ordinary installation token,
+  without Administration).
 
 ## Migration
 

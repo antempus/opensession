@@ -267,7 +267,7 @@ describe("LocalExecutor", () => {
       executable: "/usr/bin/python3",
       args: [
         "-c",
-        "import os,sys,time\nos.write(1,b'x'*1000)\nwhile not os.path.exists(sys.argv[1]): time.sleep(.01)\nos.write(1,b'later')",
+        "import os,time,sys\nos.write(1,b'x'*1000)\nwhile not os.path.exists(sys.argv[1]): time.sleep(.01)\nos.write(1,b'later')",
         join(root, "continue"),
       ],
       idempotencyKey: "resume",
@@ -287,21 +287,20 @@ describe("LocalExecutor", () => {
         (event) => event.kind === "text" && event.data.includes("[truncated]"),
       ),
     ).toBe(true);
-    // Release the second write only after the backlog was observed, regardless
-    // of interpreter startup or host scheduling latency.
+    // Release the second write only after the first backlog was drained.
     await writeFile(join(root, "continue"), "");
-    const output = await waitUntil(async () => {
+    const terminal = await waitUntil(async () => {
       const status = await execute(executor, {
         kind: "process.status",
         processId,
       });
-      return (
-        status.events
-          ?.flatMap((event) => (event.kind === "text" ? [event.data] : []))
-          .join("") || undefined
-      );
+      return status.events?.length ? status : undefined;
     });
-    expect(output).toContain("later");
+    expect(
+      terminal.events
+        ?.flatMap((event) => (event.kind === "text" ? [event.data] : []))
+        .join(""),
+    ).toContain("later");
   });
 
   test("coalesces tiny writes and bounds retained event count", async () => {

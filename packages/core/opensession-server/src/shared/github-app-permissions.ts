@@ -18,6 +18,10 @@
  * permission cap. An installation an operator has capped at contents:read is
  * handled at mint time by falling back to the read set for contents, so
  * reviews and comments keep working while pushes fail loudly.
+ *
+ * Repository creation happens in the person's GitHub browser session, not
+ * through this App. Never request Administration: connected-user tokens
+ * inherit the App grant and are projected into interactive code runs.
  */
 
 /** The full set the App is granted at creation — the create-URL permission

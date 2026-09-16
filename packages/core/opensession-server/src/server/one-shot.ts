@@ -6,7 +6,7 @@
  * It is fail-soft by contract: any model, timeout, or provider failure returns
  * null so each caller can keep its deterministic fallback.
  */
-import { mkdirSync, rmSync } from "fs";
+import { mkdir, rm } from "node:fs/promises";
 import { audit } from "./audit";
 import { cancelPiRun, parsePiModel, PI_STATE_DIR, runPi } from "./pi-runner";
 import {
@@ -77,8 +77,10 @@ export function oneShotModel(model?: string): string | undefined {
   return toPiModel(requested);
 }
 
+// An empty Claude pool is not exhaustion to the interactive runner, but it
+// must allow tool-less Haiku helpers to use OpenAI on Codex-only installs.
 const HAIKU_FALLOVER_SHAPES =
-  /usage[-_ ]?limit|weekly limit|no usable|exhausted|sidelined|rate[-_ ]?limit|quota|subscription access|disabled Claude|timed out|overloaded|too many requests|\b(429|500|502|503|529)\b|ECONNREFUSED|ECONNRESET|fetch failed|socket hang up/i;
+  /usage[-_ ]?limit|weekly limit|no usable|no Claude accounts configured|exhausted|sidelined|rate[-_ ]?limit|quota|subscription access|disabled Claude|timed out|overloaded|too many requests|\b(429|500|502|503|529)\b|ECONNREFUSED|ECONNRESET|fetch failed|socket hang up/i;
 
 export function haikuOneShotShouldFallOver(error: string | null): boolean {
   if (!error) return true;
@@ -209,7 +211,6 @@ async function runOneShotAttempt(
     releaseSlot();
     return { text: null, error: "server restarting" };
   }
-  mkdirSync(ONESHOT_CWD, { recursive: true });
   const runKey = `oneshot-${crypto.randomUUID()}`;
   const sessionDir = `${PI_STATE_DIR}/sessions/${runKey}`;
   const timeoutMs = Math.max(1_000, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -224,6 +225,7 @@ async function runOneShotAttempt(
   }, timeoutMs);
 
   try {
+    await mkdir(ONESHOT_CWD, { recursive: true });
     for await (const event of runPi(
       {
         prompt,
@@ -287,7 +289,7 @@ async function runOneShotAttempt(
     // The generator has disposed the SDK session before this block runs.
     // A one-shot has no resume value, so its native JSONL must not accumulate.
     try {
-      rmSync(sessionDir, { recursive: true, force: true });
+      await rm(sessionDir, { recursive: true, force: true });
     } catch {}
     releaseSlot();
   }

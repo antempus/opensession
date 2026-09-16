@@ -1,3 +1,4 @@
+import { AgentName } from "./AgentIdentity";
 import { BASE_PATH } from "../lib/base";
 import React, { useEffect, useEffectEvent, useState } from "react";
 import {
@@ -746,7 +747,7 @@ export function Automations({ onOpenSession, selectedId, onSelect }: Props) {
                             }}
                             href={`${BASE_PATH}/session/${sel.lastRunSessionId}`}
                           >
-                            view session
+                            <AgentName sessionId={sel.lastRunSessionId} />
                           </a>
                         </>
                       )}
@@ -978,7 +979,7 @@ function RunLedger({
       {runs.map((r) => (
         <div
           key={r.sessionId + r.at}
-          className="flex items-baseline gap-2 text-label text-dim min-w-0"
+          className="flex items-baseline gap-2 text-label text-dim min-w-0 phone:flex-wrap"
         >
           {r.status === "running" ? (
             <span className="text-yellow shrink-0">●</span>
@@ -1004,14 +1005,17 @@ function RunLedger({
             </span>
           )}
           <a
-            className={cn(LINK, "ml-auto shrink-0")}
+            className={cn(
+              LINK,
+              "ml-auto max-w-full truncate phone:inline-flex phone:min-h-11 phone:items-center",
+            )}
             href={`${BASE_PATH}/session/${r.sessionId}`}
             onClick={(e) => {
               e.preventDefault();
               onOpenSession(r.sessionId);
             }}
           >
-            view session
+            <AgentName sessionId={r.sessionId} />
           </a>
           {r.status !== "running" && (
             <button

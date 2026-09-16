@@ -5,6 +5,7 @@ import { join } from "path";
 import { GITHUB_RUN_AUTH_FILE_ENV, githubRunOwnerLogin } from "./github-auth";
 import { AUTO_CONTINUE_USER, githubCredentialUser } from "./auto-continue";
 import { mergeGuardDenyReason } from "./command-policy";
+import { humanPrompter } from "./session-actors";
 import {
   githubCodeRunEnv,
   githubReadRunEnv,
@@ -76,6 +77,48 @@ describe("GitHub publication authority", () => {
     expect(
       mergeGuardDenyReason("git push origin HEAD:production", guard!),
     ).toContain("protected base branch");
+  });
+
+  test.each([
+    { sender: undefined, author: undefined },
+    { sender: "", author: undefined },
+    { sender: "   ", author: undefined },
+    { sender: "anonymous", author: undefined },
+    { sender: AUTO_CONTINUE_USER, author: undefined },
+    { sender: AUTO_CONTINUE_USER, author: "   " },
+    { sender: "GitHub", author: "Alex" },
+  ])(
+    "ownerless and machine turns keep protection: %j",
+    ({ sender, author }) => {
+      const githubUser = githubCredentialUser(sender, author);
+      const ownerTurn = humanPrompter(githubUser) !== null;
+      expect(ownerTurn).toBe(false);
+      const guard = runGithubMergeGuard({
+        isCode: true,
+        ownerTurn,
+        ownerLogin: null,
+        baseBranch: "main",
+        sharedCheckout: true,
+      });
+      expect(guard).toEqual({ baseBranch: "main" });
+      expect(
+        mergeGuardDenyReason("git push origin HEAD:main", guard!),
+      ).toContain("protected base branch");
+    },
+  );
+
+  test("a named owner's continuation retains the shared-checkout workflow", () => {
+    const githubUser = githubCredentialUser(AUTO_CONTINUE_USER, "Alex");
+    expect(humanPrompter(githubUser)).toBe("Alex");
+    expect(
+      runGithubMergeGuard({
+        isCode: true,
+        ownerTurn: humanPrompter(githubUser) !== null,
+        ownerLogin: null,
+        baseBranch: "main",
+        sharedCheckout: true,
+      }),
+    ).toEqual({});
   });
 
   test("ask, unattended and machine turns keep protection in either checkout mode", () => {

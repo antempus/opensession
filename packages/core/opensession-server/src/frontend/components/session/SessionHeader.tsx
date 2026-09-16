@@ -23,7 +23,9 @@ import { OverflowFadeText } from "../../ui/overflow-fade-text";
 import { Tooltip } from "../../ui/tooltip";
 import { TopBar, TopBarActions, TopBarLeading } from "../../ui/top-bar";
 import { BrandMark } from "../BrandMark";
-import { AgentIdentity } from "../AgentIdentity";
+import { AgentTooltipLabel } from "../AgentIdentity";
+import { AgentAvatar } from "../../ui/agent-avatar";
+import { useAgentName } from "../../hooks/useAgentName";
 import {
   IconArchive,
   IconChevronDown,
@@ -93,6 +95,7 @@ export function SessionHeader({
   topbarEl,
   headerActionsEl,
 }: SessionHeaderProps) {
+  const agentName = useAgentName(session.id);
   const header = (
     <TopBar className={VIEWER_HEADER} ref={headerRef}>
       <TopBarLeading className={VIEWER_TITLE}>
@@ -215,10 +218,22 @@ export function SessionHeader({
             {parentSession ? session.title : workspaceName || session.title}
           </OverflowFadeText>
         )}
-        <AgentIdentity
-          sessionId={session.id}
-          className="max-w-48 shrink-0 phone:max-w-32"
-        />
+        <Tooltip
+          label={
+            <AgentTooltipLabel name={agentName} sessionTitle="Current agent" />
+          }
+          multiline
+          side="bottom"
+        >
+          <span
+            role="img"
+            tabIndex={0}
+            aria-label={`Current session: ${agentName}`}
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-control focus-visible:outline-2 focus-visible:outline-focus-ring"
+          >
+            <AgentAvatar sessionId={session.id} className="size-4.5" />
+          </span>
+        </Tooltip>
         {/* Where the session came FROM, as a quiet mark AFTER the name. It
             used to be a tinted pill at the head of the row, which made the
             loudest thing in the bar a fact you read once — and put it in

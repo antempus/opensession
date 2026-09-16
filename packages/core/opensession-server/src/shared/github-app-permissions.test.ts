@@ -41,6 +41,18 @@ describe("github app permission sets", () => {
     expect(GITHUB_APP_CODE_PERMISSIONS.issues).toBe("write");
   });
 
+  test("neither the App grant nor any mint carries administration", () => {
+    // User tokens inherit the App grant, not the installation mint subsets.
+    for (const set of [
+      GITHUB_APP_GRANT_PERMISSIONS,
+      GITHUB_APP_READ_PERMISSIONS,
+      GITHUB_APP_WRITE_PERMISSIONS,
+      GITHUB_APP_CODE_PERMISSIONS,
+    ]) {
+      expect(set.administration).toBeUndefined();
+    }
+  });
+
   test("the grant includes the scopes the two capabilities depend on", () => {
     // checks:read is required for check runs;
     // issues+pull_requests+contents:write are the agent's write path.

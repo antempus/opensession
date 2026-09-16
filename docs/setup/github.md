@@ -67,6 +67,26 @@ canonical permission set used when tokens are minted:
 | Pull requests          | Read and write | reviews, PRs, merges                    |
 | Members (organization) | Read           | roster and attribution                  |
 
+**Repository creation does not need Administration.** From Settings →
+Repositories → Add repository → New, or the New session palette's "New
+repository", Open Session opens `https://github.com/new` with the owner, name,
+private visibility and README option prefilled. Review those choices and
+confirm on GitHub, then return and choose **Connect repository**. If you
+changed the owner or name on GitHub, update them in Open Session too. The
+server uses ordinary remote registration to clone it and save its GitHub
+identity. Personal accounts and organizations are both supported. If the
+App is installed on selected repositories only, grant it access to the new
+repository before connecting.
+
+The App grant and all installation-token permission sets exclude
+Administration. Connected-user tokens inherit the App grant intersected with
+the person's access and are handed to interactive code runs, so adding
+Administration to the App would also broaden agent authority.
+
+**Existing Apps:** if Administration was enabled for the earlier automatic
+creation flow, remove it in the App's GitHub permission settings. Updating
+Open Session does not change the permissions of an existing App on GitHub.
+
 Enable **Device Flow**, generate a client secret and private key, then install
 the App only on the accounts and repositories Open Session should reach. One
 instance can use every installation of that App at the same time. When
@@ -242,8 +262,8 @@ Keep public PR creation restricted until every item below is complete:
    write-capable command.
 3. In GitHub repository settings, have a human repository administrator change
    the pull-request creation policy from **Collaborators only** to **All**. The
-   GitHub App does not need Administration permission for normal operation, and
-   should not receive it just for this one-time setting.
+   ordinary App installation tokens exclude Administration. This one-time
+   setting stays a human's job on github.com.
 4. In **Settings → Actions → General**, keep workflows from fork PRs disabled or
    require maintainer approval before they run. This is separate from Open
    Session review and complements the same-repository job gates in the shipped
@@ -254,9 +274,9 @@ Keep public PR creation restricted until every item below is complete:
    path, contains no private session URL, and leaves autofix, commands, pushes,
    handoffs and GitHub Actions unavailable.
 
-Changing the PR creation policy is the only step above that requires repository
-Administration authority. Runtime checkout, review and result posting continue
-to use the narrower App permissions documented in this guide.
+Changing the PR creation policy is the only step above that requires a human
+with repository Administration authority. Runtime checkout, review and result
+posting continue to use the narrower token sets documented in this guide.
 
 **Multi-repo**: the App webhook covers every repository on which the App is
 installed. A repo joins the PR agent when it is also in the config registry

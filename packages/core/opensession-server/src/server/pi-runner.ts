@@ -101,6 +101,7 @@ import {
   sessionStartContext,
 } from "./context-log";
 import { wrapContext } from "./prompt-context";
+import { stagePromptImages, withImagesNote } from "./prompt-attachments";
 import {
   EMPTY_REPLY_RETRY_PROMPT,
   githubCredentialUser,
@@ -124,7 +125,7 @@ import {
 import { transcript } from "./actor-transcript";
 import { transcriptForwarder } from "./transcript-forward";
 import { gitIdentityEnv, type GitIdentity } from "./shared/user-mappings";
-import { isMachineActor, providerAccountUser } from "./session-actors";
+import { humanPrompter, providerAccountUser } from "./session-actors";
 import {
   GITHUB_RUN_AUTH_FILE_ENV,
   githubRunOwnerLogin,
@@ -2183,7 +2184,7 @@ async function* runPiAttempt(
     const ownerTurn =
       !policy.unattended &&
       INTERACTIVE_KINDS.has(baseJournalKind(journal?.kind)) &&
-      !isMachineActor(githubUser);
+      humanPrompter(githubUser) !== null;
     // On a remote host this reads the launcher's projected marker, not the
     // person store, so a sandboxed owner turn drops the guard exactly when
     // a host run would.
@@ -2810,16 +2811,53 @@ async function* runPiAttempt(
       images?: ImageInput[];
       steerId?: string;
     }> = [];
+    // Every touch of pi's queue goes through this chain, in call order. The
+    // bookkeeping above it (pending entry, boundary flag, the caller's
+    // receipt) stays synchronous; only the engine enqueue waits, because
+    // staging an attachment is async and an in-process run shares the
+    // gateway's event loop. Ordering the retraction rebuild on the same
+    // chain means a steer still being staged is never enqueued twice, and a
+    // steer retracted mid-staging is never enqueued at all.
+    let engineQueue: Promise<void> = Promise.resolve();
+    // Steps still to run or running. The pump below reads it before trusting
+    // pi's pendingMessageCount: a steer accepted just before the prompt
+    // settled may not have reached pi's queue yet.
+    let engineQueueDepth = 0;
+    const onEngineQueue = (step: () => Promise<void>, what: string) => {
+      engineQueueDepth++;
+      engineQueue = engineQueue
+        .then(step)
+        .catch((e) => {
+          console.warn(`[pi-runner] ${what} failed:`, e);
+        })
+        .finally(() => {
+          engineQueueDepth--;
+        });
+    };
     handle.steer = (text, images, steerId) => {
       // Same skill expansion as the prompt path. The queue holds the expanded
       // text so the delivery match stays exact; the audit line below still
       // records what the person typed.
-      const steerText = expandSkillCommand(text, loader.getSkills().skills);
+      const entry = {
+        text: expandSkillCommand(text, loader.getSkills().skills),
+        images,
+        steerId,
+      };
       steeringBoundaryPending = true;
-      pendingSteers.push({ text: steerText, images, steerId });
-      void liveSession.steer(steerText, piImages(images)).catch((e) => {
-        console.warn("[pi-runner] steer failed:", e);
-      });
+      pendingSteers.push(entry);
+      onEngineQueue(async () => {
+        // Attached images are staged into this run's scratch dir, in this
+        // process, so the note names paths the engine's tools can read (see
+        // prompt-attachments.ts). The pending entry holds the noted text
+        // before pi ever sees it: delivery matches pi's echo against it, and
+        // a retraction replays it verbatim.
+        entry.text = withImagesNote(
+          entry.text,
+          await stagePromptImages(opts.scratchDir, images),
+        );
+        if (!pendingSteers.includes(entry)) return; // retracted meanwhile
+        await liveSession.steer(entry.text, piImages(images));
+      }, "steer");
       audit({
         ...auditBase,
         direction: "in",
@@ -2831,16 +2869,17 @@ async function* runPiAttempt(
       retractPendingSteer(pendingSteers, steerId, (remaining) => {
         // Pi exposes exact delivery identity only in our wrapper. Rebuild its
         // whole queue from our richer copy so duplicate text and images keep
-        // their original order while the selected id disappears.
+        // their original order while the selected id disappears. The entries
+        // are read when the step runs, so one still being staged replays with
+        // its final (noted) text.
         steeringBoundaryPending = remaining.length > 0;
-        liveSession.clearQueue();
-        for (const steer of remaining) {
-          void liveSession
-            .steer(steer.text, piImages(steer.images))
-            .catch((e) => {
-              console.warn("[pi-runner] steer replay failed:", e);
-            });
-        }
+        onEngineQueue(async () => {
+          liveSession.clearQueue();
+          for (const steer of remaining) {
+            if (!pendingSteers.includes(steer)) continue; // delivered or retracted since
+            await liveSession.steer(steer.text, piImages(steer.images));
+          }
+        }, "steer replay");
         audit({
           ...auditBase,
           direction: "in",
@@ -3204,6 +3243,14 @@ async function* runPiAttempt(
     while (true) {
       while (queue.length) yield queue.shift()!;
       if (promptOutcome) {
+        if (engineQueueDepth > 0) {
+          // An accepted steer is still being staged, so pi's queue count is
+          // not final yet. steerPiRun already told the caller "accepted";
+          // finishing now would drop it silently. Wait for the chain, then
+          // re-read everything (more steers may have joined meanwhile).
+          await engineQueue;
+          continue;
+        }
         if (
           promptOutcome.ok &&
           !abort.signal.aborted &&

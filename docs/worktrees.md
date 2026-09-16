@@ -25,6 +25,36 @@ worktrees live. `OPENSESSION_WORKTREES_DIR` overrides it; the normal default is
 worktree root inside that state namespace unless either setting overrides it.
 Directory names use the repository's configured `wtPrefix` and branch.
 
+A repository started from Open Session itself (Settings → Repositories → New,
+or "New repository" in the New session palette's Project picker) is what to
+pick for a project that does not exist anywhere yet; a scratch session (Code
+with no repo) is only a working directory and never becomes one. The form
+asks where it lives:
+
+- **A GitHub owner.** Open Session opens GitHub's new-repository page with the
+  owner, name, private visibility and README option prefilled. Check those
+  choices and create on GitHub, then return and choose **Connect repository**.
+  This clones it to `~/checkouts/<name>` and records its `ghRepo`, so sessions
+  have GitHub pull-request support. Personal accounts and organizations both
+  work. Grant the App access to the new repository if its installation only
+  covers selected repositories. No Administration permission is requested.
+- **This server only.** A checkout with a bare origin beside it:
+
+  ```
+  ~/checkouts/myapp                                 the checkout sessions branch from
+  ~/checkouts/myapp.git                             its origin, a bare repository
+  ```
+
+  The server makes the first commit (a README on `main`) and pushes it, so
+  the registry sees the same shape as a clone and the first code session gets
+  a normal worktree, diff and local review unit. Nothing is published and the
+  registry entry has no `ghRepo`, so this choice has no GitHub pull-request
+  flow. Changing `origin` and pushing later does **not** update the registered
+  GitHub identity or enable PR support. Choose a GitHub organization at
+  creation time if you want that integration. Migrating an existing
+  server-only registration to GitHub is a separate operator task, not an
+  automatic consequence of publishing its commits.
+
 Fresh worktree setup is best-effort. Open Session first tries to seed a ready
 warm template, then runs `.agents/setup` or the configured `worktreeSetup`
 fallback. It next runs the configured `depsInstall`, or `bun install` when the
@@ -66,6 +96,42 @@ Sandbox sessions clone inside the Sandbox's own disk and create no host
 worktree. Provider-owned cleanup is separate, and destroying a Sandbox deletes
 any work not pushed elsewhere. See
 [self-hosting-sandboxes.md](self-hosting-sandboxes.md).
+
+## Publication policy
+
+Checkout isolation does not require pull requests. Each repository can set
+`publicationMode` in the instance's `~/.opensession/config.json`:
+
+```json
+{
+  "selfDev": "worktree",
+  "repos": {
+    "opensession": {
+      "repo": "/srv/opensession",
+      "sharedCheckout": true,
+      "publicationMode": "direct"
+    }
+  }
+}
+```
+
+Edit the existing repo entry; do not replace the entire `repos` registry with
+this example. `pull-request` is the default when the field is absent or invalid.
+`direct` instructs interactive code sessions to keep their isolated branch,
+review its complete diff, integrate the latest default branch, run the repo's
+checks, and publish with a normal fast-forward push to that default branch.
+A raced push requires another integration and check, never a force-push.
+
+Explicit PR requests, branches with open PRs, and stacked PR work retain the PR
+workflow. Code Storage retains its branch-as-change-request workflow. Attached
+repositories each get their own policy. This setting is prompt guidance, not a
+permission grant: automation restrictions, connected-person authority, and
+GitHub branch protections still apply. It does not merge or close existing PRs.
+
+Config is re-read for newly assembled run instructions; an already-running turn
+keeps its existing instructions. Changing publication mode does not move any
+session to a different checkout. No client wire model or UI preference changes
+are required to configure this server-side setting.
 
 ## The shared-checkout exception
 

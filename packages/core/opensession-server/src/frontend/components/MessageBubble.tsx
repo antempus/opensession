@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import { useAgentMessageSummary } from "../hooks/useAgentMessageSummary";
+import React, { useId, useState } from "react";
 import { z } from "zod";
 import type { TranscriptEntry } from "../lib/types";
 import { markdownAffordable, renderMarkdown } from "../lib/markdown";
@@ -17,7 +18,13 @@ import { fullTime, shortTime } from "../lib/time";
 import { UserAvatar } from "./UserAvatar";
 import { openGalleryFrom } from "../lib/media-lightbox-gallery";
 import { unplacedMedia } from "../lib/placed-media";
-import { IconExpand, IconFileText2, IconPencil } from "./icons";
+import {
+  IconArrowRight,
+  IconChevronDown,
+  IconExpand,
+  IconFileText2,
+  IconPencil,
+} from "./icons";
 import { Collapsible, collapsiblePanelClasses } from "../ui/collapsible";
 import { pastedTextLineLabel } from "@tellahq/opensession-protocol/pasted-text";
 import { personKey } from "../lib/review-queue";
@@ -91,6 +98,7 @@ export function ClampedBody({
   entry,
   sessionId,
   transformContent,
+  summary,
 }: {
   content: string;
   className: string;
@@ -98,6 +106,8 @@ export function ClampedBody({
   sessionId?: string;
   /** Display-only repair applied again after a clamped entry hydrates. */
   transformContent?: (content: string) => string;
+  /** Derived one-line preview; expansion uses the same full-content path. */
+  summary?: { text: string; label: string };
 }) {
   const wireClamped = !!entry?.contentClamped;
   const fullLength = entry?.contentLength ?? content.length;
@@ -105,6 +115,7 @@ export function ClampedBody({
   const [showAll, setShowAll] = useState(false);
   const [fetched, setFetched] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
+  const bodyId = useId();
 
   // Cut the eager head at a line boundary so we don't render half a line of
   // a diff/log as its own paragraph.
@@ -122,7 +133,8 @@ export function ClampedBody({
   const repo = useMarkdownRepo();
   const assetPaths = useOpenAssetPaths();
   const markdown = { repo, sessionId, assetPaths };
-  const html = asMarkdown ? renderMarkdown(shown, markdown) : "";
+  const html =
+    asMarkdown && (!summary || showAll) ? renderMarkdown(shown, markdown) : "";
 
   const expand = async () => {
     if (wireClamped && !fetched && entry && sessionId) {
@@ -147,31 +159,57 @@ export function ClampedBody({
     setShowAll(true);
   };
 
+  const body = asMarkdown ? (
+    <MarkdownBody className={className} html={html || ""} markdown={markdown} />
+  ) : (
+    // Huge expanded blobs retain the existing affordable plain-text fallback.
+    <pre className="my-1 max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface p-3 font-sans text-label leading-relaxed text-fg">
+      {shown}
+    </pre>
+  );
+
   return (
     <>
-      {asMarkdown ? (
-        <MarkdownBody
-          className={className}
-          html={html || ""}
-          markdown={markdown}
-        />
+      {summary ? (
+        <>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={fetching}
+            aria-expanded={showAll}
+            aria-controls={bodyId}
+            aria-label={`${showAll ? "Collapse" : "Expand"} message: ${summary.text}`}
+            title={`${summary.label}\n${summary.text}`}
+            onClick={showAll ? () => setShowAll(false) : expand}
+            icon={
+              <IconChevronDown
+                size={16}
+                className={showAll ? undefined : "-rotate-90"}
+              />
+            }
+            className="w-full min-w-0 justify-start border-0 px-0 text-left text-label font-normal text-dim phone:min-h-11"
+          >
+            <span className="min-w-0 truncate">
+              {fetching ? "Loading message…" : summary.text}
+            </span>
+          </Button>
+          <div
+            id={bodyId}
+            hidden={!showAll}
+            className={showAll ? "my-2" : undefined}
+          >
+            {showAll ? body : null}
+          </div>
+        </>
       ) : (
-        // A <pre> only for the preserved whitespace: this branch renders a
-        // message the markdown pass cannot afford, which may still be prose.
-        // `font-sans` is load-bearing — the app ships no Tailwind Preflight,
-        // so the UA's `pre { font-family: monospace }` applies otherwise.
-        <pre
-          className={
-            "my-1 max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface p-3 font-sans text-label leading-relaxed text-fg"
-          }
-        >
-          {shown}
-        </pre>
+        body
       )}
-      {isLong && (
+      {!summary && isLong && (
         <Button
           variant="ghost"
           size="sm"
+          disabled={fetching}
+          aria-expanded={showAll}
           onClick={showAll ? () => setShowAll(false) : expand}
           className="mt-1 min-h-0 justify-start whitespace-normal rounded-md border-0 px-2 py-1 text-left font-sans text-label font-medium leading-normal hover:bg-hover/40"
         >
@@ -183,6 +221,36 @@ export function ClampedBody({
         </Button>
       )}
     </>
+  );
+}
+
+function AgentMessageBody({
+  entry,
+  content,
+  outgoing,
+  sessionId,
+}: {
+  entry: TranscriptEntry;
+  content: string;
+  outgoing: boolean;
+  sessionId?: string;
+}) {
+  const summary = useAgentMessageSummary(sessionId, entry.id, content);
+  return (
+    <ClampedBody
+      summary={summary}
+      className={cn(msgBody, "markdown text-fg")}
+      content={content}
+      entry={outgoing ? undefined : entry}
+      sessionId={sessionId}
+      transformContent={
+        outgoing
+          ? undefined
+          : (full) =>
+              classifyEntry({ ...entry, notice: undefined, content: full })
+                .content
+      }
+    />
   );
 }
 
@@ -760,37 +828,64 @@ export const MessageBubble = function MessageBubble({
         className={cn(msgRow, enterClass)}
         data-eid={e.id}
         data-agent-message={outgoing ? "outgoing" : "incoming"}
+        role="group"
+        aria-label={
+          outgoing ? "Outgoing agent message" : "Incoming agent message"
+        }
       >
-        <div className="mb-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-meta text-faint">
-          <AgentIdentity sessionId={senderId} linked={senderId !== sessionId} />
-          <span>Agent</span>
-          <MsgTime ts={e.timestamp} />
-        </div>
-        {outgoing && (
-          <div className="mb-2 flex min-w-0 flex-wrap items-center gap-2 text-meta text-faint">
-            <span>To</span>
-            <AgentIdentity sessionId={outgoing.to} linked />
+        <div
+          className={cn(
+            "mb-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-meta text-faint",
+            outgoing && "justify-end",
+          )}
+          data-agent-message-header=""
+        >
+          <AgentIdentity
+            sessionId={senderId}
+            linked
+            current={!!senderId && senderId === sessionId}
+          />
+          {(outgoing?.to || sessionId) && (
+            <>
+              <span className="inline-flex shrink-0 items-center">
+                <IconArrowRight className="size-4" />
+                <span className="sr-only">to</span>
+              </span>
+              <AgentIdentity
+                sessionId={outgoing?.to ?? sessionId}
+                linked
+                current={(outgoing?.to ?? sessionId) === sessionId}
+              />
+            </>
+          )}
+          {outgoing && (
             <span
               className={deliveryStatus === "Not sent" ? "text-red" : undefined}
             >
               {deliveryStatus}
             </span>
-          </div>
-        )}
+          )}
+          <MsgTime ts={e.timestamp} />
+        </div>
         {e.notice?.kind === "worker-report" && (
           <span className="mb-1 text-meta text-faint">Worker report</span>
         )}
-        <ClampedBody
+        <div
           className={cn(
-            msgBody,
-            "markdown rounded-lg bg-panel px-3.5 py-2.5 text-fg",
+            msgBubbleUser,
+            "flex w-fit min-w-0 flex-col rounded-xl px-2.5 py-0.5",
+            outgoing ? "bg-accent/10" : "self-start",
           )}
-          content={outgoing?.content ?? displayContent}
-          entry={outgoing ? undefined : e}
-          sessionId={sessionId}
-        />
+        >
+          <AgentMessageBody
+            entry={entry}
+            content={outgoing?.content ?? displayContent}
+            outgoing={!!outgoing}
+            sessionId={sessionId}
+          />
+        </div>
         {outgoing && toolResult && (
-          <Collapsible.Root className="mt-1">
+          <Collapsible.Root className="mt-1 self-end">
             <Collapsible.Trigger className="rounded-control py-1 text-meta text-faint hover:text-fg phone:min-h-11">
               Delivery details
             </Collapsible.Trigger>
@@ -962,16 +1057,10 @@ export const MessageBubble = function MessageBubble({
     );
   }
 
-  // Assistant replies carry the same identity as this session's peer messages.
-  // The trailing row is for media the body did not already place (lib/placed-media.ts).
+  // Ordinary replies need no speaker label: the conversation header identifies
+  // this agent. Only agent-to-agent messages need the extra routing context.
   return (
     <div className={cn(msgRow, enterClass)} data-eid={e.id}>
-      {sessionId && (
-        <div className="mb-2 flex items-center gap-2">
-          <AgentIdentity sessionId={sessionId} />
-          <span className="text-meta text-faint">Agent</span>
-        </div>
-      )}
       <ClampedBody
         className={cn(msgBody, "markdown text-fg")}
         content={displayContent}

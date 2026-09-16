@@ -250,8 +250,10 @@ const AUTOMATION_ID_BARE = new RegExp(`(?:^|[^\\w/-])(?=auto-${UUIDV7})`, "i");
 // Chip labels. A raw `bks-<uuid>` is 40 characters of noise in the middle of a
 // sentence, so a chip shows the name of the work it points at when we know it.
 // The app shell registers what it already polls (App.tsx); anything not in that
-// list (archived, deleted, not yet polled) falls back to a shortened id.
+// list (archived, deleted, not yet polled) falls back to the stable agent name.
 interface SessionName {
+  id: string;
+  parentSessionId?: string;
   /** What the chip shows: a human session's workspace, or a worker's task. */
   label: string;
   /** The session's own title, when it differs from the label. Tooltip only:
@@ -276,10 +278,14 @@ const sessionTitleListeners = new Set<() => void>();
 /** Sessions whose agent is mid-run, for the chip's live dot. */
 let runningSessions = new Set<string>();
 const SESSION_TITLE_MAX = 38;
-const SESSION_ID_SHORT = 12; // `os-019fb3ad2` / `bks-019fb3ad`
+
+function knownSessionMetadata(id: string): SessionName | undefined {
+  return sessionTitles.get(id) ?? resolvedSessionTitles.get(id);
+}
 
 function knownSessionName(id: string): SessionName | undefined {
-  return sessionTitles.get(id) ?? resolvedSessionTitles.get(id);
+  const metadata = knownSessionMetadata(id);
+  return metadata?.label ? metadata : undefined;
 }
 
 function flushSessionTitleRequests(): void {
@@ -294,7 +300,8 @@ function flushSessionTitleRequests(): void {
 
 function queueSessionTitleRequest(id: string): void {
   if (
-    knownSessionName(id) ||
+    sessionTitles.has(id) ||
+    resolvedSessionTitles.has(id) ||
     unavailableSessionIds.has(id) ||
     queuedSessionTitleRequests.has(id) ||
     inFlightSessionTitleRequests.has(id)
@@ -331,10 +338,11 @@ export interface ResolvedSessionTitle {
   tabTitle?: string | null;
   aliases?: readonly string[];
   archived?: boolean;
+  parentSessionId?: string;
 }
 
 /** Publish lightweight metadata fetched for references outside the live list.
- *  A missing title marks a deleted/unknown id so it keeps the honest id label. */
+ *  A missing title marks a deleted/unknown id so it keeps its generated agent name. */
 export function setResolvedSessionTitles(
   entries: Iterable<ResolvedSessionTitle>,
 ): void {
@@ -343,12 +351,16 @@ export function setResolvedSessionTitles(
     inFlightSessionTitleRequests.delete(entry.requestedId);
     queuedSessionTitleRequests.delete(entry.requestedId);
     const label = cleanSessionTitle(String(entry.title ?? "").trim());
-    if (!label) {
+    if (!label && !entry.id) {
       unavailableSessionIds.add(entry.requestedId);
       continue;
     }
     const tab = cleanSessionTitle(String(entry.tabTitle ?? "").trim());
-    const name: SessionName = { label };
+    const name: SessionName = {
+      label,
+      id: entry.id ?? entry.requestedId,
+      parentSessionId: entry.parentSessionId,
+    };
     if (tab && tab !== label) name.tab = tab;
     if (entry.archived) name.archived = true;
     const ids = [entry.requestedId, entry.id, ...(entry.aliases ?? [])].filter(
@@ -359,6 +371,8 @@ export function setResolvedSessionTitles(
       const had = resolvedSessionTitles.get(id);
       if (
         !had ||
+        had.id !== name.id ||
+        had.parentSessionId !== name.parentSessionId ||
         had.label !== name.label ||
         had.tab !== name.tab ||
         had.archived !== name.archived
@@ -404,24 +418,31 @@ export function setSessionTitles(
       boolean?,
       (string | null)?,
       (readonly string[])?,
+      string?,
     ]
   >,
 ): void {
   const next = new Map<string, SessionName>();
   const running = new Set<string>();
-  for (const [id, title, isRunning, tabTitle, aliases] of entries) {
+  for (const [
+    id,
+    title,
+    isRunning,
+    tabTitle,
+    aliases,
+    parentSessionId,
+  ] of entries) {
     const label = cleanSessionTitle(String(title ?? "").trim());
     const tab = cleanSessionTitle(String(tabTitle ?? "").trim());
     const ids = [id, ...(aliases ?? [])].filter(Boolean);
-    const name: SessionName = { label };
+    const name: SessionName = { label, id, parentSessionId };
     if (tab && tab !== label) name.tab = tab;
-    if (label)
-      for (const knownId of ids) {
-        next.set(knownId, name);
-        queuedSessionTitleRequests.delete(knownId);
-        inFlightSessionTitleRequests.delete(knownId);
-        unavailableSessionIds.delete(knownId);
-      }
+    for (const knownId of ids) {
+      next.set(knownId, name);
+      queuedSessionTitleRequests.delete(knownId);
+      inFlightSessionTitleRequests.delete(knownId);
+      unavailableSessionIds.delete(knownId);
+    }
     if (isRunning) for (const knownId of ids) running.add(knownId);
   }
   runningSessions = running;
@@ -433,7 +454,13 @@ export function setSessionTitles(
     let same = true;
     for (const [id, name] of next) {
       const had = sessionTitles.get(id);
-      if (!had || had.label !== name.label || had.tab !== name.tab) {
+      if (
+        !had ||
+        had.id !== name.id ||
+        had.parentSessionId !== name.parentSessionId ||
+        had.label !== name.label ||
+        had.tab !== name.tab
+      ) {
         same = false;
         break;
       }
@@ -568,22 +595,33 @@ function syncRenderedSessionTitles(): void {
     "a.session-link[data-session-id]",
   )) {
     const id = anchor.dataset.sessionId;
-    if (!id) continue;
+    if (!id || anchor.dataset.sessionLabel === "authored") continue;
     const name = knownSessionName(id);
-    if (!name) {
-      queueSessionTitleRequest(id);
-      continue;
-    }
+    if (!name) queueSessionTitleRequest(id);
     const label = anchor.querySelector<HTMLElement>(".session-link-label");
     if (!label) continue;
-    label.textContent = sessionLabel(name.label);
+    label.textContent = name ? sessionLabel(name.label) : sessionAgentName(id);
     delete anchor.dataset.sessionLabel;
-    if (name.archived) anchor.dataset.sessionArchived = "";
+    if (name?.archived) anchor.dataset.sessionArchived = "";
     else delete anchor.dataset.sessionArchived;
     const icon = anchor.querySelector<HTMLElement>(".session-link-icon");
-    if (icon) icon.innerHTML = sessionIconSvg(name.archived);
+    if (icon) icon.innerHTML = sessionIconSvg(name?.archived);
     anchor.title = sessionTip(id);
   }
+}
+
+/** Agent references name their session's work, never a generated persona. */
+export function sessionAgentName(id: string): string {
+  const row = knownSessionMetadata(id);
+  if (!row) queueSessionTitleRequest(id);
+  return row?.tab || row?.label || (row ? "Untitled session" : "Session");
+}
+
+/** Full task title for agent hover details, not a workspace label or short chip. */
+export function sessionAgentTitle(id: string): string {
+  const row = knownSessionMetadata(id);
+  if (!row) queueSessionTitleRequest(id);
+  return row?.tab || row?.label || "";
 }
 
 /**
@@ -593,27 +631,17 @@ function syncRenderedSessionTitles(): void {
 export function sessionTitleFor(id: string): string | undefined {
   const name = knownSessionName(id);
   if (!name) queueSessionTitleRequest(id);
-  return name?.label;
+  return name?.label ?? sessionAgentName(id);
 }
 
 /** Whether a resolved session reference points into archived history. */
 export function sessionArchivedFor(id: string): boolean {
-  return knownSessionName(id)?.archived === true;
+  return knownSessionMetadata(id)?.archived === true;
 }
 
 /** The name shown for a stable workspace mention in a composer draft. */
 export function workspaceTitleFor(id: string): string | undefined {
   return workspaceTitles.get(id);
-}
-
-export function shortSessionId(id: string): string {
-  // Legacy `bks-<slug>` ids are already short and cutting them mid-word reads
-  // worse than showing the whole thing; only uuid-shaped ids get abbreviated.
-  // The trailing-dash trim keeps the cut off a segment boundary — the two
-  // prefixes differ in length, so a fixed cut lands mid-separator for one.
-  return id.length <= 20
-    ? id
-    : `${id.slice(0, SESSION_ID_SHORT).replace(/-+$/, "")}…`;
 }
 
 // The chip's leading glyph names the destination state: a conversation for
@@ -645,7 +673,7 @@ function sessionChipIcon(archived?: boolean): string {
 function sessionChip(
   id: string,
   label: string,
-  opts: { href?: string; tip?: string; idLabel?: boolean; archived?: boolean },
+  opts: { href?: string; tip?: string; archived?: boolean; authored?: boolean },
 ): string {
   // With an href it's a real link (cmd/middle-click open a tab); without one
   // the delegated click handler is the only way in, so it needs the button role
@@ -655,7 +683,7 @@ function sessionChip(
     : `role="button" tabindex="0" `;
   return (
     `<a ${anchor}class="session-link" data-session-id="${attr(id)}"` +
-    `${opts.idLabel ? ' data-session-label="id"' : ""}` +
+    `${opts.authored ? ' data-session-label="authored"' : ""}` +
     `${opts.archived ? " data-session-archived" : ""}` +
     // Baked from the current set so a fresh chip is right on first paint;
     // syncRenderedSessionRuns corrects it from then on.
@@ -674,14 +702,12 @@ function sessionLabel(title: string): string {
 function sessionLink(id: string, href?: string): string {
   const name = knownSessionName(id);
   if (!name) queueSessionTitleRequest(id);
-  const label = name ? sessionLabel(name.label) : shortSessionId(id);
-  // The label is lossy either way (truncated title, abbreviated id), so the
-  // full id always stays in the tooltip. data-session-label marks the id
-  // fallback for the monospace treatment.
+  const label = name ? sessionLabel(name.label) : sessionAgentName(id);
+  // Unknown, deleted, and not-yet-loaded references still get a readable name.
+  // The canonical ID stays in the link target and data attribute, never the label.
   return sessionChip(id, attr(label), {
     href,
     tip: sessionTip(id),
-    idLabel: !name,
     archived: name?.archived,
   });
 }
@@ -712,9 +738,9 @@ function sessionTip(id: string): string {
     : name?.archived
       ? " · archived"
       : "";
-  if (!name) return `Open session ${id}${status}`;
+  if (!name) return `Open ${sessionAgentName(id)}${status}`;
   const tab = name.tab ? ` · ${name.tab}` : "";
-  return `Open ${name.label}${tab} (${id})${status}`;
+  return `Open ${name.label}${tab}${status}`;
 }
 
 // Agents write pull requests the GitHub way — a bare `#5528`, sometimes
@@ -1494,6 +1520,7 @@ md.use({
           if (SESSION_ID_EXACT.test(label))
             return sessionLink(internal.sessionId, token.href);
           return sessionChip(internal.sessionId, text, {
+            authored: true,
             href: token.href,
             tip: token.title || sessionTip(internal.sessionId),
           });

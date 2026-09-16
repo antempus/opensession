@@ -17,6 +17,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { createWorktree } from "../worktree";
 import { __setGithubAppKeyPathForTest } from "../github-app";
 import {
+  __setGithubCloneForTest,
   adoptExistingCheckout,
   githubCredentialHelperCommand,
   handleSetupRepoRoutes,
@@ -1181,6 +1182,317 @@ describe("local repository registration", () => {
     expect(response?.status).toBe(400);
     expect(await response?.json()).toEqual({
       error: "path must be an absolute path to a Git repository",
+    });
+  });
+});
+
+describe("new repository creation", () => {
+  test.serial(
+    "starts a checkout with a bare origin and registers it",
+    async () => {
+      const root = localRoot();
+      const configPath = join(root, "config.json");
+      writeFileSync(configPath, JSON.stringify({ repos: {} }));
+      process.env.HOME = root;
+      process.env.OPENSESSION_CONFIG = configPath;
+      process.env.OPENSESSION_WORKTREES_DIR = join(root, "worktrees");
+
+      const response = await handleSetupRepoRoutes(
+        postRepo({ source: "new", name: "My.Widget" }),
+      );
+
+      expect(response?.status).toBe(201);
+      const checkout = join(root, "checkouts", "my.widget");
+      const origin = join(root, "checkouts", "my.widget.git");
+      expect(await response?.json()).toMatchObject({
+        id: "my.widget",
+        label: "My.Widget",
+        repo: realpathSync(checkout),
+        defaultBranch: "main",
+        default: true,
+      });
+      expect(readFileSync(join(checkout, "README.md"), "utf-8")).toBe(
+        "# My.Widget\n",
+      );
+      expect(git(["remote", "get-url", "origin"], checkout)).toBe(origin);
+      expect(git(["rev-parse", "--is-bare-repository"], origin)).toBe("true");
+      expect(git(["symbolic-ref", "HEAD"], origin)).toBe("refs/heads/main");
+      expect(git(["rev-parse", "main"], origin)).toBe(
+        git(["rev-parse", "main"], checkout),
+      );
+      const saved = JSON.parse(readFileSync(configPath, "utf-8"));
+      expect(saved.repos["my.widget"].ghRepo).toBeUndefined();
+      const worktree = await createWorktree("first-feature", "my.widget");
+      expect(existsSync(worktree)).toBe(true);
+      expect(git(["branch", "--show-current"], worktree)).toBe("first-feature");
+    },
+  );
+
+  test.serial("rejects a name the checkout layout cannot take", async () => {
+    const root = localRoot();
+    const configPath = join(root, "config.json");
+    writeFileSync(configPath, JSON.stringify({ repos: {} }));
+    process.env.HOME = root;
+    process.env.OPENSESSION_CONFIG = configPath;
+
+    for (const name of [
+      "",
+      "acme/widget",
+      "widget.git",
+      "..",
+      "a b",
+      7,
+      // The registry is a plain object; these are its prototype's keys, and
+      // the update route refuses them as ids already.
+      "__proto__",
+      "constructor",
+      "Prototype",
+    ]) {
+      const response = await handleSetupRepoRoutes(
+        postRepo({ source: "new", name }),
+      );
+      expect(response?.status).toBe(400);
+    }
+    expect(existsSync(join(root, "checkouts"))).toBe(false);
+    expect(JSON.parse(readFileSync(configPath, "utf-8"))).toEqual({
+      repos: {},
+    });
+  });
+
+  test.serial(
+    "refuses a name whose checkout already exists and leaves it alone",
+    async () => {
+      const root = localRoot();
+      const configPath = join(root, "config.json");
+      writeFileSync(configPath, JSON.stringify({ repos: {} }));
+      process.env.HOME = root;
+      process.env.OPENSESSION_CONFIG = configPath;
+      const existing = join(root, "checkouts", "widget");
+      mkdirSync(existing, { recursive: true });
+      writeFileSync(join(existing, "keep.txt"), "mine\n");
+
+      const response = await handleSetupRepoRoutes(
+        postRepo({ source: "new", name: "widget" }),
+      );
+
+      expect(response?.status).toBe(409);
+      expect(await response?.json()).toEqual({
+        error: `A checkout already exists at ${existing}. Register it as a local folder instead.`,
+      });
+      expect(readFileSync(join(existing, "keep.txt"), "utf-8")).toBe("mine\n");
+      expect(existsSync(join(root, "checkouts", "widget.git"))).toBe(false);
+      expect(JSON.parse(readFileSync(configPath, "utf-8"))).toEqual({
+        repos: {},
+      });
+    },
+  );
+
+  test.serial(
+    "an inherited key on an empty registry does not read as taken",
+    async () => {
+      const root = localRoot();
+      const checkout = createRemoteCheckout(root, "constructor");
+      const configPath = join(root, "config.json");
+      writeFileSync(configPath, JSON.stringify({ repos: {} }));
+      process.env.HOME = root;
+      process.env.OPENSESSION_CONFIG = configPath;
+
+      const response = await handleSetupRepoRoutes(
+        postRepo({ source: "local", path: checkout }),
+      );
+
+      expect(response?.status).toBe(201);
+      expect(await response?.json()).toMatchObject({ id: "constructor" });
+    },
+  );
+
+  test.serial("refuses an id another repository already holds", async () => {
+    const root = localRoot();
+    const checkout = createRemoteCheckout(root, "taken");
+    const configPath = join(root, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        repos: {
+          taken: { repo: checkout, wtPrefix: "taken", defaultBranch: "trunk" },
+        },
+      }),
+    );
+    process.env.HOME = root;
+    process.env.OPENSESSION_CONFIG = configPath;
+
+    const response = await handleSetupRepoRoutes(
+      postRepo({ source: "new", name: "Taken" }),
+    );
+
+    expect(response?.status).toBe(409);
+    expect(await response?.json()).toEqual({
+      error: "Repository id already registered: taken",
+    });
+    expect(existsSync(join(root, "checkouts"))).toBe(false);
+  });
+});
+
+describe("GitHub browser creation handoff", () => {
+  const originalFetch = globalThis.fetch;
+  const originalClientId = process.env.OPENSESSION_GITHUB_CLIENT_ID;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    __setGithubCloneForTest(null);
+    if (originalClientId === undefined)
+      delete process.env.OPENSESSION_GITHUB_CLIENT_ID;
+    else process.env.OPENSESSION_GITHUB_CLIENT_ID = originalClientId;
+    __setGithubAppKeyPathForTest(undefined);
+    const cache = globalThis as any;
+    cache.__ghAppTokenCache = undefined;
+    cache.__ghAppTokenWarned = undefined;
+    cache.__ghAppLastMintOk = undefined;
+    cache.__ghAppLastMintIdentity = undefined;
+    cache.__ghAppInstallationsCache = null;
+    invalidateGithubRepoListCache();
+  });
+
+  /** An App installed on a person and an organization, pinned to the org,
+   *  with an empty registry and HOME under `root`. */
+  function setUp(root: string): string {
+    const configPath = join(root, "config.json");
+    const keyPath = join(root, "github-app.pem");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    writeFileSync(keyPath, privateKey.export({ format: "pem", type: "pkcs8" }));
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        repos: {},
+        integrations: {
+          github: {
+            oauthClientId: "Iv-create-test",
+            appSlug: "open-session-create-test",
+            installationOwner: "acme-org",
+          },
+        },
+      }),
+    );
+    process.env.HOME = root;
+    process.env.OPENSESSION_CONFIG = configPath;
+    delete process.env.OPENSESSION_GITHUB_CLIENT_ID;
+    __setGithubAppKeyPathForTest(keyPath);
+    return configPath;
+  }
+
+  const installs = [
+    { id: 1, account: { login: "solo-dev", type: "User" } },
+    { id: 2, account: { login: "acme-org", type: "Organization" } },
+  ];
+
+  test.serial(
+    "refuses legacy GitHub creation without minting or creating anything",
+    async () => {
+      const root = localRoot();
+      const configPath = setUp(root);
+      const before = readFileSync(configPath, "utf-8");
+      const calls: string[] = [];
+      globalThis.fetch = (async (
+        input: string | URL | Request,
+      ): Promise<Response> => {
+        calls.push(String(input));
+        throw new Error("GitHub creation must not call the API");
+      }) as typeof fetch;
+      for (const owner of [
+        "acme-org",
+        "solo-dev",
+        "other-org",
+        "-invalid",
+        7,
+        null,
+      ]) {
+        const response = await handleSetupRepoRoutes(
+          postRepo({ source: "new", name: "widget", owner }),
+        );
+        expect(response?.status).toBe(400);
+        expect((await response?.json()).error).toContain(
+          "https://github.com/new",
+        );
+      }
+      expect(calls).toEqual([]);
+      expect(existsSync(join(root, "checkouts"))).toBe(false);
+      expect(readFileSync(configPath, "utf-8")).toBe(before);
+    },
+  );
+
+  test.serial(
+    "connects a browser-created repository using ordinary credentials",
+    async () => {
+      const root = localRoot();
+      const configPath = setUp(root);
+      const mints: Record<string, string>[] = [];
+      globalThis.fetch = (async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        const url = String(input);
+        if (url.startsWith("https://api.github.com/app/installations?"))
+          return Response.json(installs);
+        expect(url).toBe(
+          "https://api.github.com/app/installations/2/access_tokens",
+        );
+        const permissions = JSON.parse(String(init?.body)).permissions;
+        mints.push(permissions);
+        expect(permissions.administration).toBeUndefined();
+        return Response.json({
+          token: "ghs_read",
+          expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+        });
+      }) as typeof fetch;
+      // The existing clone adapter is the only remote-git boundary replaced.
+      __setGithubCloneForTest(async (fullName, dest) => {
+        expect(fullName).toBe("acme-org/widget");
+        expect(dest).toBe(join(root, "checkouts", "widget"));
+        createRemoteCheckout(join(root, "checkouts"), "widget", "main");
+      });
+      const response = await handleSetupRepoRoutes(
+        postRepo({ source: "github", fullName: "acme-org/widget" }),
+      );
+      expect(response?.status).toBe(201);
+      expect(await response?.json()).toMatchObject({
+        id: "widget",
+        ghRepo: "acme-org/widget",
+        defaultBranch: "main",
+      });
+      expect(mints.length).toBeGreaterThan(0);
+      expect(
+        JSON.parse(readFileSync(configPath, "utf-8")).repos.widget.ghRepo,
+      ).toBe("acme-org/widget");
+    },
+  );
+
+  test.serial("lists the App's accounts for the location picker", async () => {
+    const root = localRoot();
+    setUp(root);
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      expect(String(input)).toStartWith(
+        "https://api.github.com/app/installations?",
+      );
+      return Response.json(installs);
+    }) as typeof fetch;
+    const url = new URL("http://localhost/api/setup/github/owners");
+
+    const response = await handleSetupRepoRoutes({
+      req: new Request(url),
+      url,
+      path: url.pathname,
+      publicPrefix: "",
+    } as RouteContext);
+
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({
+      appConfigured: true,
+      appInstallUrl:
+        "https://github.com/apps/open-session-create-test/installations/new",
+      owners: [
+        { login: "solo-dev", type: "User", selected: false },
+        { login: "acme-org", type: "Organization", selected: true },
+      ],
     });
   });
 });

@@ -210,7 +210,8 @@ export function buildRunInstructions(input: {
       "## Attachments\nChat attachments arrive with the message: images inline, every file " +
         "saved to disk at the path a note on that turn lists." +
         (input.sandboxed
-          ? " Those paths are on the Open Session host, not in the Sandbox."
+          ? " Images are staged in your scratch dir; other files stay on the Open " +
+            "Session host, outside the Sandbox."
           : "") +
         " The Assets tab only shows files you `write_asset`; nobody can upload there, so " +
         "never ask for that. Ask in chat when an attachment is missing.",

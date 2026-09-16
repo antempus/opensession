@@ -101,6 +101,7 @@ import {
   sessionStartContext,
 } from "./context-log";
 import { wrapContext } from "./prompt-context";
+import { stagePromptImages, withImagesNote } from "./prompt-images";
 import {
   EMPTY_REPLY_RETRY_PROMPT,
   githubCredentialUser,
@@ -2798,7 +2799,14 @@ async function* runPiAttempt(
       // Same skill expansion as the prompt path. The queue holds the expanded
       // text so the delivery match stays exact; the audit line below still
       // records what the person typed.
-      const steerText = expandSkillCommand(text, loader.getSkills().skills);
+      // Attached images are staged into this run's scratch dir, in this
+      // process, so the note names paths the engine's tools can read (see
+      // prompt-images.ts). The pending entry holds the noted text: delivery
+      // matches pi's echo against it, and a retraction replays it verbatim.
+      const steerText = withImagesNote(
+        expandSkillCommand(text, loader.getSkills().skills),
+        stagePromptImages(opts.scratchDir, images),
+      );
       steeringBoundaryPending = true;
       pendingSteers.push({ text: steerText, images, steerId });
       void liveSession.steer(steerText, piImages(images)).catch((e) => {

@@ -186,73 +186,49 @@ test("steers and accepts only the captured immutable run token", async () => {
   expect(steered).toEqual(["run-exact"]);
 });
 
-// The steer channel folds the images into the live run, but the engine text
-// must also say where they landed; the transcript row keeps the bare message
-// because the pictures already render there.
-test("hands the engine the image note while the transcript keeps the message", async () => {
+// The host echoes a bounced steer's text verbatim and the server matches that
+// echo against the receipt's bare content (takeSteerReceiptForText). Anything
+// the server appended for the engine would break that match, so a steer with
+// images travels as the person's text alone: the engine process adds the
+// on-disk image note itself (prompt-images.ts).
+test("hands the host the bare text even when images ride the steer", async () => {
   const target = { token: "run-1", runId: "run-1", generation: 1 };
-  const steered: string[] = [];
-  const persisted: string[] = [];
-  const staged: string[] = [];
+  const steered: { text: string; images: number }[] = [];
   const deps: QueuedSteerDeps = {
     target: () => target,
     prepare: async () => ({ id: "item-1", content: "Use this icon" }),
-    steer: (_token, text) => {
-      steered.push(text);
+    steer: (_token, text, images) => {
+      steered.push({ text, images: images?.length ?? 0 });
       return true;
     },
     accept: async () => true,
     reject: async () => true,
-    prepared: async (_sessionId, _itemId, _item, text) => {
-      persisted.push(text);
-    },
-    stageImages: async (sessionId, images) => {
-      staged.push(`${sessionId}:${images?.length ?? 0}`);
-      return [
-        { name: "image-1.png", path: "/uploads/session-1/image-abc.png" },
-      ];
-    },
   };
-
-  const result = await prepareAndSteerQueuedPrompt(
-    {
-      sessionId: "session-1",
-      itemId: "item-1",
-      text: "Use this icon",
-      images: [{ mediaType: "image/png", data: "aGk=" }],
-    },
-    deps,
-  );
-
-  expect(result).toBe("steered");
-  expect(staged).toEqual(["session-1:1"]);
-  expect(persisted).toEqual(["Use this icon"]);
-  expect(steered).toHaveLength(1);
-  expect(steered[0]).toStartWith("Use this icon\n\n<opensession:context");
-  expect(steered[0]).toContain(
-    "- image-1.png: /uploads/session-1/image-abc.png",
-  );
-});
-
-test("leaves a text-only steer untouched", async () => {
-  const target = { token: "run-1", runId: "run-1", generation: 1 };
-  const steered: string[] = [];
-  const deps: QueuedSteerDeps = {
-    target: () => target,
-    prepare: async () => ({ id: "item-1", content: "hello" }),
-    steer: (_token, text) => {
-      steered.push(text);
-      return true;
-    },
-    accept: async () => true,
-    reject: async () => true,
-    stageImages: async () => [],
-  };
+  const images = [{ mediaType: "image/png", data: "aGk=" }];
+  expect(
+    await prepareAndSteerQueuedPrompt(
+      {
+        sessionId: "session-1",
+        itemId: "item-1",
+        text: "Use this icon",
+        images,
+      },
+      deps,
+    ),
+  ).toBe("steered");
   expect(
     await prepareAndInterruptQueuedPrompt(
-      { sessionId: "session-1", itemId: "item-1", text: "hello" },
+      {
+        sessionId: "session-1",
+        itemId: "item-1",
+        text: "Use this icon",
+        images,
+      },
       deps,
     ),
   ).toBe("interrupted");
-  expect(steered).toEqual(["hello"]);
+  expect(steered).toEqual([
+    { text: "Use this icon", images: 1 },
+    { text: "Use this icon", images: 1 },
+  ]);
 });

@@ -146,8 +146,6 @@ import {
   creationAttachmentPath,
   parseImageDataUrls,
   prepareCreationAttachmentSources,
-  stagePromptImages,
-  withImagesNote,
   withUploadsNote,
 } from "./uploads";
 import { resolvePlainWorkspace } from "./workspace-resolve";
@@ -1628,15 +1626,9 @@ export async function openCreatedSession(
         spec.user,
         [...spec.memoryRepoIds, ...attachedRepoIds],
       );
-      // The opening turn does not pass through runSessionPrompt, so it stages
-      // its pasted images here: the model sees them inline and the note gives
-      // it their on-disk paths (see stagePromptImages).
-      const openingPromptForRun = withImagesNote(
-        retrievedMemory
-          ? `${retrievedMemory}\n\n${spec.openingPrompt}`
-          : spec.openingPrompt,
-        await stagePromptImages(bksId, spec.images),
-      );
+      const openingPromptForRun = retrievedMemory
+        ? `${retrievedMemory}\n\n${spec.openingPrompt}`
+        : spec.openingPrompt;
 
       // Sandbox session: route the OPENING turn through the same
       // launcher the prompt path uses (the session file was persisted

@@ -75,6 +75,7 @@ import {
 import { buildEngineSwitchHandoffNote } from "./fork-handoff";
 import { personaName } from "./config";
 import { wrapContext } from "./prompt-context";
+import { stagePromptImages, withImagesNote } from "./prompt-images";
 import { logInjectedContext, logStandingJson } from "./context-log";
 import {
   beginTurn,
@@ -451,11 +452,20 @@ export async function* runAgent(
       ? pendingStarts.get(osSessionId)?.values().next().value
       : undefined) ||
     crypto.randomUUID();
+  const scratchDir =
+    opts.scratchDir ??
+    (osSessionId ? ensureSessionScratch(osSessionId) : undefined);
   const effectiveOpts: RunAgentOpts = {
     ...opts,
-    scratchDir:
-      opts.scratchDir ??
-      (osSessionId ? ensureSessionScratch(osSessionId) : undefined),
+    scratchDir,
+    // Pasted images land on disk HERE, in the process that hosts the engine,
+    // so the paths the note names are real for this run's file tools: on the
+    // server for an in-process run, on the Runner or inside the Sandbox for a
+    // detached host (see prompt-images.ts).
+    prompt: withImagesNote(
+      opts.prompt,
+      stagePromptImages(scratchDir, opts.images),
+    ),
     journal: opts.journal
       ? {
           ...opts.journal,

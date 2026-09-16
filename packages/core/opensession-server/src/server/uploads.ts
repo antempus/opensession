@@ -20,9 +20,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { mkdir, writeFile } from "fs/promises";
 import { MAX_PROMPT_IMAGES } from "@tellahq/opensession-protocol/session";
-import { wrapContext } from "./prompt-context";
+import { INLINE_IMAGE_EXTENSIONS, MAX_UPLOAD_BYTES } from "./prompt-images";
+export { MAX_UPLOAD_BYTES };
 import type { ImageInput } from "./run-events";
 import { SESSIONS_DIR } from "./session-cache";
 
@@ -134,16 +134,7 @@ export const UPLOADS_DIR = `${SESSIONS_DIR}/uploads`;
 // The HTTP endpoint stages here — a brand-new session has no session id yet, so the
 // reference is resolved back (and validated) at send time.
 const STAGED_UPLOADS_DIR = `${UPLOADS_DIR}/staged`;
-// Cap so a single upload can't OOM the process. The HTTP path streams, but the
-// inline base64/WS path buffers, so keep it modest.
-export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_CREATION_ATTACHMENTS = 32;
-const INLINE_IMAGE_EXTENSIONS: Record<string, string> = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
-};
 // The reverse of INLINE_IMAGE_EXTENSIONS, for reading a staged image back off
 // disk. Deliberately the same four types: a staged ref carries no media type of
 // its own, so only extensions we can name a type for are stageable at all.
@@ -531,75 +522,6 @@ function stageUploads(
     staged.push({ name: up.name || wanted, path: p });
   }
   return staged;
-}
-
-/**
- * Put the images of a prompt on disk where the agent can reach them, and name
- * them for the note that tells it so.
- *
- * Images reach the model through the vision channel, so it can SEE a pasted
- * screenshot but, unlike a non-image attachment (stageUploads), it was never
- * told where the bytes live. Asked to commit or convert such an image, the
- * agent went looking for a file, found nothing, and invented a flow the person
- * cannot follow ("upload it in the Assets tab"). Staging by content digest is
- * idempotent: a queued, retried or steered delivery of the same image lands
- * on the same file instead of a second copy, and the same image sent twice
- * shares one path. Types without a known extension are skipped: a run needs a
- * path it can name a format for, and the vision channel still carries them.
- */
-export async function stagePromptImages(
-  sessionId: string,
-  images?: ImageInput[],
-): Promise<{ name: string; path: string }[]> {
-  if (!images?.length) return [];
-  const dir = `${UPLOADS_DIR}/${sanitizeFilename(sessionId)}`;
-  const staged: { name: string; path: string }[] = [];
-  let created = false;
-  for (const [index, image] of images.entries()) {
-    const extension = INLINE_IMAGE_EXTENSIONS[image.mediaType];
-    if (!extension) continue;
-    const bytes = Buffer.from(image.data, "base64");
-    if (!bytes.length || bytes.length > MAX_UPLOAD_BYTES) continue;
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    const path = `${dir}/image-${digest.slice(0, 16)}${extension}`;
-    if (!created) {
-      await mkdir(dir, { recursive: true });
-      created = true;
-    }
-    try {
-      // "wx" writes the file exactly once: an identical image already on disk
-      // (an earlier delivery of this prompt) keeps its bytes, and two
-      // concurrent deliveries cannot half-overwrite each other.
-      await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
-        console.warn("[uploads] Could not stage a pasted image:", error);
-        continue;
-      }
-    }
-    staged.push({ name: `image-${index + 1}${extension}`, path });
-  }
-  return staged;
-}
-
-/**
- * Tell the agent where the prompt's images live and that a chat attachment is
- * never something the person can move into Assets. Fenced: the transcript
- * already shows the pictures, so the note is model-only plumbing.
- */
-export function withImagesNote(
-  prompt: string,
-  staged: { name: string; path: string }[],
-): string {
-  if (!staged.length) return prompt;
-  const lines = staged.map((s) => `- ${s.name}: ${s.path}`).join("\n");
-  const note =
-    `The user attached ${staged.length} image(s) to this message. You can see them inline; ` +
-    `the same files are saved on disk, so read or copy them from these paths when you ` +
-    `need the file itself (to convert, commit, or publish it):\n${lines}\n` +
-    `Chat attachments never appear in the session's Assets tab and the person cannot ` +
-    `upload there. If an attachment is missing, ask them to send it again in chat.`;
-  return `${prompt}\n\n${wrapContext(note, "uploads-note")}`;
 }
 
 /** Append a note listing staged upload paths so the agent knows to read them. */

@@ -292,7 +292,9 @@ unarchived, so the next sweep retries it.
 
 A ticket that the classifier skips gets the existing "auto-triage skipped" note
 and no discussion. If the discussion cannot be opened (no agent key, Plain
-down) the run still fires, without one.
+down) the run still fires, without one. The discussion id is recorded in the
+run's durable intent as soon as Plain returns it, so a run replayed after a
+restart reports into the same discussion instead of opening a second one.
 
 ## Internal notes in English
 

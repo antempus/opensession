@@ -285,16 +285,23 @@ export function triageDiscussionThread(input: {
  * an Ask Sidekick session does, and a later message in the discussion is
  * delivered into that same session. Best effort: triage never waits on it,
  * so a failure (no agent key, Plain down) means a run with no discussion.
+ *
+ * `existingId` is the discussion a previous attempt at this same run already
+ * opened (recorded in its durable intent): a replay after a crash reports
+ * into it again instead of leaving it in progress and opening a second one.
  */
 export async function openTriageDiscussion(
   threadId: string,
+  existingId?: string,
 ): Promise<string | undefined> {
   if (!discussionAgentConfigured()) return undefined;
   try {
-    const id = await createDiscussion({
-      threadId,
-      markdownContent: TRIAGE_DISCUSSION_SEED,
-    });
+    const id =
+      existingId ||
+      (await createDiscussion({
+        threadId,
+        markdownContent: TRIAGE_DISCUSSION_SEED,
+      }));
     await withDiscussionOrder(id, () =>
       updateDiscussionAgentStatus(id, "IN_PROGRESS"),
     ).catch(() => {});

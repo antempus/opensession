@@ -5,6 +5,7 @@ import {
   beginDiscussionAction,
   cancelApprovalsFor,
   discussionOpeningPrompt,
+  openTriageDiscussion,
   resolveApproval,
   shouldAnswer,
   TRIAGE_DISCUSSION_SEED,
@@ -159,6 +160,45 @@ describe("auto-triage discussions", () => {
       expect(
         triageDiscussionThread({ ...input, eventContext }),
       ).toBeUndefined();
+  });
+
+  it("reuses the discussion a crashed attempt already opened instead of creating a second one", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalEnv = {
+      PLAIN_AGENT_API_KEY: process.env.PLAIN_AGENT_API_KEY,
+      PLAIN_AGENT_MACHINE_USER_ID: process.env.PLAIN_AGENT_MACHINE_USER_ID,
+    };
+    process.env.PLAIN_AGENT_API_KEY = "test-agent-key";
+    process.env.PLAIN_AGENT_MACHINE_USER_ID = ME;
+    const mutations: string[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const { query } = JSON.parse(String(init?.body)) as { query: string };
+      const name = /\n\s*(\w+)\(input/.exec(query)?.[1] ?? query;
+      mutations.push(name);
+      const data =
+        name === "createDiscussion"
+          ? { createDiscussion: { discussion: { id: "thd_new" }, error: null } }
+          : { [name]: { error: null } };
+      return Response.json({ data });
+    }) as typeof fetch;
+    try {
+      expect(await openTriageDiscussion("th_1", "thd_recovered")).toBe(
+        "thd_recovered",
+      );
+      expect(mutations).toEqual(["updateDiscussionAgentStatus"]);
+      mutations.length = 0;
+      expect(await openTriageDiscussion("th_1")).toBe("thd_new");
+      expect(mutations).toEqual([
+        "createDiscussion",
+        "updateDiscussionAgentStatus",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const [key, value] of Object.entries(originalEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("seeds the discussion with the agent's own message, which comes back INBOUND and is never answered", () => {

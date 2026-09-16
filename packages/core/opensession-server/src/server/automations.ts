@@ -1520,6 +1520,9 @@ type PendingAutomationIntent = {
   modelOverride?: string;
   acceptedAt: string;
   deleteAutomationAfterRun?: boolean;
+  /** The Plain discussion this run opened, recorded as soon as Plain returns
+   *  it so a replay of the intent reuses it instead of creating another. */
+  plainDiscussionId?: string;
   terminalAt?: string;
   terminalError?: string;
 };
@@ -1534,7 +1537,12 @@ const automationIntentPath = (sessionId: string) =>
     `${sessionId.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`,
   );
 
-function persistAutomationIntent(intent: PendingAutomationIntent): void {
+/** Persist a run's intent, or return the one already on disk when a replay
+ *  presents the same identity, so progress it recorded (the discussion it
+ *  opened) is reused rather than repeated. */
+function persistAutomationIntent(
+  intent: PendingAutomationIntent,
+): PendingAutomationIntent {
   mkdirSync(automationIntentDir, { recursive: true, mode: 0o700 });
   const path = automationIntentPath(intent.sessionId);
   if (existsSync(path)) {
@@ -1543,15 +1551,28 @@ function persistAutomationIntent(intent: PendingAutomationIntent): void {
     ) as PendingAutomationIntent;
     const identity = ({
       acceptedAt: _acceptedAt,
+      plainDiscussionId: _plainDiscussionId,
       terminalAt: _terminalAt,
       terminalError: _terminalError,
       ...value
     }: PendingAutomationIntent) => JSON.stringify(value);
     if (identity(existing) !== identity(intent))
       throw new Error(`Automation intent ${intent.sessionId} changed identity`);
-    return;
+    return existing;
   }
   writeJsonAtomic(path, intent, true, 0o600);
+  return intent;
+}
+
+function recordAutomationIntentDiscussion(
+  sessionId: string,
+  plainDiscussionId: string,
+): void {
+  const path = automationIntentPath(sessionId);
+  const intent = JSON.parse(
+    readFileSync(path, "utf8"),
+  ) as PendingAutomationIntent;
+  writeJsonAtomic(path, { ...intent, plainDiscussionId }, true, 0o600);
 }
 
 function recordAutomationIntentTerminal(
@@ -1714,7 +1735,7 @@ export async function runAutomation(
   }
   const bksId = options?.osSessionId || newSessionId();
   const acceptedAt = options?.acceptedAt || new Date().toISOString();
-  persistAutomationIntent({
+  const durableIntent = persistAutomationIntent({
     version: 1,
     automationId: automation.id,
     sessionId: bksId,
@@ -1755,14 +1776,25 @@ export async function runAutomation(
 
   try {
     // Open one discussion per subscriber, before any fallible run setup. Never
-    // accept a discussion id from eventContext (also public webhook input).
+    // accept a discussion id from eventContext (also public webhook input);
+    // the only id taken from outside is the one this very intent recorded
+    // before a crash, so a replay reports into that discussion again.
     const triageThreadId = triageDiscussionThread({
       trigger,
       eventKey: automation.eventKey,
       eventContext: options?.eventContext,
     });
-    if (triageThreadId)
-      plainDiscussionId = await openTriageDiscussion(triageThreadId);
+    if (triageThreadId) {
+      plainDiscussionId = await openTriageDiscussion(
+        triageThreadId,
+        durableIntent.plainDiscussionId,
+      );
+      if (
+        plainDiscussionId &&
+        plainDiscussionId !== durableIntent.plainDiscussionId
+      )
+        recordAutomationIntentDiscussion(bksId, plainDiscussionId);
+    }
 
     const runModel = automationModel(
       options?.modelOverride || automation.model,

@@ -18,6 +18,7 @@
  * concurrent hosts never read-modify-write the shared active-runs.json.
  */
 
+import { assertPersonalHostMcpNone } from "../server/personal-repo-runtime-mcp";
 import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { processIdentity } from "../server/process-identity";
 import { dirname, resolve } from "path";
@@ -109,6 +110,14 @@ if (expectedSpecHash) {
   }
 }
 const spec: RunHostSpec = JSON.parse(specBytes.toString("utf-8"));
+if (spec.personalRepo) {
+  const { assertPersonalHostMcpNone } =
+    await import("../server/personal-repo-runtime-mcp");
+  assertPersonalHostMcpNone(spec);
+  const { assertPersonalHostAdopted } =
+    await import("../server/personal-repo-runtime-host");
+  assertPersonalHostAdopted(spec);
+}
 const sockPath = `${hostDir}/${HOST_SOCK_NAME}`;
 const metaPath = `${hostDir}/${HOST_META_NAME}`;
 
@@ -521,6 +530,10 @@ function onAskUser(input: Record<string, unknown>): Promise<AskResult> {
 // tools/call to opensession over its RPC socket — so session-control/self-admin
 // tools keep working across opensession restarts (calls retry while it's down).
 function proxyMcpConfigs(): Record<string, unknown> | undefined {
+  if (spec.personalRepo) {
+    assertPersonalHostMcpNone(spec);
+    return undefined;
+  }
   const names = spec.proxyMcpServers || [];
   if (!names.length || !spec.rpcToken) return undefined;
   // WS transport: the proxies dial opensession's /rpc-ws route instead
@@ -576,6 +589,7 @@ try {
     sessionId: spec.engineSessionId || undefined,
     cwd: spec.cwd,
     mode: spec.mode,
+    personalRepo: spec.personalRepo,
     mcpGrantUser: spec.mcpGrantUser,
     model: spec.model,
     selectedModel: spec.selectedModel,
@@ -583,7 +597,7 @@ try {
     images: spec.images,
     forkSession: spec.forkSession,
     resumeSessionAt: spec.resumeSessionAt,
-    mcpServers: spec.mcpServers ?? "all",
+    mcpServers: spec.personalRepo ? [] : (spec.mcpServers ?? "all"),
     inProcessMcp: proxyMcpConfigs(),
     reposNote: spec.reposNote,
     deniedTools: spec.deniedTools,

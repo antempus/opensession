@@ -24,7 +24,6 @@ import { STRIPE_CONFIRM_TOOLS } from "../../server/runner-shared";
 import { classifyRefundApproval } from "./refund-intent";
 import {
   handleDiscussionEvent,
-  openTriageDiscussion,
   resolveDiscussionsForThread,
   type DiscussionWebhook,
 } from "./discussions";
@@ -715,17 +714,11 @@ async function gateAndFireThreadCreated(
     );
   }
 
-  // The run reports into an Ask Sidekick discussion on the ticket (its tool
-  // calls and summary), beside the note it posts; only tickets that get
-  // triaged open one.
-  const discussionId = await openTriageDiscussion(thread.id);
-
   await fireAutomationsForEvent(
     "plain:thread_created",
     JSON.stringify(
       {
         threadId: thread.id,
-        ...(discussionId ? { discussionId } : {}),
         title: thread.title || null,
         previewText: thread.previewText || null,
         status: thread.status,

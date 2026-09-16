@@ -114,6 +114,10 @@ import {
 } from "./automation-outputs";
 import { automationIntentAlreadySettled } from "./automation-intent-recovery";
 import {
+  openTriageDiscussion,
+  triageDiscussionThread,
+} from "../agents/plain/discussions";
+import {
   forgetPlainDiscussionRun,
   plainDiscussionToolResult,
   plainDiscussionToolUse,
@@ -1750,6 +1754,16 @@ export async function runAutomation(
   let discussionReply = "";
 
   try {
+    // Open one discussion per subscriber, before any fallible run setup. Never
+    // accept a discussion id from eventContext (also public webhook input).
+    const triageThreadId = triageDiscussionThread({
+      trigger,
+      eventKey: automation.eventKey,
+      eventContext: options?.eventContext,
+    });
+    if (triageThreadId)
+      plainDiscussionId = await openTriageDiscussion(triageThreadId);
+
     const runModel = automationModel(
       options?.modelOverride || automation.model,
     );
@@ -1918,8 +1932,6 @@ export async function runAutomation(
         const parsed = JSON.parse(options.eventContext);
         if (typeof parsed.threadId === "string")
           plainThreadId = parsed.threadId;
-        if (typeof parsed.discussionId === "string")
-          plainDiscussionId = parsed.discussionId;
         if (typeof parsed.title === "string" && parsed.title.trim()) {
           eventTitle = parsed.title.trim().slice(0, 100);
         }

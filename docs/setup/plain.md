@@ -269,8 +269,9 @@ is dropped silently.
 
 With the agent set up, every ticket the auto-triage flow actually triages
 (past the outbound and spam gates in `handlers.ts`) also gets an Ask Sidekick
-discussion opened by the agent on the thread before the `plain:thread_created`
-automation fires. The triage session is that discussion's session: it runs
+discussion opened by each `plain:thread_created` subscriber as its run starts,
+before model and repository setup. Subscribers get separate discussions, never a
+shared timeline. The triage session is that discussion's session: it runs
 exactly as before and still posts the diagnosis as an internal note, and on
 top of that every tool call shows on the discussion timeline and its final
 message is posted there. The discussion stays open after triage: a teammate

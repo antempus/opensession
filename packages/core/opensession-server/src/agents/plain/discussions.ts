@@ -261,6 +261,25 @@ export const TRIAGE_DISCUSSION_SEED =
   "diagnosis is posted as an internal note as before. Ask a follow-up in this " +
   "discussion to keep investigating with the same context.";
 
+/** Only the internal Plain event dispatch may open a triage discussion.
+ * Public webhook JSON is data, never authority to select a discussion. */
+export function triageDiscussionThread(input: {
+  trigger: string;
+  eventKey?: string;
+  eventContext?: string;
+}): string | undefined {
+  if (input.trigger !== "event" || input.eventKey !== "plain:thread_created")
+    return undefined;
+  try {
+    const payload = JSON.parse(input.eventContext || "null");
+    return typeof payload?.threadId === "string" && payload.threadId.trim()
+      ? payload.threadId
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Open the discussion an auto-triage run reports into, on the ticket it
  * triages. The run mirrors its tool calls and final message here exactly as

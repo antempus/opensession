@@ -9,6 +9,7 @@ import {
   resolveApproval,
   shouldAnswer,
   TRIAGE_DISCUSSION_SEED,
+  triageDiscussionThread,
   type DiscussionMessageCreatedPayload,
 } from "./discussions";
 import {
@@ -135,6 +136,32 @@ describe("approval registry", () => {
 });
 
 describe("auto-triage discussions", () => {
+  it("only opens discussions for trusted Plain event runs, never public payload ids", () => {
+    const input = {
+      trigger: "event",
+      eventKey: "plain:thread_created",
+      eventContext: JSON.stringify({
+        threadId: "th_1",
+        discussionId: "attacker",
+      }),
+    };
+    expect(triageDiscussionThread(input)).toBe("th_1");
+    for (const trigger of ["webhook", "manual", "cron"])
+      expect(triageDiscussionThread({ ...input, trigger })).toBeUndefined();
+    expect(
+      triageDiscussionThread({ ...input, eventKey: "other" }),
+    ).toBeUndefined();
+    for (const eventContext of [
+      "{",
+      "null",
+      '{"discussionId":"attacker"}',
+      '{"threadId":""}',
+    ])
+      expect(
+        triageDiscussionThread({ ...input, eventContext }),
+      ).toBeUndefined();
+  });
+
   it("resolves the discussions of the done ticket's sessions, and only those", () => {
     const sessions = [
       { plainThreadId: "th_done", plainDiscussionId: "thd_a" },

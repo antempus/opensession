@@ -280,6 +280,7 @@ async function persistSession(session: SlackSession): Promise<void> {
     if (await bf.exists()) {
       const branchData = JSON.parse(await bf.text());
       branchData.claudeSessionId = session.claudeSessionId;
+      if (session.mode) branchData.mode = session.mode;
       branchData.lastActivity = session.lastActivity;
       writeJsonAtomic(branchFile, branchData);
     }
@@ -717,6 +718,7 @@ export async function processMessage(
       worktreeDir: msg.worktreeDir || null,
       branch: msg.branch || null,
       repoId: msg.repoId || null,
+      mode: msg.mode ?? "code",
       // Name it after the message now. The generated summary title below
       // takes ~15s to land, and until it does the UI falls back to the
       // session key — a session called "C0BE8KVFBEX-1787038283.876079".
@@ -743,11 +745,21 @@ export async function processMessage(
   // (persistSession keys on session.branch), so it surfaces in the UI as a
   // dead "No engine session to resume" row — while the run itself executes in
   // the repo's main checkout (2026-07-25, screen-export-mixed-dims). Never
-  // switch an existing worktree — adopt only when the session has none.
-  if (!createdSession && !session.worktreeDir && msg.worktreeDir) {
+  // switch an existing code worktree. An ask checkout must also be replaced
+  // when the user starts a code task; it is not a writable task workspace.
+  if (
+    !createdSession &&
+    msg.worktreeDir &&
+    (!session.worktreeDir || (session.mode === "ask" && msg.mode === "code"))
+  ) {
     session.worktreeDir = msg.worktreeDir;
     session.branch = msg.branch || session.branch;
     if (msg.repoId) session.repoId = msg.repoId;
+    await persistSession(session);
+  }
+
+  if (msg.mode && session.mode !== msg.mode) {
+    session.mode = msg.mode;
     await persistSession(session);
   }
 
@@ -1066,7 +1078,7 @@ export async function processMessage(
       images,
       sessionId: session.claudeSessionId || undefined,
       cwd,
-      mode: "code",
+      mode: session.mode ?? "code",
       model: toPiModel(session.model || getDefaultModel()),
       // Interactive Slack runs are as interactive as the web UI: when the
       // primary model exhausts (e.g. the small Fable weekly bucket), let
@@ -1794,6 +1806,7 @@ Please help with this request. Start by exploring the codebase to understand wha
       userName,
       userId: user,
       isNewSession: !askSession,
+      mode: "ask",
       // No worktreeDir → runs conversationally in the default repo's main
       // checkout; a non-default repo verdict pins it to that repo's checkout.
       worktreeDir: askCwd,
@@ -1813,7 +1826,7 @@ Please help with this request. Start by exploring the codebase to understand wha
     (await loadSession(sessionKey)) ??
     undefined;
   if (existingCodeSession) activeSessions.set(sessionKey, existingCodeSession);
-  if (existingCodeSession?.worktreeDir) {
+  if (existingCodeSession?.worktreeDir && existingCodeSession.mode !== "ask") {
     const intro = context
       ? `${userName} tagged me in a Slack thread with this context:\n\n---\n${context}\n---\n\nTheir message: "${cleanText}"`
       : `${userName} tagged me in a Slack channel with this message: "${cleanText}"`;
@@ -1826,6 +1839,7 @@ Please help with this request. Start by exploring the codebase to understand wha
       userName,
       userId: user,
       isNewSession: false,
+      mode: "code",
       files: mergeFileRefs(files, threadFiles),
     });
     return;
@@ -1887,6 +1901,7 @@ ${where} Please help with this request. Start by exploring the codebase to under
     userName,
     userId: user,
     isNewSession: !existingCodeSession,
+    mode: "code",
     worktreeDir,
     branch,
     repoId: isDefaultRepo ? undefined : repo.id,

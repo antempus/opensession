@@ -162,7 +162,7 @@ describe("auto-triage discussions", () => {
       ).toBeUndefined();
   });
 
-  it("reuses the discussion a crashed attempt already opened instead of creating a second one", async () => {
+  it("reuses the discussion a crashed attempt already opened, and records a new one before marking it in progress", async () => {
     const originalFetch = globalThis.fetch;
     const originalEnv = {
       PLAIN_AGENT_API_KEY: process.env.PLAIN_AGENT_API_KEY,
@@ -181,15 +181,21 @@ describe("auto-triage discussions", () => {
           : { [name]: { error: null } };
       return Response.json({ data });
     }) as typeof fetch;
+    const record = (id: string) => mutations.push(`record:${id}`);
     try {
-      expect(await openTriageDiscussion("th_1", "thd_recovered")).toBe(
+      expect(await openTriageDiscussion("th_1", "thd_recovered", record)).toBe(
         "thd_recovered",
       );
       expect(mutations).toEqual(["updateDiscussionAgentStatus"]);
       mutations.length = 0;
-      expect(await openTriageDiscussion("th_1")).toBe("thd_new");
+      // The id is recorded as soon as Plain returns it, so an exit during
+      // the status update cannot lose the discussion to a replay.
+      expect(await openTriageDiscussion("th_1", undefined, record)).toBe(
+        "thd_new",
+      );
       expect(mutations).toEqual([
         "createDiscussion",
+        "record:thd_new",
         "updateDiscussionAgentStatus",
       ]);
     } finally {

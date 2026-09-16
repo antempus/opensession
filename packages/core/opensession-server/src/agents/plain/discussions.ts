@@ -289,10 +289,14 @@ export function triageDiscussionThread(input: {
  * `existingId` is the discussion a previous attempt at this same run already
  * opened (recorded in its durable intent): a replay after a crash reports
  * into it again instead of leaving it in progress and opening a second one.
+ * `onCreated` is how the caller records a new id durably; it runs as soon as
+ * Plain returns the id, before the status update is awaited, so a process
+ * exit during that second call cannot lose the discussion to a replay.
  */
 export async function openTriageDiscussion(
   threadId: string,
   existingId?: string,
+  onCreated?: (id: string) => void,
 ): Promise<string | undefined> {
   if (!discussionAgentConfigured()) return undefined;
   try {
@@ -302,6 +306,15 @@ export async function openTriageDiscussion(
         threadId,
         markdownContent: TRIAGE_DISCUSSION_SEED,
       }));
+    if (id !== existingId) {
+      try {
+        onCreated?.(id);
+      } catch (e) {
+        // The run still reports into the discussion; only a replay after a
+        // crash could open a second one.
+        console.warn(`[plain] Could not record discussion ${id}:`, e);
+      }
+    }
     await withDiscussionOrder(id, () =>
       updateDiscussionAgentStatus(id, "IN_PROGRESS"),
     ).catch(() => {});

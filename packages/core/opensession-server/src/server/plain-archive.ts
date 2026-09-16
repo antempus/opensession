@@ -29,11 +29,15 @@ type PlainSessionCandidate = { data: NativeSessionFile };
 type SessionProjector = typeof executeSessionProjection;
 type DiscussionResolver = (discussionId: string) => Promise<void>;
 
-/** Resolve the discussion a triage session reports into. Without an agent key
- *  there is nothing to resolve, so archival proceeds as before. Throws on
- *  failure so the caller keeps the session for a later retry. */
-async function resolvePlainDiscussion(discussionId: string): Promise<void> {
-  if (!discussionAgentConfigured()) return;
+/** Resolve the discussion a triage session reports into. Throws on failure,
+ *  a missing agent key included (the session proves the discussion exists,
+ *  and an archived session never comes back to the sweep), so the caller
+ *  keeps the session for a later retry. */
+export async function resolvePlainDiscussion(
+  discussionId: string,
+): Promise<void> {
+  if (!discussionAgentConfigured())
+    throw new Error("Plain discussion agent is not configured");
   await withDiscussionOrder(discussionId, () =>
     resolveDiscussion(discussionId),
   );

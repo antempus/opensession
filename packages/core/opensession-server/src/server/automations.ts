@@ -1778,23 +1778,20 @@ export async function runAutomation(
     // Open one discussion per subscriber, before any fallible run setup. Never
     // accept a discussion id from eventContext (also public webhook input);
     // the only id taken from outside is the one this very intent recorded
-    // before a crash, so a replay reports into that discussion again.
+    // before a crash, so a replay reports into that discussion again. A new
+    // id is recorded the moment Plain returns it, before the discussion is
+    // marked in progress, so an exit during that call cannot lose it.
     const triageThreadId = triageDiscussionThread({
       trigger,
       eventKey: automation.eventKey,
       eventContext: options?.eventContext,
     });
-    if (triageThreadId) {
+    if (triageThreadId)
       plainDiscussionId = await openTriageDiscussion(
         triageThreadId,
         durableIntent.plainDiscussionId,
+        (id) => recordAutomationIntentDiscussion(bksId, id),
       );
-      if (
-        plainDiscussionId &&
-        plainDiscussionId !== durableIntent.plainDiscussionId
-      )
-        recordAutomationIntentDiscussion(bksId, plainDiscussionId);
-    }
 
     const runModel = automationModel(
       options?.modelOverride || automation.model,

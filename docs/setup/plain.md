@@ -106,8 +106,8 @@ minutes, checking up to 40 distinct threads with active linked sessions per
 pass. The webhook gives immediate archival; the sweep covers missed status
 events. Both run the same archive path (`server/plain-archive.ts`): a session
 with an auto-triage discussion is archived only after that discussion is
-resolved, so a resolution that fails (Plain down) leaves the session
-unarchived and the next webhook or sweep pass retries it.
+resolved, so a resolution that fails (Plain down, agent key missing) leaves the
+session unarchived and the next webhook or sweep pass retries it.
 
 ### New-ticket filtering and routing
 
@@ -287,13 +287,14 @@ card). A turn relayed from the discussion is sent as `Plain`, which counts as a
 machine actor: it bills no subscription and unlocks no spawn suite. When the
 ticket reaches DONE, whether the status webhook reports it or the periodic
 DONE sweep catches a missed one, the discussion is resolved and the session
-then archived. A resolution that fails (Plain down) leaves the session
-unarchived, so the next sweep retries it.
+then archived. A resolution that fails (Plain down, agent key missing) leaves
+the session unarchived, so the next sweep retries it.
 
 A ticket that the classifier skips gets the existing "auto-triage skipped" note
 and no discussion. If the discussion cannot be opened (no agent key, Plain
 down) the run still fires, without one. The discussion id is recorded in the
-run's durable intent as soon as Plain returns it, so a run replayed after a
+run's durable intent the moment Plain returns it, before the discussion is
+marked in progress or the run does anything else, so a run replayed after a
 restart reports into the same discussion instead of opening a second one.
 
 ## Internal notes in English

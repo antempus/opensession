@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { archivePlainSessionCandidates } from "./plain-archive";
+import {
+  archivePlainSessionCandidates,
+  resolvePlainDiscussion,
+} from "./plain-archive";
 import type { NativeSessionFile } from "./types";
 
 describe("Plain archive sweep", () => {
@@ -99,5 +102,24 @@ describe("Plain archive sweep", () => {
     expect(projected).toEqual(["healthy"]);
     expect(failures).toHaveLength(1);
     expect(failures[0]?.[0]).toBe("plain-down");
+  });
+
+  test("treats a missing agent key as a resolution failure instead of archiving past the discussion", async () => {
+    const saved = {
+      PLAIN_AGENT_API_KEY: process.env.PLAIN_AGENT_API_KEY,
+      PLAIN_API_KEY: process.env.PLAIN_API_KEY,
+    };
+    delete process.env.PLAIN_AGENT_API_KEY;
+    delete process.env.PLAIN_API_KEY;
+    try {
+      await expect(resolvePlainDiscussion("thd_a")).rejects.toThrow(
+        "not configured",
+      );
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });

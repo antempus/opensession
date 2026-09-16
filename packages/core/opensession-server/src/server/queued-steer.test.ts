@@ -190,7 +190,7 @@ test("steers and accepts only the captured immutable run token", async () => {
 // echo against the receipt's bare content (takeSteerReceiptForText). Anything
 // the server appended for the engine would break that match, so a steer with
 // images travels as the person's text alone: the engine process adds the
-// on-disk image note itself (prompt-images.ts).
+// on-disk image note itself (prompt-attachments.ts).
 test("hands the host the bare text even when images ride the steer", async () => {
   const target = { token: "run-1", runId: "run-1", generation: 1 };
   const steered: { text: string; images: number }[] = [];

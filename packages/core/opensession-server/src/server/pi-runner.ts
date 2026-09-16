@@ -101,7 +101,7 @@ import {
   sessionStartContext,
 } from "./context-log";
 import { wrapContext } from "./prompt-context";
-import { stagePromptImages, withImagesNote } from "./prompt-images";
+import { stagePromptImages, withImagesNote } from "./prompt-attachments";
 import {
   EMPTY_REPLY_RETRY_PROMPT,
   githubCredentialUser,
@@ -2801,7 +2801,7 @@ async function* runPiAttempt(
       // records what the person typed.
       // Attached images are staged into this run's scratch dir, in this
       // process, so the note names paths the engine's tools can read (see
-      // prompt-images.ts). The pending entry holds the noted text: delivery
+      // prompt-attachments.ts). The pending entry holds the noted text: delivery
       // matches pi's echo against it, and a retraction replays it verbatim.
       const steerText = withImagesNote(
         expandSkillCommand(text, loader.getSkills().skills),

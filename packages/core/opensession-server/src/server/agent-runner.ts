@@ -23,7 +23,7 @@ import {
   isRunStateUnsettled,
   transitionRunState,
 } from "./run-state";
-import type { StreamEvent, ImageInput } from "./run-events";
+import type { StreamEvent, ImageInput, PromptFile } from "./run-events";
 import { isShuttingDown } from "./shutdown-state";
 import { hasPendingOpening } from "./session-state-events";
 import {
@@ -75,7 +75,12 @@ import {
 import { buildEngineSwitchHandoffNote } from "./fork-handoff";
 import { personaName } from "./config";
 import { wrapContext } from "./prompt-context";
-import { stagePromptImages, withImagesNote } from "./prompt-images";
+import {
+  stagePromptFiles,
+  stagePromptImages,
+  withFilesNote,
+  withImagesNote,
+} from "./prompt-attachments";
 import { logInjectedContext, logStandingJson } from "./context-log";
 import {
   beginTurn,
@@ -165,6 +170,9 @@ export interface RunAgentOpts {
   prReviewer?: string;
   /** Images attached to the opening message. */
   images?: ImageInput[];
+  /** Non-image attachments shipped inline to a host on another machine; the
+   *  run stages them into scratch and tells the model where. */
+  files?: PromptFile[];
   /**
    * Stable uuid for the prompt's user transcript line. Callers that persist
    * the user line at intake pass it so the runner's own transcript write
@@ -461,10 +469,10 @@ export async function* runAgent(
     // Pasted images land on disk HERE, in the process that hosts the engine,
     // so the paths the note names are real for this run's file tools: on the
     // server for an in-process run, on the Runner or inside the Sandbox for a
-    // detached host (see prompt-images.ts).
-    prompt: withImagesNote(
-      opts.prompt,
-      stagePromptImages(scratchDir, opts.images),
+    // detached host (see prompt-attachments.ts).
+    prompt: withFilesNote(
+      withImagesNote(opts.prompt, stagePromptImages(scratchDir, opts.images)),
+      stagePromptFiles(scratchDir, opts.files),
     ),
     journal: opts.journal
       ? {

@@ -35,7 +35,7 @@ describe("buildRunInstructions", () => {
       "every file saved to disk at the path a note on that turn lists",
     );
     expect(prompt).toContain("nobody can upload there, so never ask for that");
-    expect(prompt).not.toContain("outside the Sandbox");
+    expect(prompt).not.toContain("not reachable from the Sandbox");
 
     const sandboxed = buildRunInstructions({
       isAsk: true,
@@ -43,7 +43,7 @@ describe("buildRunInstructions", () => {
       inProcessMcp: { "opensession-assets": {} },
     });
     expect(sandboxed).toContain(
-      "Images are staged in your scratch dir; other files stay on the Open Session host, outside the Sandbox.",
+      "Open Session host paths are not reachable from the Sandbox; use the scratch copies the note lists.",
     );
 
     expect(

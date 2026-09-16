@@ -102,15 +102,3 @@ test("continuation and detached host forward mode to the credential selector", a
   ).text();
   expect(runner).toMatch(/runGithubEnv\(\{\s*isCode: mode === "code",/);
 });
-
-test("Slack intent is persisted and direct runs honor the same mode", async () => {
-  const handlers = await Bun.file(
-    new URL("../agents/slack/handlers.ts", import.meta.url),
-  ).text();
-  expect(handlers).toContain('mode: msg.mode ?? "code",');
-  expect(handlers).toContain('mode: session.mode ?? "code",');
-  expect(handlers).toMatch(/isNewSession: !askSession,\s*mode: "ask",/);
-  expect(handlers).toMatch(
-    /isNewSession: !existingCodeSession,\s*mode: "code",/,
-  );
-});

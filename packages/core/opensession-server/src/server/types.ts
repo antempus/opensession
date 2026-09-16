@@ -318,6 +318,8 @@ export interface UnifiedSession {
    *  posts here) — a reply in one of these threads drives THIS session instead
    *  of starting a new one (thread index in slack-links.ts). */
   slackThreads?: Array<{ channel: string; threadTs: string }>;
+  /** Slack intake identity; execution still belongs to a native session. */
+  slackOrigin?: SlackSessionOrigin;
   // Source-specific
   linearIssue?: { identifier: string; title: string; url?: string };
   slackThread?: { channel: string; threadTs: string };
@@ -368,9 +370,14 @@ export interface UnifiedSession {
 // src/agents/slack/state.ts) narrows it to the fields the loop always has.
 // saveSession merges over whatever is already on disk rather than projecting a
 // fixed field list, so keys written by other writers survive a write.
+export interface SlackSessionOrigin {
+  sessionKey: string;
+  channel: string;
+  threadTs: string;
+  messageTs: string;
+}
+
 export interface SlackSessionFile {
-  /** Allocation kind of worktreeDir, independent of the current turn mode. */
-  workspaceMode?: "ask" | "code";
   /** Legacy Slack runs used code mode; explicit ask sessions remain read-only. */
   mode?: "ask" | "code";
   branch?: string | null;
@@ -676,6 +683,8 @@ export interface NativeSessionFile {
   };
   /** Slack threads this session posted to (see UnifiedSession.slackThreads). */
   slackThreads?: Array<{ channel: string; threadTs: string }>;
+  /** Slack intake identity; execution still belongs to a native session. */
+  slackOrigin?: SlackSessionOrigin;
   mcpServers?: string[]; // External MCP servers to load for this session; empty = none (minimal context)
   /** Sandbox opt-in (see docs/self-hosting-sandboxes.md): recorded at create time when the
    *  creator asked for a sandbox. `provider` is the effective provider id at

@@ -29,47 +29,6 @@ export interface SlackSession extends SlackSessionFile {
   lastActivity: string;
 }
 
-/** Workspace allocation is independent of the current turn's permissions.
- * Legacy code worktrees carry a branch; legacy mode-less Slack runs were code. */
-export function hasSlackCodeWorkspace(
-  session: SlackSessionFile | undefined,
-): boolean {
-  return (
-    !!session?.worktreeDir &&
-    (session.workspaceMode ??
-      (session.branch ? "code" : (session.mode ?? "code"))) === "code"
-  );
-}
-
-export function updateSlackSessionWorkspace(
-  session: SlackSession,
-  message: Pick<SlackSessionFile, "worktreeDir" | "branch" | "repoId" | "mode">,
-): boolean {
-  let changed = false;
-  // Record allocation before changing turn mode, including branch-less shared
-  // code checkouts. A later ask must not erase their workspace provenance.
-  if (session.worktreeDir && !session.workspaceMode) {
-    session.workspaceMode = hasSlackCodeWorkspace(session) ? "code" : "ask";
-    changed = true;
-  }
-  if (
-    message.worktreeDir &&
-    (!session.worktreeDir ||
-      (message.mode === "code" && !hasSlackCodeWorkspace(session)))
-  ) {
-    session.worktreeDir = message.worktreeDir;
-    session.branch = message.branch || session.branch;
-    if (message.repoId) session.repoId = message.repoId;
-    session.workspaceMode = message.mode ?? "code";
-    changed = true;
-  }
-  if (message.mode && session.mode !== message.mode) {
-    session.mode = message.mode;
-    changed = true;
-  }
-  return changed;
-}
-
 export interface PendingAnswer {
   resolve: (answer: string) => void;
   messageTs: string;

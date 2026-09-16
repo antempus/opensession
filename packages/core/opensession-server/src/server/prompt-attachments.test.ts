@@ -30,8 +30,8 @@ const brief = {
 };
 
 describe("stagePromptImages", () => {
-  test("stages each image once, by content, under the scratch dir", () => {
-    const first = stagePromptImages(SCRATCH, [png, png]);
+  test("stages each image once, by content, under the scratch dir", async () => {
+    const first = await stagePromptImages(SCRATCH, [png, png]);
     expect(first.map((s) => s.name)).toEqual(["image-1.png", "image-2.png"]);
     // The same bytes share one file, so a retried or steered delivery of the
     // same screenshot never piles up copies.
@@ -39,18 +39,18 @@ describe("stagePromptImages", () => {
     expect(first[0].path).toStartWith(`${SCRATCH}/attachments/image-`);
     expect(readFileSync(first[0].path)).toEqual(PNG);
 
-    const again = stagePromptImages(SCRATCH, [png]);
+    const again = await stagePromptImages(SCRATCH, [png]);
     expect(again[0].path).toBe(first[0].path);
     expect(readFileSync(again[0].path)).toEqual(PNG);
   });
 
-  test("skips what it cannot name or store, and everything without a scratch dir", () => {
-    expect(stagePromptImages(SCRATCH, undefined)).toEqual([]);
-    expect(stagePromptImages(SCRATCH, [])).toEqual([]);
+  test("skips what it cannot name or store, and everything without a scratch dir", async () => {
+    expect(await stagePromptImages(SCRATCH, undefined)).toEqual([]);
+    expect(await stagePromptImages(SCRATCH, [])).toEqual([]);
     // No scratch dir (an unusable session id or an fs failure upstream): the
     // vision channel still carries the picture, there is just no path to name.
-    expect(stagePromptImages(undefined, [png])).toEqual([]);
-    const staged = stagePromptImages(SCRATCH, [
+    expect(await stagePromptImages(undefined, [png])).toEqual([]);
+    const staged = await stagePromptImages(SCRATCH, [
       { mediaType: "image/heic", data: PNG.toString("base64") },
       { mediaType: "image/png", data: "" },
       png,
@@ -61,24 +61,26 @@ describe("stagePromptImages", () => {
 });
 
 describe("stagePromptFiles", () => {
-  test("keeps the person's name, fenced by a content digest", () => {
-    const [staged] = stagePromptFiles(SCRATCH, [brief]);
+  test("keeps the person's name, fenced by a content digest", async () => {
+    const [staged] = await stagePromptFiles(SCRATCH, [brief]);
     expect(staged.name).toBe("brief.pdf");
     expect(staged.path).toMatch(
       new RegExp(`^${SCRATCH}/attachments/[0-9a-f]{16}-brief\\.pdf$`),
     );
     expect(readFileSync(staged.path, "utf8")).toBe("%PDF-1.4");
     // Same bytes, same file: a redelivery lands where the first one did.
-    expect(stagePromptFiles(SCRATCH, [brief])[0].path).toBe(staged.path);
+    expect((await stagePromptFiles(SCRATCH, [brief]))[0].path).toBe(
+      staged.path,
+    );
     // Different bytes under the same name stay apart.
-    const other = stagePromptFiles(SCRATCH, [
+    const other = await stagePromptFiles(SCRATCH, [
       { name: "brief.pdf", data: Buffer.from("%PDF-1.7").toString("base64") },
     ]);
     expect(other[0].path).not.toBe(staged.path);
   });
 
-  test("sanitizes the on-disk name and drops what it cannot store", () => {
-    const [staged] = stagePromptFiles(SCRATCH, [
+  test("sanitizes the on-disk name and drops what it cannot store", async () => {
+    const [staged] = await stagePromptFiles(SCRATCH, [
       {
         name: "../../etc/pass wd?.txt",
         data: Buffer.from("x").toString("base64"),
@@ -86,12 +88,12 @@ describe("stagePromptFiles", () => {
     ]);
     expect(staged.name).toBe("../../etc/pass wd?.txt");
     expect(staged.path).toMatch(/\/attachments\/[0-9a-f]{16}-pass wd_\.txt$/);
-    expect(stagePromptFiles(undefined, [brief])).toEqual([]);
-    expect(stagePromptFiles(SCRATCH, [{ name: "empty", data: "" }])).toEqual(
-      [],
-    );
+    expect(await stagePromptFiles(undefined, [brief])).toEqual([]);
     expect(
-      stagePromptFiles(SCRATCH, [
+      await stagePromptFiles(SCRATCH, [{ name: "empty", data: "" }]),
+    ).toEqual([]);
+    expect(
+      await stagePromptFiles(SCRATCH, [
         {
           name: "huge.bin",
           data: Buffer.alloc(MAX_SHIPPED_ATTACHMENT_BYTES + 1).toString(
@@ -104,8 +106,8 @@ describe("stagePromptFiles", () => {
 });
 
 describe("withImagesNote", () => {
-  test("fences the note so the transcript shows only the message", () => {
-    const staged = stagePromptImages(SCRATCH, [png]);
+  test("fences the note so the transcript shows only the message", async () => {
+    const staged = await stagePromptImages(SCRATCH, [png]);
     const prompt = withImagesNote("Use this icon", staged);
     expect(prompt).toStartWith(
       'Use this icon\n\n<opensession:context source="uploads-note">',
@@ -117,16 +119,16 @@ describe("withImagesNote", () => {
     expect(withImagesNote("plain", [])).toBe("plain");
   });
 
-  test("does not stack a second note on a prompt that already carries it", () => {
-    const staged = stagePromptImages(SCRATCH, [png]);
+  test("does not stack a second note on a prompt that already carries it", async () => {
+    const staged = await stagePromptImages(SCRATCH, [png]);
     const once = withImagesNote("Use this icon", staged);
     expect(withImagesNote(once, staged)).toBe(once);
   });
 });
 
 describe("withFilesNote", () => {
-  test("points the model at the scratch copies and past the host paths", () => {
-    const staged = stagePromptFiles(SCRATCH, [brief]);
+  test("points the model at the scratch copies and past the host paths", async () => {
+    const staged = await stagePromptFiles(SCRATCH, [brief]);
     const hostNote =
       "[The user attached 1 file(s), saved to disk — read them with your file tools if relevant:\n- brief.pdf: /srv/uploads/os-1/brief.pdf\n]";
     const prompt = withFilesNote(`Summarize this\n\n${hostNote}`, staged);

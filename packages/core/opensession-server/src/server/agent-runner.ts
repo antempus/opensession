@@ -469,10 +469,14 @@ export async function* runAgent(
     // Pasted images land on disk HERE, in the process that hosts the engine,
     // so the paths the note names are real for this run's file tools: on the
     // server for an in-process run, on the Runner or inside the Sandbox for a
-    // detached host (see prompt-attachments.ts).
+    // detached host (see prompt-attachments.ts). Awaited, not blocking: an
+    // in-process run shares the gateway's event loop.
     prompt: withFilesNote(
-      withImagesNote(opts.prompt, stagePromptImages(scratchDir, opts.images)),
-      stagePromptFiles(scratchDir, opts.files),
+      withImagesNote(
+        opts.prompt,
+        await stagePromptImages(scratchDir, opts.images),
+      ),
+      await stagePromptFiles(scratchDir, opts.files),
     ),
     journal: opts.journal
       ? {

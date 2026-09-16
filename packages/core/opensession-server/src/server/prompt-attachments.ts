@@ -19,13 +19,14 @@
  * Staging by content digest is idempotent: a retried, requeued or steered
  * delivery of the same bytes lands on the same file instead of a second copy.
  *
- * Synchronous on purpose: pi's steer accepts a message synchronously (its
- * boolean means the engine queue holds the message and a retraction rebuilds
- * that queue in the same tick), the bytes are bounded, and the caller is the
- * engine's own process, not the gateway.
+ * Asynchronous throughout: an in-process run (a Slack turn, the web fallback)
+ * hosts the engine on the gateway's own event loop, and six screenshots are
+ * tens of megabytes to decode, hash and write. The digest goes through
+ * crypto.subtle and the writes through fs/promises so none of it stalls
+ * HTTP or WebSocket traffic. pi-runner keeps its steer bookkeeping
+ * synchronous and serializes the staging in front of the engine enqueue.
  */
-import { createHash } from "crypto";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdir, writeFile } from "fs/promises";
 import { wrapContext } from "./prompt-context";
 import type { ImageInput, PromptFile } from "./run-events";
 
@@ -65,16 +66,16 @@ export function sanitizeAttachmentName(name: string): string {
 /** Write one attachment exactly once under `<scratch>/attachments`. "wx"
  *  keeps an identical file's bytes and stops two deliveries half-overwriting
  *  each other. Undefined when the bytes could not be written. */
-function stageBytes(
+async function stageBytes(
   scratchDir: string,
   fileName: string,
   bytes: Buffer,
-): string | undefined {
+): Promise<string | undefined> {
   const dir = `${scratchDir}/attachments`;
   const path = `${dir}/${fileName}`;
   try {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+    await mkdir(dir, { recursive: true });
+    await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
       console.warn(
@@ -87,17 +88,20 @@ function stageBytes(
   return path;
 }
 
-function digestOf(bytes: Buffer): string {
-  return createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+async function digestOf(bytes: Buffer): Promise<string> {
+  // A copy: Buffer's backing store is typed ArrayBufferLike, which subtle
+  // rejects; the bytes are bounded and the digest is what's expensive.
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+  return Buffer.from(digest).toString("hex").slice(0, 16);
 }
 
 /** Stage a prompt's images under the session scratch dir. Types without a
  *  known extension are skipped: a run needs a path it can name a format for,
  *  and the vision channel still carries them. */
-export function stagePromptImages(
+export async function stagePromptImages(
   scratchDir: string | undefined,
   images?: ImageInput[],
-): StagedAttachment[] {
+): Promise<StagedAttachment[]> {
   if (!scratchDir || !images?.length) return [];
   const staged: StagedAttachment[] = [];
   for (const [index, image] of images.entries()) {
@@ -105,9 +109,9 @@ export function stagePromptImages(
     if (!extension) continue;
     const bytes = Buffer.from(image.data, "base64");
     if (!bytes.length || bytes.length > MAX_UPLOAD_BYTES) continue;
-    const path = stageBytes(
+    const path = await stageBytes(
       scratchDir,
-      `image-${digestOf(bytes)}${extension}`,
+      `image-${await digestOf(bytes)}${extension}`,
       bytes,
     );
     if (path) staged.push({ name: `image-${index + 1}${extension}`, path });
@@ -118,17 +122,21 @@ export function stagePromptImages(
 /** Stage the non-image attachments a remote host received inline. The
  *  digest prefix keeps two different files with the same name apart and
  *  makes a redelivery land on the file already there. */
-export function stagePromptFiles(
+export async function stagePromptFiles(
   scratchDir: string | undefined,
   files?: PromptFile[],
-): StagedAttachment[] {
+): Promise<StagedAttachment[]> {
   if (!scratchDir || !files?.length) return [];
   const staged: StagedAttachment[] = [];
   for (const file of files) {
     const bytes = Buffer.from(file.data, "base64");
     if (!bytes.length || bytes.length > MAX_SHIPPED_ATTACHMENT_BYTES) continue;
     const name = sanitizeAttachmentName(file.name);
-    const path = stageBytes(scratchDir, `${digestOf(bytes)}-${name}`, bytes);
+    const path = await stageBytes(
+      scratchDir,
+      `${await digestOf(bytes)}-${name}`,
+      bytes,
+    );
     if (path) staged.push({ name: file.name || name, path });
   }
   return staged;

@@ -245,6 +245,39 @@ describe("spawnTaskImpl", () => {
     expect(h.created).toHaveLength(0);
   });
 
+  it("refuses from an automation-owned session unless a person is prompting it", async () => {
+    const h = makeHarness();
+    const parent = `bks-test-auto-${++uniq}`;
+    h.files.set(parent, { id: parent, automation: "Editor Agent review" });
+    const refused = await spawnTaskImpl(
+      { prompt: "Fix the validator.", mode: "ask" },
+      ctx(parent),
+      h.deps,
+    );
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error).toContain("not available from automation sessions");
+    expect(h.created).toHaveLength(0);
+
+    // The same session on a person's turn: the humanResume shape spawns, and
+    // the child belongs to that person rather than to the automation.
+    const res = await spawnTaskImpl(
+      { prompt: "Fix the validator.", mode: "ask" },
+      {
+        createdBy: "Michiel",
+        isAdmin: false,
+        humanResume: true,
+        currentSessionId: parent,
+      },
+      h.deps,
+    );
+    expect(res.ok).toBe(true);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0].user).toBe("Michiel");
+    expect(h.created[0].parentSessionId).toBe(parent);
+    expect(h.created[0].reportBack).toBe(true);
+  });
+
   it("bounds depth through the in-memory map before the child's file exists", async () => {
     // parent (depth 0) → child (1) → grandchild (2) → refused, with NO child
     // session files at all: the in-process map alone must carry the guard.
@@ -316,16 +349,19 @@ describe("spawnTaskImpl", () => {
     expect(h1.created.length + h2.created.length + h3.created.length).toBe(0);
   });
 
-  it("requires a branch for code mode unless the parent's code worktree is sharable", async () => {
+  it("isolates a code child when the parent's worktree is not sharable", async () => {
     const h = makeHarness();
     const parent = `bks-test-parent-${++uniq}`;
     h.files.set(parent, { id: parent });
-    // ask-mode parent → no worktree to share → refuse without a branch
+    // ask-mode parent → no worktree to share → the child gets its own
+    // generated branch and worktree instead of a refusal
     h.sessions.set(parent, { id: parent, mode: "ask" });
     const r1 = await spawnTaskImpl({ prompt: "x" }, ctx(parent), h.deps);
-    expect(r1.ok).toBe(false);
-    expect((r1 as { error: string }).error).toContain("branch");
-    // code-mode parent in the same repo → sharable → allowed without a branch
+    expect(r1.ok).toBe(true);
+    expect(h.created[0].mode).toBe("code");
+    expect(h.created[0].branch).toBeUndefined();
+    expect(h.created[0].isolatedWorktree).toBe(true);
+    // code-mode parent in the same repo → sharable → shares without a branch
     h.sessions.set(parent, {
       id: parent,
       mode: "code",
@@ -334,7 +370,8 @@ describe("spawnTaskImpl", () => {
     });
     const r2 = await spawnTaskImpl({ prompt: "x" }, ctx(parent), h.deps);
     expect(r2.ok).toBe(true);
-    expect(h.created[0].mode).toBe("code");
+    expect(h.created[1].mode).toBe("code");
+    expect(h.created[1].isolatedWorktree).toBeUndefined();
     // explicit branch always works
     const r3 = await spawnTaskImpl(
       { prompt: "x", branch: "task/foo" },

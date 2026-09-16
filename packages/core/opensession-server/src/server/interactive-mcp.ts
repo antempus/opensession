@@ -439,12 +439,27 @@ export function interactiveMcpServers(
  * opensession-* servers into a detached run host (run-session's hosted pi
  * path) can compute proxy names that resolve to this same fail-closed set,
  * never the interactive siblings.
+ *
+ * `humanPrompter` names the person whose message this turn answers, when a
+ * person (not the automation's tick) prompted the session. Their turn adds
+ * `opensession-sessions` in its `humanResume` shape: the spawn suite only
+ * (spawn_task/task_status/cancel_task plus the list/get reads), never
+ * answer/send/cancel/create on other sessions, with children created for that
+ * person as ordinary interactive sessions. The automation's own runs never
+ * carry it: the prompt they act on is untrusted text, and a person asking
+ * for "a new session" in the thread is what makes spawning legitimate here.
+ * Descendants (sandboxed children with a publication policy) are excluded.
  */
 export async function automationSessionMcp(
-  session: { automation?: string; worktreeDir?: string | null },
+  session: {
+    automation?: string;
+    worktreeDir?: string | null;
+    automationDescendantPolicy?: unknown;
+  },
   sessionId: string,
+  opts: { humanPrompter?: string } = {},
 ): Promise<Record<string, unknown>> {
-  return {
+  const servers: Record<string, unknown> = {
     ...papercutsServerFor(
       sessionId,
       "automation",
@@ -453,25 +468,40 @@ export async function automationSessionMcp(
     ...((await automationRunMcpForSession(session, sessionId)) || {}),
     ...((await selfImproveMcpForSession(session, sessionId)) || {}),
   };
+  if (
+    opts.humanPrompter &&
+    session.automation &&
+    !session.automationDescendantPolicy
+  ) {
+    servers["opensession-sessions"] = createSessionsMcpServer({
+      createdBy: opts.humanPrompter,
+      isAdmin: false,
+      humanResume: true,
+      currentSessionId: sessionId,
+    });
+  }
+  return servers;
 }
 
-registerInteractiveMcpBuilder(async (sessionId, user, promptEntryId) => {
-  // Automation-owned sessions run on untrusted event/ticket text. Their runs
-  // only ever carry the automation-bar set (automationSessionMcp above), but
-  // this builder is also run-rpc's FALLBACK resolver for any registered run
-  // token, so it must fail closed here rather than hand session-control or
-  // admin tools to an automation that asks for them.
-  const session = sessionId ? findSession(sessionId) : undefined;
-  if (sessionId && session?.automation) {
-    return automationSessionMcp(session, sessionId);
-  }
-  const servers = interactiveMcpServers(user, sessionId, promptEntryId);
-  const goalId = session?.goalId;
-  if (goalId)
-    (servers as Record<string, unknown>)["opensession-goal-self"] =
-      createGoalSelfMcpServer(goalId);
-  return servers;
-});
+registerInteractiveMcpBuilder(
+  async (sessionId, user, promptEntryId, humanPrompter) => {
+    // Automation-owned sessions run on untrusted event/ticket text. Their runs
+    // only ever carry the automation-bar set (automationSessionMcp above), but
+    // this builder is also run-rpc's FALLBACK resolver for any registered run
+    // token, so it must fail closed here rather than hand session-control or
+    // admin tools to an automation that asks for them.
+    const session = sessionId ? findSession(sessionId) : undefined;
+    if (sessionId && session?.automation) {
+      return automationSessionMcp(session, sessionId, { humanPrompter });
+    }
+    const servers = interactiveMcpServers(user, sessionId, promptEntryId);
+    const goalId = session?.goalId;
+    if (goalId)
+      (servers as Record<string, unknown>)["opensession-goal-self"] =
+        createGoalSelfMcpServer(goalId);
+    return servers;
+  },
+);
 
 // NOTE: the run-rpc unix socket and the loopback MCP HTTP listener are NOT
 // started here. Registering a builder is a cheap in-memory assignment; binding

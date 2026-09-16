@@ -2931,6 +2931,7 @@ export async function resumeRemoteSandboxRun(
         registerRunToken(oldSpec.rpcToken, {
           sessionId: oldSpec.osSessionId,
           user: oldSpec.user,
+          humanPrompter: oldSpec.accountUser,
         });
       }
       registerRunWsHost(oldSpec.hostId, oldSpec.wsToken);

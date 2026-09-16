@@ -666,6 +666,7 @@ async function spawnHostRun(
     registerRunToken(rpcToken, {
       sessionId: opts.osSessionId,
       user: opts.user,
+      humanPrompter: opts.accountUser,
       promptEntryId: opts.promptEntryId,
     });
 

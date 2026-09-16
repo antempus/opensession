@@ -37,8 +37,14 @@ export type McpScopeSource =
 
 /** Which in-process opensession-* server set the run carries. */
 export type InProcessMcpBranch =
-  /** Automation-owned: nothing, unless the automation is `selfImprove`. */
+  /** Automation-owned: the automation-bar set, plus the scoped spawn/self
+   *  pair when the automation is `selfImprove`. */
   | "automation-self-improve"
+  /** Automation-owned, prompted by a person: the automation-bar set plus
+   *  `opensession-sessions` in its spawn-only `humanResume` shape, so the
+   *  session can start the work the person asked for. Never the automation's
+   *  own ticks, and never a sandboxed descendant. */
+  | "automation+human-spawn"
   /** Goal-driven session: the interactive set plus opensession-goal-self. */
   | "interactive+goal-self"
   /** The normal interactive self-management set. */
@@ -67,8 +73,9 @@ export interface SessionRunInputs {
    *  automation tick, a review handoff, auto-continue). Unlike `user` it
    *  survives an automation-owned session, because a person who takes one
    *  over and presses send is spending their own subscription; the shared
-   *  pool stays the backup. It reaches provider account selection only,
-   *  never MCP, GitHub or trust policy. */
+   *  pool stays the backup. It reaches provider account selection and, for
+   *  an automation-owned session, the `automation+human-spawn` branch below;
+   *  never the `allowedUsers` MCP gate, GitHub or trust policy. */
   accountUser: string | undefined;
   inProcessMcpBranch: InProcessMcpBranch;
   /** Whether the run gets the repos/memory/personal-prompt note. Automation
@@ -90,12 +97,15 @@ export type RunInputsSession = Pick<
 >;
 
 /** Which in-process server set the next turn carries. Pure — mirrors the
- *  `inProcessMcp` ternary at the runAgent call site. */
+ *  `inProcessMcp` ternary at the runAgent call site. `humanPrompter` is the
+ *  person who sent this turn's prompt (`humanPrompter(user)`), if any. */
 export function sessionInProcessMcpBranch(
   session: RunInputsSession,
+  humanPrompter?: string | null,
 ): InProcessMcpBranch {
-  if (session.automation || session.automationDescendantPolicy)
-    return "automation-self-improve";
+  if (session.automationDescendantPolicy) return "automation-self-improve";
+  if (session.automation)
+    return humanPrompter ? "automation+human-spawn" : "automation-self-improve";
   return session.goalId ? "interactive+goal-self" : "interactive";
 }
 
@@ -142,6 +152,7 @@ export async function resolveSessionRunInputs(
               await import("./feeds")
             ).feedMcpServersForRefs(session.externalRefs!)
           : undefined;
+  const accountUser = humanPrompter(opts.user) ?? undefined;
   return {
     isAutomationSession,
     mcpServers,
@@ -151,8 +162,8 @@ export async function resolveSessionRunInputs(
     deniedTools: isAutomationSession ? automationDeniedTools() : undefined,
     user: isAutomationSession ? undefined : opts.user,
     mcpGrantUser: session.createdByLogin || undefined,
-    accountUser: humanPrompter(opts.user) ?? undefined,
-    inProcessMcpBranch: sessionInProcessMcpBranch(session),
+    accountUser,
+    inProcessMcpBranch: sessionInProcessMcpBranch(session, accountUser),
     sessionNote: !isAutomationSession,
   };
 }

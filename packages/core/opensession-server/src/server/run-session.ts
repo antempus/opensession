@@ -2121,6 +2121,7 @@ export async function maybeLaunchSandboxedRun(
     registerRunToken(rpcToken, {
       sessionId: session.id,
       user: opts.isAutomationSession ? undefined : opts.user,
+      humanPrompter: opts.accountUser,
       promptEntryId: opts.promptEntryId,
     });
     // Detached sandbox hosts cannot read the server's workspace store. Resolve
@@ -3138,9 +3139,14 @@ async function runSessionPromptInner(
   // grant identity are withheld.
   // Resolved once: the automation-bar server set is a catalog read, and the
   // proxy name list, the run-rpc fallback and the in-process mount below must
-  // all describe the same set.
+  // all describe the same set. A person's turn in an automation-owned session
+  // (accountUser is the human prompter, undefined for the automation's own
+  // ticks) adds the scoped spawn suite so the session can start the work
+  // they asked for; the automation's MCP allowlist and denials still apply.
   const automationMcp = isAutomationSession
-    ? await automationSessionMcp(session, sessionId)
+    ? await automationSessionMcp(session, sessionId, {
+        humanPrompter: runInputs.accountUser,
+      })
     : {};
   const hostedRun =
     !runnerRun && !sandboxRun && routedEngine === "pi"

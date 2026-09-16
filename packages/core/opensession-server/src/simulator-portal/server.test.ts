@@ -397,6 +397,109 @@ test("a failed down acknowledgement still attempts release", async () => {
   ]);
 });
 
+test.each(["pointer-up", "disconnect", "timeout", "move-error", "down-error"])(
+  "%s release failure closes the device before any further input can run",
+  async (trigger) => {
+    const calls: SimulatorInput[] = [];
+    const release = Promise.withResolvers<void>();
+    const closing = Promise.withResolvers<void>();
+    let closeStarted = false;
+    const f = fixture(
+      {
+        async input(command) {
+          calls.push(command);
+          if (command.kind !== "touch") return;
+          if (command.phase === "up") return release.promise;
+          if (`${command.phase}-error` === trigger)
+            throw new Error(`${command.phase} acknowledgement failed`);
+        },
+        async close() {
+          closeStarted = true;
+          await closing.promise;
+        },
+      },
+      undefined,
+      trigger === "timeout" ? 20 : undefined,
+    );
+    cleanup.push(() => {
+      release.resolve();
+      closing.resolve();
+    });
+    const owner = await f.connect();
+    const observer = await f.connect();
+    owner.ws.send(
+      JSON.stringify({ type: "touch", phase: "down", x: 0.1, y: 0.1 }),
+    );
+    await until(() => calls.length >= 1);
+    if (trigger === "pointer-up")
+      owner.ws.send(
+        JSON.stringify({ type: "touch", phase: "up", x: 0.1, y: 0.1 }),
+      );
+    if (trigger === "disconnect") owner.ws.close();
+    if (trigger === "move-error")
+      owner.ws.send(
+        JSON.stringify({ type: "touch", phase: "move", x: 0.2, y: 0.2 }),
+      );
+    await until(() =>
+      calls.some(
+        (command) => command.kind === "touch" && command.phase === "up",
+      ),
+    );
+
+    if (trigger === "pointer-up") {
+      // All are normally accepted behind an in-flight release. They must not
+      // reach the companion if that release ultimately fails.
+      owner.ws.send(JSON.stringify({ type: "text", text: "queued" }));
+      owner.ws.send(
+        JSON.stringify({ type: "touch", phase: "down", x: 0.3, y: 0.3 }),
+      );
+      owner.ws.send(
+        JSON.stringify({ type: "touch", phase: "up", x: 0.3, y: 0.3 }),
+      );
+      // Same-socket ordering gives a deterministic barrier after those commands.
+      owner.ws.send(JSON.stringify({ type: "home" }));
+      await until(() =>
+        owner.messages.some(
+          (message) =>
+            typeof message === "string" &&
+            message.includes("Simulator is busy"),
+        ),
+      );
+    }
+    const delivered = [...calls];
+    release.reject(new Error("up acknowledgement failed"));
+    await until(() => closeStarted);
+    await until(() =>
+      observer.messages.some(
+        (message) =>
+          typeof message === "string" && message.includes('"phase":"error"'),
+      ),
+    );
+
+    const commands = [
+      { type: "text", text: "other viewer" },
+      { type: "home" },
+      { type: "key", key: "Enter" },
+      { type: "tap", x: 0.5, y: 0.5 },
+      { type: "swipe", x: 0.1, y: 0.1, endX: 0.9, endY: 0.9, duration: 0.2 },
+      { type: "touch", phase: "down", x: 0.5, y: 0.5 },
+    ];
+    // Device cleanup is deliberately still blocked. Admission must already
+    // be closed, not just become safe after shutdown eventually completes.
+    for (const command of commands) observer.ws.send(JSON.stringify(command));
+    await until(
+      () =>
+        observer.messages.filter(
+          (message) =>
+            typeof message === "string" &&
+            message.includes("Simulator is not ready"),
+        ).length === commands.length,
+    );
+    expect(calls).toEqual(delivered);
+    closing.resolve();
+  },
+);
+
 test("idle touch gestures are released after a bounded deadline", async () => {
   const f = fixture({}, undefined, 20);
   const { ws } = await f.connect();

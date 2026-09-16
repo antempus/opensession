@@ -322,7 +322,13 @@ export function startSimulatorViewer(options: {
             message:
               error instanceof Error ? error.message : "Simulator input failed",
           });
-          if (isDown && active) {
+          if (command.release) {
+            // The native finger may still be down. Fail admission before
+            // dropping ownership; device cleanup now owns the final release.
+            fail(error);
+            discardQueued(() => true);
+            for (const gesture of gestures.toReversed()) finishGesture(gesture);
+          } else if (isDown && active) {
             // A lost acknowledgement does not prove the finger stayed up.
             // Discard pending movement, but still attempt a matching release.
             discardQueued((queued) => queued.gesture === active);

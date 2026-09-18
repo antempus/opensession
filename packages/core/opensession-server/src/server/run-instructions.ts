@@ -47,6 +47,9 @@ export function buildRunInstructions(input: {
   /** Reviewer to request on PRs this run opens (GitHub login, `org/team`
    *  slug, or comma-separated list) — see RunAgentOpts.prReviewer. */
   prReviewer?: string;
+  /** Sibling repositories `GH_READ_TOKEN` in the shell can read. Set only
+   *  when the run actually holds that token (pi-runner). */
+  readRepos?: string[];
   inProcessMcp?: Record<string, unknown>;
   /** The run executes inside the session's Sandbox (Daytona or Box). One
    *  boolean, not a per-session fact, so the prompt prefix stays shared. */
@@ -161,6 +164,17 @@ export function buildRunInstructions(input: {
         `For a PR this unattended automation creates, request \`${input.prReviewer}\` as reviewer. Never add this automatic reviewer to an existing PR or a human-steered PR. If the request fails, mention it in the final response.`,
       );
     }
+  }
+
+  if (input.readRepos?.length) {
+    parts.push(
+      "## Cross-repository reads\n`GH_READ_TOKEN` in the shell is a read-only GitHub token " +
+        `covering this repository and ${input.readRepos.map((r) => `\`${r}\``).join(", ")}. ` +
+        "Use it per command for those repositories, for example " +
+        "`GH_TOKEN=$GH_READ_TOKEN gh pr list --repo owner/name` or " +
+        "`GH_TOKEN=$GH_READ_TOKEN gh api repos/owner/name/contents/path`. " +
+        "`GH_TOKEN` itself reaches only this repository and cannot write anywhere else.",
+    );
   }
 
   const inproc = (input.inProcessMcp || {}) as Record<string, unknown>;

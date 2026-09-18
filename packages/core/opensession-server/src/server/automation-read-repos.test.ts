@@ -6,23 +6,13 @@ describe("sanitizeReadRepos", () => {
 
   test("keeps well-formed sibling repositories under the automation's owner", () => {
     expect(
-      sanitizeReadRepos(
-        [" tellahq/api ", "tellahq/web", "tellahq/docs"],
-        own,
-      ),
-    ).toEqual([
-      "tellahq/api",
-      "tellahq/web",
-      "tellahq/docs",
-    ]);
+      sanitizeReadRepos([" tellahq/api ", "tellahq/web", "tellahq/docs"], own),
+    ).toEqual(["tellahq/api", "tellahq/web", "tellahq/docs"]);
   });
 
   test("dedupes case-insensitively and drops the automation's own repo", () => {
     expect(
-      sanitizeReadRepos(
-        ["tellahq/api", "TellaHQ/Api", "tellahq/app", ""],
-        own,
-      ),
+      sanitizeReadRepos(["tellahq/api", "TellaHQ/Api", "tellahq/app", ""], own),
     ).toEqual(["tellahq/api"]);
   });
 
@@ -35,13 +25,7 @@ describe("sanitizeReadRepos", () => {
   });
 
   test("rejects names that are not owner/repo", () => {
-    for (const bad of [
-      "api",
-      "tellahq/",
-      "/api",
-      "tellahq/a pi",
-      "a/b/c",
-    ]) {
+    for (const bad of ["api", "tellahq/", "/api", "tellahq/a pi", "a/b/c"]) {
       expect(sanitizeReadRepos([bad], own)).toEqual({
         error: `Invalid read repo "${bad}" — use a GitHub owner/repo name`,
       });

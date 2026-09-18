@@ -457,7 +457,9 @@ kernel service (catalog RPC only, no actor database opened) and
 - verifies coverage and marks the metadata catalog complete and both
   namespaces imported.
 
-Re-running is safe; a new state root seeds in one empty run. The gateway
+Re-running is safe; a new state root seeds in one empty run, which is why
+`opensession service install` and a foreground `opensession start` run the
+seed between starting the kernel and the gateway. The gateway
 never lists a session directory: the list is served from the list index, and
 a cold rebuild (no index coverage: first boot, operator rebuild, an index
 schema change) reads the catalogs only (`catalogSessionListSources` in

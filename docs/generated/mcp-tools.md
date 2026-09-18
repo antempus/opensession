@@ -47,7 +47,7 @@ touches an in-process tool:
 | [`opensession-search`](#opensession-search) | 2 | interactive | – |
 | [`opensession-self-deploy`](#opensession-self-deploy) | 2 | interactive | Withheld from dev instances (isDevInstance()) — the script targets the production service and state. |
 | [`opensession-humans`](#opensession-humans) | 3 | interactive, Slack loop, goal wake | Interactive runs need a session id (the answer routes back to it). |
-| [`opensession-keychain`](#opensession-keychain) | 3 | interactive | Needs a session id. |
+| [`opensession-keychain`](#opensession-keychain) | 5 | interactive | Needs a session id. |
 | [`opensession-publish`](#opensession-publish) | 4 | interactive | Needs a session id. |
 | [`opensession-repos`](#opensession-repos) | 6 | interactive | Needs a session id. |
 | [`opensession-memory`](#opensession-memory) | 9 | interactive | Needs a session id. |
@@ -73,7 +73,7 @@ touches an in-process tool:
 | [`opensession-github`](#opensession-github) | 4 | Slack loop | – |
 | [`opensession-goal-self`](#opensession-goal-self) | 6 | goal wake | Only on a session that carries a goalId. |
 
-32 servers, 145 tools.
+32 servers, 147 tools.
 
 ## opensession-sessions
 
@@ -101,7 +101,7 @@ Get detail on one session by id, including explicit createdBy and createdAt meta
 
 `mcp__opensession-sessions__suggest_task` · input: `title` (string, required), `description` (string, required), `instructions` (string, required), `repo` (string), `mode` ("ask" | "code"), `branch` (string)
 
-Propose a well-scoped follow-up for a person to start in a new Open Session session, without starting it. Use it when you notice a self-contained piece of work that is worth doing but outside the current request: a bug spotted on the way, a refactor the change makes possible, a missing test, a docs gap. The suggestion renders as a card in this session with a "Start session" button that creates a new session from your instructions, so the person decides; nothing runs until they press it. Write instructions a fresh session can act on with no access to this conversation: goal, relevant files, constraints, acceptance criteria, what to report. In your reply mention the suggestion in one line and do not repeat its instructions. Do not use this for the work you were asked to do, and do not start the task yourself (spawn_task, create_session) unless asked.
+Propose a drive-by finding for a person to start in a new Open Session session, without starting it. Use it rarely: only for a self-contained piece of work unrelated to the current request that this session will not pick up, such as a bug spotted on the way in another area, a missing test elsewhere, or a docs gap you passed. Do not use it for the work you were asked to do, for follow-ups or next steps of that work, or for anything the person is likely to ask this session to do next; those belong in your reply as a plain suggestion so the person decides. Suggest each task at most once. The suggestion renders as a card in this session with a "Start session" button that creates a new session from your instructions; nothing runs until they press it. Write instructions a fresh session can act on with no access to this conversation: goal, relevant files, constraints, acceptance criteria, what to report. In your reply mention the suggestion in one line and do not repeat its instructions. Do not start the task yourself (spawn_task, create_session) unless asked.
 
 ### `wait_for`
 
@@ -220,13 +220,13 @@ List all of Assistant's automations (routines): scheduled, event- and webhook-tr
 
 ### `create_automation`
 
-`mcp__opensession-admin__create_automation` · input: `name` (string, required), `prompt` (string, required), `schedule` (string), `mode` ("ask" | "code"), `repo` (string), `mcpServers` (string[]), `sandbox` (boolean), `model` (string), `accountId` (string), `accountStrict` (boolean), `usageCredits` (boolean), `prReviewer` (string), `owner` (string), `workspaceId` (string)
+`mcp__opensession-admin__create_automation` · input: `name` (string, required), `prompt` (string, required), `schedule` (string), `mode` ("ask" | "code"), `repo` (string), `mcpServers` (string[]), `sandbox` (boolean), `model` (string), `accountId` (string), `accountStrict` (boolean), `usageCredits` (boolean), `prReviewer` (string), `readRepos` (string[]), `owner` (string), `workspaceId` (string)
 
 Create a new automation (routine). Provide a clear prompt describing the task. Set `repo` to the repository it works in, or it runs against the instance default. Use a 5-field UTC cron `schedule` for recurring jobs (omit for manual/webhook only). Pick mode 'ask' for read-only or 'code' if it must edit and commit files. Ordinary automations receive no GitHub credential, so code mode alone cannot push or open a GitHub PR. Set sandbox true to use a fresh disposable Executor. Sandboxed automations require an explicit mcpServers list, a pinned accountId, a supported model, and a configured qualified provider.
 
 ### `update_automation`
 
-`mcp__opensession-admin__update_automation` · input: `id` (string, required), `name` (string), `prompt` (string), `schedule` (string), `mode` ("ask" | "code"), `enabled` (boolean), `repo` (string), `mcpServers` (string[]), `sandbox` (boolean), `model` (string), `fallbackModel` (string), `accountId` (string), `accountStrict` (boolean), `usageCredits` (boolean), `prReviewer` (string), `owner` (string), `workspaceId` (string)
+`mcp__opensession-admin__update_automation` · input: `id` (string, required), `name` (string), `prompt` (string), `schedule` (string), `mode` ("ask" | "code"), `enabled` (boolean), `repo` (string), `mcpServers` (string[]), `sandbox` (boolean), `model` (string), `fallbackModel` (string), `accountId` (string), `accountStrict` (boolean), `usageCredits` (boolean), `prReviewer` (string), `readRepos` (string[]), `owner` (string), `workspaceId` (string)
 
 Update an existing automation by id. Only provided fields change. Use enabled to pause/resume.
 
@@ -449,6 +449,18 @@ Borrow a teammate's credential for a stated purpose, with their approval.
 - **Wired in** `packages/core/opensession-server/src/server/interactive-mcp.ts`
 - **Runs** interactive
 - **Condition** Needs a session id.
+
+### `request_mac_keychain`
+
+`mcp__opensession-keychain__request_mac_keychain` · input: `service` (string, required), `account` (string, required), `purpose` (string, required), `url` (string, required), `method` ("GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE", required), `injection` ("bearer" | "x-api-key", required), `body` (string)
+
+Request ONE generic-password item from the prompting teammate's macOS Keychain for ONE exact HTTPS API call. Supply the item's exact service and account identifiers, never its value. This uses Apple's Keychain access prompt, not 1Password and not a vault-wide grant. No listing, shell commands, ACL changes, or raw secret export. The human opens this session in the Mac app, chooses OS → Keychain requests…, inspects the destination and selects Use once. macOS controls whether access needs Allow / Always Allow / Deny; recommend Allow, never Always Allow. Existing item permissions may allow access without another prompt. Requests expire after 10 minutes and can execute only once. Only HTTP status returns; no response data, headers or secret values enter model context. Do not use a model-provider endpoint as the destination. After a decline/failure do not retry without the human's go-ahead.
+
+### `mac_keychain_request_status`
+
+`mcp__opensession-keychain__mac_keychain_request_status` · input: `requestId` (string, required)
+
+Check this session's macOS Keychain request. Returns only pending/claimed/completed/declined/failed and an HTTP status when completed. No secrets, response bodies, headers or helper errors are available. Missing requests expired or were revoked by a server restart.
 
 ### `list_credentials`
 
@@ -983,7 +995,7 @@ Schedule a prompt for this session at a future time.
 
 `mcp__opensession-schedule__schedule_prompt` · input: `at` (string, required), `prompt` (string, required)
 
-Schedule a prompt to be sent to THIS session at a future time, then end your turn. Use it to check back on something that takes a while (a release workflow, CI, a deploy, a long job) instead of polling or sleeping. The prompt arrives as a normal message in this conversation, so write it to your future self with everything needed to pick the work up: what to run, what "done" looks like, what to do on failure. Fires once; survives restarts. Do not use harness built-ins like CronCreate or ScheduleWakeup here; they do not exist in this session.
+Schedule a prompt to be sent to THIS session at a future time, then end your turn. Use it to check back on something that takes a while (a release workflow, CI, a deploy, a long job) instead of polling or sleeping. The prompt arrives in this conversation marked as a scheduled check-back, so write it to your future self with everything needed to pick the work up: what to run, what "done" looks like, what to do on failure. Fires once; survives restarts. Do not use harness built-ins like CronCreate or ScheduleWakeup here; they do not exist in this session.
 
 ### `list_scheduled_prompts`
 

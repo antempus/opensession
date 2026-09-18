@@ -160,6 +160,45 @@ The endpoint accepts at most 25 MiB per clip. Providers are optional: if no
 hosted key works and the local binary or model is unavailable, dictation
 returns an error and the rest of the app is unaffected.
 
+### Session voice calls (web)
+
+Open a normal session and press the handset beside the dictation microphone.
+Allow microphone access, then ask about the thread: what happened, why something
+changed, or what an answer means. GPT Realtime answers directly from a bounded
+recent transcript excerpt, including assistant replies and tool results. The
+voice conversation stays separate: spoken questions and answers are not posted
+to the thread and do not run the coding agent. It remembers the voice discussion
+for this call. Starting a new call starts a fresh discussion.
+
+If an answer needs new investigation or work, the voice companion proposes a
+request and warns that the session agent may take a few minutes. Review the
+exact prompt, then choose **Ask agent** or **Not now** in the approval card.
+Only the Ask agent button sends that prompt through the normal durable queue.
+A spoken confirmation alone does not authorize a send. You can keep discussing
+the transcript while it works; the result comes back into the voice discussion.
+Unsent composer text, quotes, and attachments stay untouched.
+
+Calls use the same instance-wide OpenAI API key configured in
+**Settings → Preferences → Desk voice**. You do not need to enable Desk's voice
+mode. A signed-in web identity and a browser with microphone/WebRTC support are
+required. OpenAI API usage is billed separately from the session agent.
+
+`gpt-realtime` handles the transcript discussion itself. Its only tool proposes
+an agent request; there is no direct tool execution or transcript writer. It
+cannot change the session model, permissions, or MCP inventory. The server
+exchanges SDP at `/api/sessions/:id/voice` and supplies a bounded public transcript
+excerpt, excluding reasoning and hidden engine context. The permanent API key
+never reaches the browser. Approved requests use the existing authenticated,
+durable outbox, so normal session safety and automation restrictions still apply.
+No native iOS or Chrome extension behavior changes.
+
+Press the handset again to end the call. Speaking over a reply stops narration,
+not the agent's work. Leaving the session, hiding the browser, disconnecting, or
+starting another call also releases the microphone. Calls end after three idle
+minutes (not while an approved agent request is pending) or thirty minutes total. Dictation is
+unavailable while a call is active. Use the chat's existing controls for approval
+questions and stopping agent work.
+
 ### Desk voice calls
 
 The Desk overlay's voice mode (Settings → Desk voice) uses its own OpenAI
@@ -232,12 +271,13 @@ to protect, set `OPENSESSION_ALLOW_IMDS=1` to skip that installer check.
 **Off by default.** The mint is EC2-specific and needs passwordless sudo, so it
 only runs when you turn it on:
 
-| Setting                                             | Meaning                                                                                                                                                   |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AGENT_AWS_CREDS`                                   | Only the literal `true` enables, any other value disables. Checked first, so it is also the off switch on a host that pins a region.                      |
-| `integrations.aws.enabled`                          | Used when `AGENT_AWS_CREDS` is unset.                                                                                                                     |
-| `AGENT_AWS_REGION` / `integrations.aws.region`      | With neither of the above set, pinning a region for agent runs enables the mint.                                                                          |
-| `AGENT_AWS_MINT_USER` / `integrations.aws.mintUser` | The unprivileged account the transient unit runs as. Defaults to the account the server runs as. This selects the unit's UID/GID; it does not grant sudo. |
+| Setting                                                       | Meaning                                                                                                                                                                            |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENT_AWS_CREDS`                                             | Only the literal `true` enables, any other value disables. Checked first, so it is also the off switch on a host that pins a region.                                               |
+| `integrations.aws.enabled`                                    | Used when `AGENT_AWS_CREDS` is unset.                                                                                                                                              |
+| `AGENT_AWS_REGION` / `integrations.aws.region`                | With neither of the above set, pinning a region for agent runs enables the mint.                                                                                                   |
+| `AGENT_AWS_MINT_USER` / `integrations.aws.mintUser`           | The unprivileged account the transient unit runs as. Defaults to the account the server runs as. This selects the unit's UID/GID; it does not grant sudo.                          |
+| `AGENT_AWS_UNTRUSTED_RUNS` / `integrations.aws.untrustedRuns` | Off by default. `true` also vends the credentials to automation runs and Plain discussion sessions, which hold untrusted ticket text. Turn on only with a read-only instance role. |
 
 The service installer's fixed run-host helper permission does not grant the
 separate `sudo -n systemd-run` access this mint needs. Provision a narrowly
@@ -249,6 +289,14 @@ or a separate unprivileged mint user that is not covered by the rule.
 A bare `AWS_REGION` does not enable anything: it names the region for a run
 that already has credentials, and it is set on plenty of machines with no
 instance role to mint.
+
+**Runners.** The instance-role session never leaves the host. A Runner's run
+hosts instead ask the server for credentials
+(`GET /run-hosts/<hostId>/aws-credentials`, authenticated with the run's
+dial-back token), and the server answers only when an administrator gave that
+Runner an IAM role in Settings → Runners: it assumes the role with the minted
+instance session and vends the role session. See
+[runners.md](../runners.md#aws-access-from-a-runner) for the trust policy.
 
 With the mint off, `getAgentAwsEnv` / `ensureAgentAwsCredsFile` return `{}`
 without spawning anything, and runs proceed without AWS. That is the expected

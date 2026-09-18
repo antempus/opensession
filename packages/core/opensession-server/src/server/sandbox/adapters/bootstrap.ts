@@ -1126,6 +1126,9 @@ function remoteRunnerInstallCommand(force = false): string {
     `cd ${shellQuoteWord(REMOTE_REPO)} && rm -f ${shellQuoteWord(temporary)} && ` +
     `HOME=${REMOTE_HOME} ${REMOTE_BUN} build --compile ` +
     `packages/core/opensession-server/src/main.ts --outfile ${shellQuoteWord(temporary)} ` +
+    // Runner/MCP processes never serve the gateway UI. Treat its HTML import
+    // as external, as worker sidecars do, rather than bundling the web app.
+    `--external ${shellQuoteWord("*.html")} --external oxc-transform-react ` +
     `--external sharp --external ${shellQuoteWord("@img/*")} && ` +
     `chmod 755 ${shellQuoteWord(temporary)} && mv ${shellQuoteWord(temporary)} ${shellQuoteWord(REMOTE_RUNNER_BINARY)}; }`
   );
@@ -1408,7 +1411,7 @@ export async function bootstrapRemoteSandbox(
           : shellQuoteWord(runnerSha);
         need(
           await driver.exec(
-            `git -C ${REMOTE_REPO} fetch --depth 1 ${shellQuoteWord(runnerCloneUrl!)} ${fetchRef} 2>/dev/null; git -C ${REMOTE_REPO} checkout --detach ${shellQuoteWord(runnerSha)}`,
+            `git -C ${REMOTE_REPO} fetch --depth 1 ${shellQuoteWord(runnerCloneUrl!)} ${fetchRef} && git -C ${REMOTE_REPO} checkout --detach ${shellQuoteWord(runnerSha)}`,
             { timeoutMs: 300_000 },
           ),
           `checkout of pinned runnerSha ${runnerSha}`,
@@ -2333,6 +2336,21 @@ function makeRemoteLauncher(
             spec.mode === "code"
               ? await githubServiceCredentialEnv(registeredRepo.ghRepo)
               : await githubServiceReadOnlyEnv(registeredRepo.ghRepo);
+          // An automation listing sibling repositories to read gets the
+          // read-only GH_READ_TOKEN beside its primary token (same private
+          // file; projectedGithubRunEnv lifts it into the shell). A refused
+          // mint leaves it out rather than widening anything.
+          if (githubAuth.GH_TOKEN && automationProfile && spec.readRepos) {
+            const { githubServiceReadReposEnv } =
+              await import("../../github-app");
+            githubAuth = {
+              ...githubAuth,
+              ...(await githubServiceReadReposEnv(
+                registeredRepo.ghRepo,
+                spec.readRepos,
+              )),
+            };
+          }
         }
       }
       const githubAuthPath = `${dir}/github-auth.json`;

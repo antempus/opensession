@@ -113,7 +113,7 @@ import {
   receivePins,
   unpin,
 } from "./lib/pins";
-import { resyncUserMap } from "./lib/user-map";
+import { resyncUserMap, resyncUserMaps } from "./lib/user-map";
 import { ARCHIVED_PAGE_COLUMN } from "./lib/archived-classes";
 import { PR_PAGE_COLUMN } from "./lib/pr-list-classes";
 import { repoLabel } from "./lib/repo-label";
@@ -515,6 +515,13 @@ export function AppContent({
     setLaunchComplete,
   });
 
+  const resyncSidebar = useEffectEvent(() => {
+    void resyncUserMaps(getCurrentUser());
+    void refreshWorkspaces();
+  });
+  useEffect(() => {
+    if (connected) resyncSidebar();
+  }, [connected]);
   // When a session is created from the New Session form or Ask box, jump straight into it
   // The handler reads `inject`/`navigate` through effect events, so the
   // subscription doesn't re-arm just because their closures moved.
@@ -560,6 +567,10 @@ export function AppContent({
           }
           return;
         }
+      }
+      if (msg.type === "workspaces_changed") {
+        refreshWorkspaces();
+        return;
       }
       if (msg.type === "pins_changed") {
         receivePins(msg.user, msg.pins);
@@ -1209,7 +1220,8 @@ export function AppContent({
     openDraft,
     openNewSessionInWorkspace: (mode, origin) =>
       handleNewSession(mode, null, origin),
-    duplicateSession: () => handleNewSession("share", null, undefined, true),
+    duplicateSession: (messageId) =>
+      handleNewSession("share", null, undefined, true, messageId),
     startNewChat: (session, prompt) =>
       openNewSessionInWorkspace(session, "share", prompt),
     openPrefilledSession,

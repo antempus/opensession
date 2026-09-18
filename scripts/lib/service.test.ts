@@ -16,6 +16,7 @@ import { describe, expect, test } from "bun:test";
 import { platform } from "os";
 import {
   bootstrapLaunchAgent,
+  bunPath,
   envFileWriteProblem,
   LAUNCHD_LABEL,
   LAUNCHD_LAUNCHER,
@@ -60,7 +61,9 @@ describe("session catalog seed", () => {
     expect(code).toBe(0);
     expect(calls).toHaveLength(1);
     const [call] = calls;
-    expect(call.cmd[0]).toMatch(/bun$/);
+    // The engine the units exec, wherever the host keeps it (bun.exe on
+    // Windows).
+    expect(call.cmd[0]).toBe(bunPath());
     expect(call.cmd.slice(1)).toEqual([
       "scripts/seed-session-metadata-catalog.ts",
     ]);

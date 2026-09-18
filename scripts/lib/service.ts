@@ -407,7 +407,7 @@ function serverExec(compiled = isCompiledBinary()): {
   };
 }
 
-function bunPath(): string {
+export function bunPath(): string {
   // A release install carries its own bun at <checkout>/bin/bun and puts no
   // bun on PATH; prefer it so the rendered ExecStart works even when the unit
   // is installed from a shell where bun is not on PATH (else 203/EXEC). Fall
@@ -630,9 +630,12 @@ export const SEED_SESSION_CATALOGS_STEP = "seed the session catalogs";
  * (session-cache.ts primeSessionListIndex); it never scans the session
  * directories itself. This is that operator step, run by every install so a
  * fresh state root (which seeds in one empty run) and an installer-driven
- * upgrade of a legacy store both come up without a manual command. The seed
- * talks to the kernel over its RPC and opens no actor database, so the
- * kernel must already be running and the gateway must not be yet. Returns
+ * upgrade of a legacy store both come up without a manual command. On an
+ * instance whose catalogs are already marked complete the seed exits after
+ * three RPC calls without reading a source file, so a reinstall or restart
+ * does not pay for every session on disk. The seed talks to the kernel over
+ * its RPC and opens no actor database, so the kernel must already be
+ * running and the gateway must not be yet. Returns
  * the seed's exit code; a non-zero one must stop the install, since a
  * gateway started anyway would only crash-loop on the same missing catalog.
  */

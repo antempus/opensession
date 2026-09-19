@@ -4,6 +4,7 @@
 import { linearEmailToGithubUsername } from "../../server/shared/user-mappings";
 import { personaName } from "../../server/config";
 import { worktreePathFor } from "../../server/worktree";
+import { resolveLinearRepoId } from "./repo-routing";
 import {
   createAgentActivity,
   fetchLinearUser,
@@ -646,7 +647,7 @@ Help with whatever they're asking. You have a worktree ready at ${session.worktr
       agentSession.issue.identifier,
     );
     try {
-      deleteWorktree(branch);
+      await deleteWorktree(branch);
       await deleteSessionFile(branch);
       activeSessions.delete(agentSession.id);
     } catch (e) {
@@ -684,9 +685,10 @@ Help with whatever they're asking. You have a worktree ready at ${session.worktr
 
   const { teamId } = await getIssueStatus(accessToken, issue.id);
   const issueDetails = await getIssueDetails(accessToken, issue.id);
+  const repoId = resolveLinearRepoId(issueDetails.labels, teamId);
 
   const branch = await generateBranchName(issue.title, issue.identifier);
-  const worktreeDir = worktreePathFor(branch);
+  const worktreeDir = worktreePathFor(branch, repoId);
 
   const session: ActiveSession = {
     branch,
@@ -699,6 +701,7 @@ Help with whatever they're asking. You have a worktree ready at ${session.worktr
     issueUrl: issue.url,
     teamId,
     worktreeDir,
+    repoId,
     linearSessionId: agentSession.id,
     phase: "awaiting_direction",
     planningConversation: [],
@@ -710,19 +713,14 @@ Help with whatever they're asking. You have a worktree ready at ${session.worktr
 
   (async () => {
     try {
-      await createWorktree(
-        branch,
-        issue.identifier,
-        issue.title,
-        issue.description || "",
-        issue.url,
-      );
+      await createWorktree(branch, repoId);
 
       await saveSessionInfo(branch, {
         claudeSessionId: null,
         issueIdentifier: issue.identifier,
         issueTitle: issue.title,
         worktreeDir,
+        repoId,
         linearSessionId: agentSession.id,
         phase: session.phase,
         issueId: issue.id,

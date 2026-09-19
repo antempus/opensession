@@ -65,6 +65,10 @@ export interface SetupRepo {
   defaultBranch: string;
   /** Where new code sessions run. Existing sessions keep their current checkout. */
   isolatedWorktrees: boolean;
+  /** Linear labels that route an issue to this repo (Linear repo-routing). */
+  linearLabels?: string[];
+  /** Linear team ids that route an issue to this repo when no label matches. */
+  linearTeams?: string[];
   lifecycle: SetupRepoLifecycle;
 }
 

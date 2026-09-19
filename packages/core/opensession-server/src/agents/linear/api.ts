@@ -216,6 +216,8 @@ export async function getIssueDetails(
   url: string;
   identifier: string;
   creator: Participant | null;
+  /** Label names on the issue (used for Linear repo-routing). */
+  labels: string[];
 }> {
   const result = await gql(
     accessToken,
@@ -229,6 +231,7 @@ export async function getIssueDetails(
         state { name }
         team { id }
         creator { id name email }
+        labels { nodes { name } }
       }
     }
   `,
@@ -247,6 +250,9 @@ export async function getIssueDetails(
     creator: creator
       ? { id: creator.id, name: creator.name, email: creator.email || null }
       : null,
+    labels: (issue?.labels?.nodes ?? [])
+      .map((n: { name?: string }) => n?.name)
+      .filter((n: unknown): n is string => typeof n === "string"),
   };
 }
 

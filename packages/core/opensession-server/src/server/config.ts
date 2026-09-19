@@ -138,6 +138,11 @@ export interface RepoSection {
   deploymentTracking?: boolean;
   /** Repo-specific threat-model/build notes appended to security scan prompts. */
   securityInstructions?: string;
+  /** Linear labels that route an issue to this repo (see agents/linear/repo-routing.ts).
+   *  Matched case-insensitively; a label match beats a team match. */
+  linearLabels?: string[];
+  /** Linear team ids that route an issue to this repo when no label matches. */
+  linearTeams?: string[];
 }
 
 export interface TeamMember {
@@ -308,6 +313,10 @@ export interface Repo {
   warmCachePaths?: string[];
   deploymentTracking?: boolean;
   securityInstructions?: string;
+  /** Linear labels that route an issue to this repo (see agents/linear/repo-routing.ts). */
+  linearLabels?: string[];
+  /** Linear team ids that route an issue to this repo when no label matches. */
+  linearTeams?: string[];
 }
 
 export interface ResolvedServer {
@@ -424,6 +433,8 @@ function parseRepoSection(v: unknown): RepoSection | undefined {
     warmCachePaths: strArray(o.warmCachePaths),
     deploymentTracking: bool(o.deploymentTracking),
     securityInstructions: str(o.securityInstructions),
+    linearLabels: strArray(o.linearLabels),
+    linearTeams: strArray(o.linearTeams),
   });
 }
 
@@ -879,6 +890,8 @@ export function configuredRepos(
           warmCachePaths: entry.warmCachePaths,
           deploymentTracking: entry.deploymentTracking,
           securityInstructions: entry.securityInstructions,
+          linearLabels: entry.linearLabels,
+          linearTeams: entry.linearTeams,
         }),
       };
     }

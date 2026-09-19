@@ -1555,3 +1555,120 @@ describe("GitHub browser creation handoff", () => {
     });
   });
 });
+
+describe("repository Linear routing settings", () => {
+  test("persists linearLabels/linearTeams, trims/drops blanks, echoes them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opensession-repo-linear-"));
+    tempDirs.push(dir);
+    const path = join(dir, "config.json");
+    const repo = createGitRepo(dir);
+    process.env.OPENSESSION_CONFIG = path;
+    await getConfigAsync();
+    writeFileSync(
+      path,
+      JSON.stringify({
+        repos: {
+          foreman: { repo, defaultBranch: "main", customSetting: "preserved" },
+        },
+      }),
+    );
+    await getConfigAsync();
+
+    const url = new URL("http://localhost/api/setup/repos/foreman");
+    const response = await handleSetupRepoRoutes({
+      req: new Request(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          linearLabels: ["backend", "  api  ", ""],
+          linearTeams: ["TEAM_FM"],
+        }),
+      }),
+      url,
+      path: url.pathname,
+      publicPrefix: "",
+    });
+
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({
+      id: "foreman",
+      defaultBranch: "main",
+      isolatedWorktrees: true,
+      linearLabels: ["backend", "api"],
+      linearTeams: ["TEAM_FM"],
+    });
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    expect(saved.repos.foreman.linearLabels).toEqual(["backend", "api"]);
+    expect(saved.repos.foreman.linearTeams).toEqual(["TEAM_FM"]);
+    expect(saved.repos.foreman.customSetting).toBe("preserved");
+  });
+
+  test("empty arrays clear the keys", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opensession-repo-linear-"));
+    tempDirs.push(dir);
+    const path = join(dir, "config.json");
+    const repo = createGitRepo(dir);
+    process.env.OPENSESSION_CONFIG = path;
+    await getConfigAsync();
+    writeFileSync(
+      path,
+      JSON.stringify({
+        repos: {
+          foreman: {
+            repo,
+            defaultBranch: "main",
+            linearLabels: ["backend"],
+            linearTeams: ["TEAM_FM"],
+          },
+        },
+      }),
+    );
+    await getConfigAsync();
+
+    const url = new URL("http://localhost/api/setup/repos/foreman");
+    const response = await handleSetupRepoRoutes({
+      req: new Request(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ linearLabels: [], linearTeams: [] }),
+      }),
+      url,
+      path: url.pathname,
+      publicPrefix: "",
+    });
+
+    expect(response?.status).toBe(200);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    expect(saved.repos.foreman.linearLabels).toBeUndefined();
+    expect(saved.repos.foreman.linearTeams).toBeUndefined();
+  });
+
+  test("rejects a non-array linearLabels", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opensession-repo-linear-"));
+    tempDirs.push(dir);
+    const path = join(dir, "config.json");
+    const repo = createGitRepo(dir);
+    process.env.OPENSESSION_CONFIG = path;
+    await getConfigAsync();
+    writeFileSync(
+      path,
+      JSON.stringify({ repos: { foreman: { repo, defaultBranch: "main" } } }),
+    );
+    await getConfigAsync();
+
+    const url = new URL("http://localhost/api/setup/repos/foreman");
+    const response = await handleSetupRepoRoutes({
+      req: new Request(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ linearLabels: "backend" }),
+      }),
+      url,
+      path: url.pathname,
+      publicPrefix: "",
+    });
+
+    expect(response?.status).toBe(400);
+    expect((await response?.json())?.error).toMatch(/array/i);
+  });
+});

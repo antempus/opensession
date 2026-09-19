@@ -1374,13 +1374,18 @@ export async function handleSetupRepoRoutes(
     const body = (await req.json().catch(() => null)) as {
       defaultBranch?: unknown;
       isolatedWorktrees?: unknown;
+      linearLabels?: unknown;
+      linearTeams?: unknown;
     } | null;
     if (!body) {
       return Response.json({ error: "expected a JSON body" }, { status: 400 });
     }
     const changesBranch = body.defaultBranch !== undefined;
     const changesWorktrees = body.isolatedWorktrees !== undefined;
-    if (!changesBranch && !changesWorktrees) {
+    const changesLabels = body.linearLabels !== undefined;
+    const changesTeams = body.linearTeams !== undefined;
+    const changesLinear = changesLabels || changesTeams;
+    if (!changesBranch && !changesWorktrees && !changesLinear) {
       return Response.json(
         { error: "No repository setting provided" },
         { status: 400 },
@@ -1391,6 +1396,30 @@ export async function handleSetupRepoRoutes(
         { error: "isolatedWorktrees must be a boolean" },
         { status: 400 },
       );
+    }
+    // A provided Linear-routing value is trimmed with blanks dropped; anything
+    // that isn't a string array is a 400 (the raw-config read path silently
+    // filters, but a UI PATCH should fail loudly on a malformed payload).
+    const parseStrArray = (v: unknown, field: string): string[] | Response => {
+      if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
+        return Response.json(
+          { error: `${field} must be an array of strings` },
+          { status: 400 },
+        );
+      }
+      return (v as string[]).map((s) => s.trim()).filter(Boolean);
+    };
+    let linearLabels: string[] | undefined;
+    if (changesLabels) {
+      const parsed = parseStrArray(body.linearLabels, "linearLabels");
+      if (parsed instanceof Response) return parsed;
+      linearLabels = parsed;
+    }
+    let linearTeams: string[] | undefined;
+    if (changesTeams) {
+      const parsed = parseStrArray(body.linearTeams, "linearTeams");
+      if (parsed instanceof Response) return parsed;
+      linearTeams = parsed;
     }
     const defaultBranch = changesBranch
       ? await normalizeDefaultBranch(body.defaultBranch)
@@ -1438,6 +1467,14 @@ export async function handleSetupRepoRoutes(
         if (changesWorktrees) {
           section.sharedCheckout = !(body.isolatedWorktrees as boolean);
         }
+        if (changesLabels) {
+          if (linearLabels!.length) section.linearLabels = linearLabels;
+          else delete section.linearLabels;
+        }
+        if (changesTeams) {
+          if (linearTeams!.length) section.linearTeams = linearTeams;
+          else delete section.linearTeams;
+        }
         persistRawConfig(config);
         const result = {
           id,
@@ -1445,6 +1482,16 @@ export async function handleSetupRepoRoutes(
           isolatedWorktrees: changesWorktrees
             ? (body.isolatedWorktrees as boolean)
             : !repo.sharedCheckout || configuredSelfDev() === "worktree",
+          ...(changesLinear
+            ? {
+                linearLabels: changesLabels
+                  ? linearLabels!
+                  : (repo.linearLabels ?? []),
+                linearTeams: changesTeams
+                  ? linearTeams!
+                  : (repo.linearTeams ?? []),
+              }
+            : {}),
         };
         audit({ kind: "setup_repo_update", ...result });
         return result;

@@ -27,6 +27,7 @@ import {
   IconBranches,
   IconDotsHorizontal,
   IconPlus,
+  IconTag,
 } from "./icons";
 import { RepoTile } from "./RepoTile";
 import { GithubRepoAccess } from "./GithubRepoAccess";
@@ -82,7 +83,12 @@ export function ReposSection({
   onChanged: () => void | Promise<void>;
   onRepoUpdated?: (
     updated: Pick<SetupRepo, "id"> &
-      Partial<Pick<SetupRepo, "defaultBranch" | "isolatedWorktrees">>,
+      Partial<
+        Pick<
+          SetupRepo,
+          "defaultBranch" | "isolatedWorktrees" | "linearLabels" | "linearTeams"
+        >
+      >,
   ) => void;
   compact?: boolean;
   showLifecycleStatus?: boolean;
@@ -236,7 +242,12 @@ function RepositoryRow({
   onChanged: () => void | Promise<void>;
   onRepoUpdated?: (
     updated: Pick<SetupRepo, "id"> &
-      Partial<Pick<SetupRepo, "defaultBranch" | "isolatedWorktrees">>,
+      Partial<
+        Pick<
+          SetupRepo,
+          "defaultBranch" | "isolatedWorktrees" | "linearLabels" | "linearTeams"
+        >
+      >,
   ) => void;
 }) {
   const lifecycle = repoLifecycleState(repo);
@@ -290,7 +301,12 @@ function RepoActionsMenu({
   onChanged: () => void | Promise<void>;
   onRepoUpdated?: (
     updated: Pick<SetupRepo, "id"> &
-      Partial<Pick<SetupRepo, "defaultBranch" | "isolatedWorktrees">>,
+      Partial<
+        Pick<
+          SetupRepo,
+          "defaultBranch" | "isolatedWorktrees" | "linearLabels" | "linearTeams"
+        >
+      >,
   ) => void;
 }) {
   // A hot frontend rebuild can briefly run against the prior setup-status
@@ -303,10 +319,20 @@ function RepoActionsMenu({
     repo.isolatedWorktrees,
   );
   const [branchDialogOpen, setBranchDialogOpen] = useState(false);
-  const [saving, setSaving] = useState<"branch" | "worktrees" | null>(null);
+  const [saving, setSaving] = useState<
+    "branch" | "worktrees" | "linear" | null
+  >(null);
   const [branchError, setBranchError] = useState<string | null>(null);
   const branchErrorId = useId();
   const branchInputRef = useRef<HTMLInputElement>(null);
+  const initialLabels = (repo.linearLabels ?? []).join(", ");
+  const initialTeams = (repo.linearTeams ?? []).join(", ");
+  const [linearDialogOpen, setLinearDialogOpen] = useState(false);
+  const [labelsText, setLabelsText] = useState(initialLabels);
+  const [teamsText, setTeamsText] = useState(initialTeams);
+  const [linearError, setLinearError] = useState<string | null>(null);
+  const linearErrorId = useId();
+  const labelsInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setBranch(defaultBranch);
@@ -314,9 +340,23 @@ function RepoActionsMenu({
   useEffect(() => {
     setIsolatedWorktrees(repo.isolatedWorktrees);
   }, [repo.isolatedWorktrees]);
+  useEffect(() => {
+    setLabelsText(initialLabels);
+    setTeamsText(initialTeams);
+  }, [initialLabels, initialTeams]);
 
   const normalized = branch.trim();
   const changed = normalized !== defaultBranch;
+  const parseCsv = (s: string) =>
+    s
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  const nextLabels = parseCsv(labelsText);
+  const nextTeams = parseCsv(teamsText);
+  const linearChanged =
+    nextLabels.join("\n") !== (repo.linearLabels ?? []).join("\n") ||
+    nextTeams.join("\n") !== (repo.linearTeams ?? []).join("\n");
 
   async function saveBranch(event: React.FormEvent) {
     event.preventDefault();
@@ -378,6 +418,39 @@ function RepoActionsMenu({
     setBranchDialogOpen(true);
   }
 
+  async function saveLinear(event: React.FormEvent) {
+    event.preventDefault();
+    if (!linearChanged || saving) return;
+    setSaving("linear");
+    setLinearError(null);
+    try {
+      const updated = await setupRequest<{
+        id: string;
+        linearLabels?: string[];
+        linearTeams?: string[];
+      }>(`/api/setup/repos/${encodeURIComponent(repo.id)}`, {
+        method: "PATCH",
+        json: { linearLabels: nextLabels, linearTeams: nextTeams },
+      });
+      setLabelsText((updated.linearLabels ?? []).join(", "));
+      setTeamsText((updated.linearTeams ?? []).join(", "));
+      if (onRepoUpdated) onRepoUpdated(updated);
+      else await onChanged();
+      setLinearDialogOpen(false);
+      toast(`${repo.label} Linear routing updated`);
+    } catch (error) {
+      setLinearError(errorMessage(error, "Failed to update Linear routing"));
+    }
+    setSaving(null);
+  }
+
+  function openLinearDialog() {
+    setLabelsText(initialLabels);
+    setTeamsText(initialTeams);
+    setLinearError(null);
+    setLinearDialogOpen(true);
+  }
+
   return (
     <>
       <Menu.Root>
@@ -407,6 +480,11 @@ function RepoActionsMenu({
             </span>
             <Menu.Check on={isolatedWorktrees} />
           </Menu.CheckboxItem>
+          <Menu.Separator />
+          <Menu.Item onClick={openLinearDialog}>
+            <IconTag size={17} className="text-dim" />
+            <span className="min-w-0 flex-1 truncate">Linear routing</span>
+          </Menu.Item>
         </Menu.Popup>
       </Menu.Root>
       <Modal.Root
@@ -469,6 +547,86 @@ function RepoActionsMenu({
                 disabled={!normalized || !changed || !!saving}
               >
                 {saving === "branch" ? "Saving…" : "Save"}
+              </Button>
+            </Modal.Footer>
+          </form>
+        </Modal.Content>
+      </Modal.Root>
+      <Modal.Root
+        open={linearDialogOpen}
+        onOpenChange={(open) => {
+          if (saving === "linear") return;
+          setLinearDialogOpen(open);
+          if (!open) {
+            setLabelsText(initialLabels);
+            setTeamsText(initialTeams);
+            setLinearError(null);
+          }
+        }}
+        disablePointerDismissal={saving === "linear"}
+      >
+        <Modal.Content initialFocus={labelsInputRef}>
+          <form className="flex flex-col gap-4" onSubmit={saveLinear}>
+            <Modal.Header
+              title={
+                <span className="flex items-center gap-2.5">
+                  <RepoTile name={repo.id} size={28} />
+                  <span className="min-w-0 truncate">Linear routing</span>
+                </span>
+              }
+              description={`Route Linear issues to ${repo.label} by label or team. Comma-separated; a label match beats a team match, and an issue matching nothing uses the default repo.`}
+            />
+            <Field label="Linear labels">
+              <Input
+                ref={labelsInputRef}
+                className="phone:min-h-11 phone:text-input-phone"
+                value={labelsText}
+                onChange={(event) => {
+                  setLabelsText(event.target.value);
+                  setLinearError(null);
+                }}
+                disabled={saving === "linear"}
+                placeholder="backend, api"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </Field>
+            <Field label="Linear team IDs">
+              <Input
+                className="font-mono phone:min-h-11 phone:text-input-phone"
+                value={teamsText}
+                onChange={(event) => {
+                  setTeamsText(event.target.value);
+                  setLinearError(null);
+                }}
+                disabled={saving === "linear"}
+                placeholder="e.g. a1b2c3d4-…"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </Field>
+            {linearError && (
+              <InlineAlert id={linearErrorId}>{linearError}</InlineAlert>
+            )}
+            <Modal.Footer>
+              <Button
+                type="button"
+                variant="ghost"
+                className="phone:min-h-11"
+                disabled={saving === "linear"}
+                onClick={() => setLinearDialogOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="primary"
+                className="phone:min-h-11"
+                disabled={!linearChanged || !!saving}
+              >
+                {saving === "linear" ? "Saving…" : "Save"}
               </Button>
             </Modal.Footer>
           </form>

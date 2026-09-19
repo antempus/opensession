@@ -45,7 +45,12 @@ export interface SetupController {
   applyGithub: (updated: SetupGithub, restartRequired: boolean) => void;
   applyRepo: (
     updated: Pick<SetupRepo, "id"> &
-      Partial<Pick<SetupRepo, "defaultBranch" | "isolatedWorktrees">>,
+      Partial<
+        Pick<
+          SetupRepo,
+          "defaultBranch" | "isolatedWorktrees" | "linearLabels" | "linearTeams"
+        >
+      >,
   ) => void;
 }
 
@@ -103,7 +108,12 @@ export function useSetupStatus(): SetupController {
 
   const applyRepo = (
     updated: Pick<SetupRepo, "id"> &
-      Partial<Pick<SetupRepo, "defaultBranch" | "isolatedWorktrees">>,
+      Partial<
+        Pick<
+          SetupRepo,
+          "defaultBranch" | "isolatedWorktrees" | "linearLabels" | "linearTeams"
+        >
+      >,
   ) => {
     setStatus((s) =>
       s

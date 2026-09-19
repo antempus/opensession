@@ -69,6 +69,9 @@ export interface StoredSession {
   issueIdentifier: string;
   issueTitle: string;
   worktreeDir: string;
+  /** Repo this session's worktree lives in (Linear repo-routing). Unset on
+   *  files written before routing existed → callers fall back to defaultRepo(). */
+  repoId?: string;
   /** "" when the file predates the Linear agent-session id being recorded. */
   linearSessionId: string;
   phase: SessionPhase;
@@ -177,13 +180,10 @@ export function generateBranchName(
 
 export async function createWorktree(
   branch: string,
-  _ticketId: string,
-  _title: string,
-  _description: string,
-  _url: string,
+  repoId: string,
 ): Promise<string> {
-  const worktreeDir = await createRepoWorktree(branch, defaultRepo().id);
-  console.log(`[linear] Created worktree: ${branch}`);
+  const worktreeDir = await createRepoWorktree(branch, repoId);
+  console.log(`[linear] Created worktree: ${branch} (repo: ${repoId})`);
   return worktreeDir;
 }
 
@@ -232,6 +232,7 @@ function storedFromFile(
     issueIdentifier: raw.issueIdentifier ?? "",
     issueTitle: raw.issueTitle ?? "",
     worktreeDir: raw.worktreeDir ?? "",
+    repoId: raw.repoId ?? undefined,
     linearSessionId: raw.linearSessionId ?? "",
     phase,
     issueId: raw.issueId ?? "",
@@ -295,9 +296,13 @@ export async function deleteSessionFile(branch: string): Promise<void> {
   await publishSessionChange(`linear-${branch}`);
 }
 
-export function deleteWorktree(branch: string): void {
-  void removeWorktree(branch, defaultRepo().id);
-  console.log(`[linear] Deleted worktree: ${branch}`);
+export async function deleteWorktree(branch: string): Promise<void> {
+  // Resolve the repo the worktree actually lives in from the stored session;
+  // fall back to the default repo for sessions written before repo-routing.
+  const stored = await loadSessionInfo(branch);
+  const repoId = stored?.repoId || defaultRepo().id;
+  void removeWorktree(branch, repoId);
+  console.log(`[linear] Deleted worktree: ${branch} (repo: ${repoId})`);
 }
 
 // --- Action activity streaming ---

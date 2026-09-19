@@ -355,6 +355,8 @@ export async function handleSetupRoutes(
         path: r.repo,
         defaultBranch: r.defaultBranch,
         isolatedWorktrees: !sharedCheckoutForNewSessions(r),
+        linearLabels: r.linearLabels ?? [],
+        linearTeams: r.linearTeams ?? [],
         // Can sessions in this repo provision and boot themselves? Read off
         // the main checkout — worktrees carry the same committed files.
         lifecycle: repoLifecycle(r.repo),

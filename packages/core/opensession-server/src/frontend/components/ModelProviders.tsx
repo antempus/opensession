@@ -26,6 +26,7 @@ import { IconTile } from "./BrandTile";
 import { IconDotsHorizontal, IconPlus, IconSearch, IconTrash } from "./icons";
 import { errorMessage } from "../lib/error-message";
 import { modelProviderSettingsPayload } from "../lib/model-provider-settings";
+import { ModelCatalog } from "./ModelCatalog";
 
 // Settings → Model providers: third-party Pi providers (xai, openrouter,
 // groq, …) — API key + optional baseURL, stored server-side (0600, returned
@@ -76,6 +77,7 @@ const PROVIDER_MODEL_DEFAULTS = new Map([
 export function ModelProvidersPanel() {
   const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [browsingId, setBrowsingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     await (async () => {
@@ -130,6 +132,19 @@ export function ModelProvidersPanel() {
         variant: "error",
       });
     });
+  }
+
+  if (browsingId) {
+    return (
+      <ModelCatalog
+        providerId={browsingId}
+        onBack={() => {
+          setBrowsingId(null);
+          void load();
+        }}
+        onChanged={() => void load()}
+      />
+    );
   }
 
   return (
@@ -187,24 +202,18 @@ export function ModelProvidersPanel() {
                     }`}
                   {p.discoverModels && " · discovery on"}
                 </SettingRowDescription>
-                {p.models.length > 0 ? (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {p.models.map((m) => (
-                      <span
-                        key={m}
-                        className="rounded-sm bg-active px-1.5 py-px text-meta text-dim"
-                        title={m}
-                      >
-                        {m.split("/").slice(2).join("/")}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="mt-1 text-supporting text-faint">
-                    No picker models, so its models are type-in only (pi/{p.id}
-                    /&lt;model&gt;).
-                  </div>
-                )}
+                <div className="mt-1.5">
+                  <Button
+                    size="sm"
+                    variant="default"
+                    onClick={() => setBrowsingId(p.id)}
+                  >
+                    Manage models
+                    {p.models.length > 0
+                      ? ` · ${p.models.length} in picker`
+                      : ""}
+                  </Button>
+                </div>
               </SettingRowText>
               <SettingRowControl>
                 <Menu.Root>

@@ -32,6 +32,8 @@ import {
   PROVIDER_APIS,
   PROVIDER_ID_RE,
   addPickerModel,
+  configuredPickerModels,
+  configuredProviderCatalog,
   defaultPickerModelsForProvider,
   maskProviderKey,
   modelProviders,
@@ -602,6 +604,67 @@ export async function handleConnectionsRoutes(
         { status: 502 },
       );
     }
+  }
+
+  // The full catalog for a provider's browse/curate page: every discovered or
+  // operator-pinned row, each flagged with whether it's currently in the
+  // picker allowlist. Admin-only, like the other provider mutations' siblings.
+  const catalogMatch = path.match(
+    /^\/api\/settings\/model-providers\/([^/]+)\/catalog$/,
+  );
+  if (catalogMatch && req.method === "GET") {
+    const forbidden = requireWorkspaceAdmin(ctx);
+    if (forbidden) return forbidden;
+    const id = decodeURIComponent(catalogMatch[1]);
+    const provider = modelProviders()[id];
+    if (!provider)
+      return Response.json({ error: "Not found" }, { status: 404 });
+    const catalog = configuredProviderCatalog(id, provider);
+    const inPicker = new Set(configuredPickerModels());
+    const rows = (catalog?.models ?? []).map((m) => ({
+      id: m.id,
+      name: m.name,
+      reasoning: m.reasoning,
+      contextWindow: m.contextWindow,
+      cost: m.cost,
+      inPicker: inPicker.has(`pi/${id}/${m.id}`),
+    }));
+    return Response.json({ id, rows });
+  }
+
+  // Toggle one catalog model in/out of the picker allowlist. The model id lives
+  // in the body (ids carry slashes, e.g. "vendor/alpha", so it can't be a path
+  // segment). Add/remove touch only the allowlist, never the provider's key.
+  const pickerMatch = path.match(
+    /^\/api\/settings\/model-providers\/([^/]+)\/picker$/,
+  );
+  if (pickerMatch && req.method === "PUT") {
+    const forbidden = requireWorkspaceAdmin(ctx);
+    if (forbidden) return forbidden;
+    const id = decodeURIComponent(pickerMatch[1]);
+    if (!modelProviders()[id]) {
+      return Response.json({ error: "Not found" }, { status: 404 });
+    }
+    const body = (await req.json().catch(() => null)) as {
+      model?: unknown;
+      inPicker?: unknown;
+    } | null;
+    const model =
+      body && typeof body.model === "string" ? body.model.trim() : "";
+    if (!model) {
+      return Response.json({ error: "model is required" }, { status: 400 });
+    }
+    const fullId = `pi/${id}/${model}`;
+    const inPicker = body?.inPicker === true;
+    const pickerModels = inPicker
+      ? addPickerModel(fullId)
+      : removePickerModel(fullId);
+    refreshPickerModels();
+    return Response.json({
+      model,
+      inPicker,
+      count: pickerModels.filter((m) => m.startsWith(`pi/${id}/`)).length,
+    });
   }
 
   const modelProviderMatch = path.match(

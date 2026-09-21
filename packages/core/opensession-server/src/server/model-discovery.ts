@@ -1,15 +1,13 @@
 /**
  * Opt-in model discovery for OpenAI-compatible providers: `GET
  * {baseURL}/models` with the provider's own key. The stock OpenAI models object
- * is ids-only, so discovery mainly fills the picker; extended fields a gateway
+ * is ids-only, so discovery mainly fills the catalog; extended fields a gateway
  * sends (context_length, max_output_tokens, input_modalities, …) are recorded
  * beneath the operator's own catalog rows, which always win.
  */
 
 import {
-  addPickerModels,
   catalogRows,
-  configuredPickerModels,
   modelProviders,
   setProviderDiscovered,
   type ProviderCatalogModel,
@@ -60,12 +58,9 @@ export async function discoverProviderModels(
     provider.apiKey,
     fetchImpl,
   );
+  // Record the catalog only. Discovery no longer adds models to the picker
+  // allowlist — operators curate them from the provider's catalog page, so a
+  // 400-model gateway doesn't flood the picker on connect.
   setProviderDiscovered(id, { at: new Date().toISOString(), models });
-  const ids = Object.keys(models).map((m) => `pi/${id}/${m}`);
-  const before = new Set(configuredPickerModels());
-  addPickerModels(ids);
-  return {
-    models: Object.keys(models),
-    added: ids.filter((m) => !before.has(m)).length,
-  };
+  return { models: Object.keys(models), added: 0 };
 }

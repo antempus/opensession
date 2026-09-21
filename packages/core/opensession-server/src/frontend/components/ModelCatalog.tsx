@@ -25,7 +25,7 @@ interface CatalogRow {
 // Rendering hundreds of rows at once is pointless clutter; the search is how
 // you find a model in a 400-row catalog, so cap the drawn list and nudge to
 // refine rather than paint everything.
-const RENDER_CAP = 200;
+const RENDER_CAP = 1000;
 
 /** A provider's full catalog: browse/search/filter and toggle which models are
  *  in the picker allowlist (what every model picker shows). Reached from the
@@ -214,7 +214,7 @@ export function ModelCatalog({
           <LoadingState placement="row">Loading catalog…</LoadingState>
         )}
         {rows && (
-          <div className="flex flex-col px-3">
+          <div className="flex max-h-[55vh] flex-col overflow-y-auto overscroll-contain px-3">
             {filtered.slice(0, RENDER_CAP).map((r) => (
               <div
                 key={r.id}

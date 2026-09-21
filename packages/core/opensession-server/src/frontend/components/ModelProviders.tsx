@@ -21,6 +21,7 @@ import {
   settingsInputClass,
 } from "../ui/settings";
 import { Menu } from "../ui/menu";
+import { Modal } from "../ui/modal";
 import { Checkbox } from "../ui/checkbox";
 import { IconTile } from "./BrandTile";
 import { IconDotsHorizontal, IconPlus, IconSearch, IconTrash } from "./icons";
@@ -99,7 +100,7 @@ export function ModelProvidersPanel() {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Failed: ${res.status}`);
       toast(
-        `${body.models.length} models listed, ${body.added} added to the picker`,
+        `${body.models.length} models in the catalog — enable the ones you want from Manage models`,
       );
       load();
     })().catch(async (error) => {
@@ -132,19 +133,6 @@ export function ModelProvidersPanel() {
         variant: "error",
       });
     });
-  }
-
-  if (browsingId) {
-    return (
-      <ModelCatalog
-        providerId={browsingId}
-        onBack={() => {
-          setBrowsingId(null);
-          void load();
-        }}
-        onChanged={() => void load()}
-      />
-    );
   }
 
   return (
@@ -252,9 +240,29 @@ export function ModelProvidersPanel() {
         apply to new session runs immediately, and saved models appear in the
         picker without a restart. To update a provider, add it again with the
         same id. The key, base URL and model list are replaced. Discover models
-        reads the gateway's model list into the picker. Per-model limits and
-        pricing come from a catalog in model-providers.json.
+        reads the gateway's model list into the catalog; enable the ones you
+        want from Manage models. Per-model limits and pricing come from a
+        catalog in model-providers.json.
       </SettingsHint>
+      <Modal.Root
+        open={!!browsingId}
+        onOpenChange={(open) => {
+          if (!open) {
+            setBrowsingId(null);
+            void load();
+          }
+        }}
+      >
+        <Modal.Content widthClassName="max-w-[46rem]">
+          {browsingId && (
+            <ModelCatalog
+              providerId={browsingId}
+              onBack={() => setBrowsingId(null)}
+              onChanged={() => void load()}
+            />
+          )}
+        </Modal.Content>
+      </Modal.Root>
     </>
   );
 }

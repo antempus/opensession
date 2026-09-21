@@ -102,12 +102,49 @@ export function ModelCatalog({
     setBusy(null);
   }
 
+  // Select all / Clear all over the CURRENT filter, in one request — so
+  // "reasoning models only → Select all" is easy on a 400-row gateway.
+  async function bulk(next: boolean) {
+    const targetIds = filtered.map((r) => r.id);
+    if (!targetIds.length) return;
+    setBusy("__bulk__");
+    const prev = rows;
+    const set = new Set(targetIds);
+    setRows(
+      (rs) =>
+        rs?.map((r) => (set.has(r.id) ? { ...r, inPicker: next } : r)) ?? rs,
+    );
+    const res = await fetch(
+      `${BASE_PATH}/api/settings/model-providers/${encodeURIComponent(
+        providerId,
+      )}/picker/bulk`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ models: targetIds, inPicker: next }),
+      },
+    ).catch(() => null);
+    if (res && res.ok) {
+      onChanged?.();
+      toast(
+        next
+          ? `Added ${targetIds.length} to the picker`
+          : `Removed ${targetIds.length} from the picker`,
+      );
+    } else {
+      setRows(prev ?? null);
+      const body = res ? await res.json().catch(() => null) : null;
+      toast(body?.error || "Bulk update failed", { variant: "error" });
+    }
+    setBusy(null);
+  }
+
   return (
     <>
       <SettingsGroupLabel
         actions={
           <Button size="sm" variant="ghost" onClick={onBack}>
-            ← Back
+            Done
           </Button>
         }
       >
@@ -147,6 +184,28 @@ export function ModelCatalog({
           />
           In picker
         </label>
+      </div>
+
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-faint text-caption">{filtered.length} shown</span>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="default"
+            disabled={busy !== null || filtered.length === 0}
+            onClick={() => void bulk(true)}
+          >
+            Select all
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            disabled={busy !== null || filtered.length === 0}
+            onClick={() => void bulk(false)}
+          >
+            Clear all
+          </Button>
+        </div>
       </div>
 
       <SettingCard>

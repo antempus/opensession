@@ -32,6 +32,7 @@ import {
   PROVIDER_APIS,
   PROVIDER_ID_RE,
   addPickerModel,
+  addPickerModels,
   configuredPickerModels,
   configuredProviderCatalog,
   defaultPickerModelsForProvider,
@@ -665,6 +666,41 @@ export async function handleConnectionsRoutes(
       inPicker,
       count: pickerModels.filter((m) => m.startsWith(`pi/${id}/`)).length,
     });
+  }
+
+  // Bulk add/remove a set of catalog models — the catalog page's Select all /
+  // Clear all over the current filter, so a 400-model gateway is one request.
+  const bulkMatch = path.match(
+    /^\/api\/settings\/model-providers\/([^/]+)\/picker\/bulk$/,
+  );
+  if (bulkMatch && req.method === "PUT") {
+    const forbidden = requireWorkspaceAdmin(ctx);
+    if (forbidden) return forbidden;
+    const id = decodeURIComponent(bulkMatch[1]);
+    if (!modelProviders()[id]) {
+      return Response.json({ error: "Not found" }, { status: 404 });
+    }
+    const body = (await req.json().catch(() => null)) as {
+      models?: unknown;
+      inPicker?: unknown;
+    } | null;
+    const rawModels = body && Array.isArray(body.models) ? body.models : null;
+    if (!rawModels) {
+      return Response.json(
+        { error: "models must be an array" },
+        { status: 400 },
+      );
+    }
+    const models = rawModels.filter((m): m is string => typeof m === "string");
+    const inPicker = body?.inPicker === true;
+    const ids = models.map((m) => `pi/${id}/${m}`);
+    if (inPicker) addPickerModels(ids);
+    else for (const fullId of ids) removePickerModel(fullId);
+    refreshPickerModels();
+    const count = configuredPickerModels().filter((m) =>
+      m.startsWith(`pi/${id}/`),
+    ).length;
+    return Response.json({ inPicker, applied: ids.length, count });
   }
 
   const modelProviderMatch = path.match(

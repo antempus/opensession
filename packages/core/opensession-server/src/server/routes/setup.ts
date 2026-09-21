@@ -338,6 +338,7 @@ export async function handleSetupRoutes(
     const { engineStatus } = await import("../engine-status");
     const { configuredPublicIngress } = await import("../ingress-settings");
     const { sharedCheckoutForNewSessions } = await import("../worktree");
+    const { configuredIntegration } = await import("../config");
     const envValues = readEnvFileValues({ includeUnset: true });
 
     const access = setupAccessSnapshot({ persistedEnv: envValues });
@@ -354,6 +355,7 @@ export async function handleSetupRoutes(
         label: r.label,
         path: r.repo,
         defaultBranch: r.defaultBranch,
+        ghRepo: r.ghRepo || undefined,
         isolatedWorktrees: !sharedCheckoutForNewSessions(r),
         linearLabels: r.linearLabels ?? [],
         linearTeams: r.linearTeams ?? [],
@@ -364,6 +366,27 @@ export async function handleSetupRoutes(
       team: (() => {
         const team = configuredIdentity().team;
         return { count: team.length, names: team.map((m) => m.name) };
+      })(),
+      // Linear model-by-label routing (agents/linear/model-routing.ts), for the
+      // Settings → Integrations → Linear editor to prefill.
+      linearRouting: (() => {
+        const l = configuredIntegration("linear");
+        const rules = Array.isArray(l.modelLabels) ? l.modelLabels : [];
+        return {
+          modelLabels: rules
+            .filter(
+              (r: unknown): r is { label: string; model: string } =>
+                !!r &&
+                typeof (r as { label?: unknown }).label === "string" &&
+                typeof (r as { model?: unknown }).model === "string",
+            )
+            .map((r: { label: string; model: string }) => ({
+              label: r.label,
+              model: r.model,
+            })),
+          fallbackModel:
+            typeof l.fallbackModel === "string" ? l.fallbackModel : "",
+        };
       })(),
       // The only non-optional component, and the one this page used to omit —
       // a checklist that went all-green on an instance that couldn't run a turn.
@@ -376,6 +399,67 @@ export async function handleSetupRoutes(
           integrationSnapshot(spec, envValues),
         ),
       ),
+    });
+  }
+
+  // ── PUT /api/setup/linear/routing — model-by-label rules + fallback ──────
+  if (path === "/api/setup/linear/routing" && req.method === "PUT") {
+    const body = (await req.json().catch(() => null)) as {
+      modelLabels?: unknown;
+      fallbackModel?: unknown;
+    } | null;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    // Rules: [{label, model}] — both non-empty strings; blanks dropped.
+    const rules: Array<{ label: string; model: string }> = [];
+    if (body.modelLabels !== undefined) {
+      if (!Array.isArray(body.modelLabels)) {
+        return Response.json(
+          { error: "modelLabels must be an array" },
+          { status: 400 },
+        );
+      }
+      for (const r of body.modelLabels) {
+        const label =
+          r && typeof (r as any).label === "string"
+            ? (r as any).label.trim()
+            : "";
+        const model =
+          r && typeof (r as any).model === "string"
+            ? (r as any).model.trim()
+            : "";
+        if (!label || !model) continue;
+        rules.push({ label, model });
+      }
+    }
+    const fallbackModel =
+      typeof body.fallbackModel === "string" ? body.fallbackModel.trim() : "";
+
+    const { rawConfig, persistRawConfig, withConfigMutationLock } =
+      await import("../config-mutation");
+    return withConfigMutationLock(async () => {
+      const config = rawConfig();
+      const integrations =
+        config.integrations &&
+        typeof config.integrations === "object" &&
+        !Array.isArray(config.integrations)
+          ? (config.integrations as Record<string, unknown>)
+          : {};
+      config.integrations = integrations;
+      const section =
+        integrations.linear &&
+        typeof integrations.linear === "object" &&
+        !Array.isArray(integrations.linear)
+          ? (integrations.linear as Record<string, unknown>)
+          : {};
+      integrations.linear = section;
+      if (rules.length) section.modelLabels = rules;
+      else delete section.modelLabels;
+      if (fallbackModel) section.fallbackModel = fallbackModel;
+      else delete section.fallbackModel;
+      persistRawConfig(config);
+      return Response.json({ modelLabels: rules, fallbackModel });
     });
   }
 

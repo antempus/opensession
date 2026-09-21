@@ -5,6 +5,7 @@ import { linearEmailToGithubUsername } from "../../server/shared/user-mappings";
 import { personaName } from "../../server/config";
 import { worktreePathFor } from "../../server/worktree";
 import { resolveLinearRepoId } from "./repo-routing";
+import { resolveLinearModel } from "./model-routing";
 import {
   createAgentActivity,
   fetchLinearUser,
@@ -686,6 +687,7 @@ Help with whatever they're asking. You have a worktree ready at ${session.worktr
   const { teamId } = await getIssueStatus(accessToken, issue.id);
   const issueDetails = await getIssueDetails(accessToken, issue.id);
   const repoId = resolveLinearRepoId(issueDetails.labels, teamId);
+  const model = resolveLinearModel(issueDetails.labels);
 
   const branch = await generateBranchName(issue.title, issue.identifier);
   const worktreeDir = worktreePathFor(branch, repoId);
@@ -702,6 +704,7 @@ Help with whatever they're asking. You have a worktree ready at ${session.worktr
     teamId,
     worktreeDir,
     repoId,
+    model,
     linearSessionId: agentSession.id,
     phase: "awaiting_direction",
     planningConversation: [],

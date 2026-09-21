@@ -63,6 +63,8 @@ export interface SetupRepo {
   label: string;
   path: string;
   defaultBranch: string;
+  /** GitHub owner/name, when this repo is backed by GitHub (for App-repo cross-ref). */
+  ghRepo?: string;
   /** Where new code sessions run. Existing sessions keep their current checkout. */
   isolatedWorktrees: boolean;
   /** Linear labels that route an issue to this repo (Linear repo-routing). */
@@ -106,6 +108,11 @@ export interface SetupStatus {
   team: { count: number; names: string[] };
   github: SetupGithub;
   integrations: SetupIntegration[];
+  /** Linear model-by-label routing (agents/linear/model-routing.ts). */
+  linearRouting?: {
+    modelLabels: { label: string; model: string }[];
+    fallbackModel: string;
+  };
 }
 
 export interface TeamMember {

@@ -55,6 +55,7 @@ export type SettingsSectionKey =
   | "runners"
   | "library"
   | "integrations"
+  | "linear"
   | "connections"
   | "memory"
   | "storage"
@@ -170,6 +171,13 @@ export const SECTIONS: SettingsSection[] = [
     group: "Organization",
     adminOnly: true,
     icon: <IconPlug />,
+  },
+  {
+    key: "linear",
+    label: "Linear",
+    group: "Organization",
+    adminOnly: true,
+    icon: <IconLibrary.IconTag />,
   },
   {
     key: "connections",

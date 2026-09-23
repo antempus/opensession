@@ -1,57 +1,78 @@
-# Publish the release artefacts the default install downloads.
+# Fork release pipeline (antempus/opensession).
 #
-# `install.sh` with no flags fetches
-#   https://github.com/tellahq/opensession/releases/latest/download/opensession-<os>-<arch>.tar.gz
-# so every release carries, beside its versioned tarballs, one stable alias per
-# target. scripts/build-compile.ts cross-compiles per target (bun --target, nothing executes target
-# binaries), so one Linux runner builds all four. Pi is bundled into the binary,
-# so there is no engine seed to prebuild.
+# Builds the four server tarballs install.sh downloads and publishes them in a
+# SINGLE job: no draft, no Mac/Electron gate, no release-finalize step. The
+# version is computed automatically (highest published vX.Y.Z on this repo,
+# patch + 1; floor 0.4.70), so a release needs no hand-managed tag.
 #
-# GitHub's immutable releases lock their tag and assets at publication. Every
-# release producer therefore uploads to the same draft. release-finalize.yml
-# publishes it only after the compiled and Mac workflows both succeed.
+# Cut a release from the Actions tab -> "Release" -> "Run workflow" (leave the
+# version blank for an automatic patch bump, or type one to override). Machines
+# then pull it via install.sh from
+#   https://github.com/antempus/opensession/releases/latest/download/opensession-<os>-<arch>.tar.gz
+# and `opensession update` upgrades in place.
+#
+# scripts/build-compile.ts cross-compiles every target (bun --target), so one
+# Linux runner builds all four. Pi is bundled into the binary; no engine seed.
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Existing draft release tag to build"
-        required: true
+      version:
+        description: "Version to release, e.g. 0.4.71 (blank = auto patch bump)"
+        required: false
+  # Fully hands-off alternative: cut a release on every push to the release
+  # branch. Left off by default because that branch also carries work in
+  # progress; enable it if you want a release per push.
+  # push:
+  #   branches: ["linear-repo-routing"]
+  #   paths-ignore: ["**/*.md", "docs/**"]
 
 permissions:
   contents: write
   id-token: write
   attestations: write
 
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
 jobs:
-  artefacts:
-    name: Build and upload
+  release:
+    name: Build and publish
+    if: github.repository_owner == 'antempus'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      - name: Prepare release draft
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+          fetch-depth: 0
+      - name: Compute version
+        id: ver
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
-          if is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
-            if [ "$is_draft" != "true" ]; then
-              echo "::error title=Release is already immutable::$TAG is already published. Create the next release as a draft, or push only its tag and let the release workflows publish it."
-              exit 1
-            fi
-          elif ! gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes; then
-            sleep 2
-            is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
-            test "$is_draft" = "true"
+          floor="0.4.70"
+          bump() { local v="$1"; echo "${v%.*}.$(( ${v##*.} + 1 ))"; }
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="${INPUT_VERSION#v}"
+          else
+            latest="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 200 \
+              --json tagName \
+              --jq '[.[].tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | ltrimstr("v")]
+                    | sort_by(split(".") | map(tonumber)) | last // empty')"
+            if [ -z "$latest" ]; then version="$floor"; else version="$(bump "$latest")"; fi
           fi
+          # Never collide with an existing tag or release; bump until free.
+          while git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1 \
+                || gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; do
+            version="$(bump "$version")"
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.0
@@ -59,18 +80,15 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build artefacts
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          version="${TAG#v}"
+          version="$VERSION"
           out="$RUNNER_TEMP/release"
           mkdir -p "$out/assets"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           for target in linux/x64 linux/arm64 darwin/x64 darwin/arm64; do
             os="${target%/*}"; arch="${target#*/}"
-            # The default artefact is the compiled single-executable
-            # (build-compile.ts, cross-compiled per target). The source install
-            # path is a git checkout, so no tarball is published for it.
             bun scripts/build-compile.ts --version "$version" --os "$os" --arch "$arch" --out "$out"
             versioned="$out/opensession-$version-$os-$arch.tar.gz"
             test -s "$versioned"
@@ -85,10 +103,10 @@ jobs:
           ls -la "$out/assets"
       - name: Smoke-test Linux binary
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          version="${TAG#v}"
+          version="$VERSION"
           root="$RUNNER_TEMP/release-smoke"
           log="$root/server.log"
           kernel_log="$root/session-kernel.log"
@@ -116,9 +134,8 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
-          # The gateway deliberately refuses an unseeded catalog. Initialize the
-          # fresh smoke fixture via the supported offline importer, not a live
-          # gateway filesystem scan or a weakened readiness check.
+          # The gateway refuses an unseeded catalog; initialize the fresh smoke
+          # fixture via the supported offline importer.
           env "${common_env[@]}" bun scripts/seed-session-metadata-catalog.ts
           env "${common_env[@]}" \
             OPENSESSION_MCP_HTTP_PORT=43852 \
@@ -134,19 +151,21 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: ${{ runner.temp }}/release/assets/*.tar.gz
-      - name: Upload release assets
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
           assets="$RUNNER_TEMP/release/assets"
-          gh release upload "$TAG" "$assets"/* --clobber
-          gh release view "$TAG" --json assets --jq '.assets[] | select(.state == "uploaded" and .size > 0) | .name' > "$RUNNER_TEMP/uploaded-assets"
-          for asset in "$assets"/*; do
-            name="${asset##*/}"
-            if ! grep -Fqx "$name" "$RUNNER_TEMP/uploaded-assets"; then
-              echo "::error title=Release asset is missing::$name was not uploaded to the draft."
-              exit 1
-            fi
-          done
+          gh release create "$TAG" "$assets"/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes "Automated fork release $TAG. Server tarballs for install.sh." \
+            --latest
+          # Fail loudly if any asset did not land.
+          uploaded="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '[.assets[] | select(.state == "uploaded" and .size > 0)] | length')"
+          echo "Uploaded $uploaded assets to $TAG"
+          test "$uploaded" -eq 16

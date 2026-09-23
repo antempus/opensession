@@ -60,12 +60,12 @@ set -euo pipefail
 OPENSESSION_HOME="${OPENSESSION_HOME:-$HOME/.opensession}"
 DIR="${OPENSESSION_DIR:-$OPENSESSION_HOME/src}"
 BIN_DIR="$OPENSESSION_HOME/bin"
-REPO="${OPENSESSION_REPO:-https://github.com/tellahq/opensession.git}"
+REPO="${OPENSESSION_REPO:-https://github.com/antempus/opensession.git}"
 ARTIFACT="${OPENSESSION_ARTIFACT:-}"
 # Where published releases live; the default install downloads
 # opensession-<os>-<arch>.tar.gz from here (the stable alias each release
 # carries beside its versioned tarball; .github/workflows/release.yml).
-RELEASE_BASE="${OPENSESSION_RELEASE_BASE:-https://github.com/tellahq/opensession/releases/latest/download}"
+RELEASE_BASE="${OPENSESSION_RELEASE_BASE:-https://github.com/antempus/opensession/releases/latest/download}"
 # Naming a repo or channel means a checkout is wanted, flag or env alike.
 FROM_SOURCE=0
 [ -n "${OPENSESSION_REPO:-}${OPENSESSION_CHANNEL:-}" ] && FROM_SOURCE=1

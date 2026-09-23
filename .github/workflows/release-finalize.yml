@@ -17,7 +17,10 @@ concurrency:
 
 jobs:
   publish:
+    # Disabled on forks: the fork's release.yml publishes directly in one job,
+    # so this Mac/asset-gated finalize step is neither needed nor satisfiable.
     if: >-
+      github.repository_owner == 'tellahq' &&
       github.event.workflow_run.conclusion == 'success' &&
       startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-latest

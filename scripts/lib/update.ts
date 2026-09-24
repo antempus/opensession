@@ -65,7 +65,9 @@ export type UpdateOptions = {
   yes?: boolean;
 };
 
-/** The canonical upstream project's release download base. */
+/** The canonical upstream project's release download base. A recorded install
+ *  target that does not match this is treated as a fork or mirror and gated
+ *  behind --yes on update. */
 export const UPSTREAM_RELEASE_BASE =
   "https://github.com/tellahq/opensession/releases/latest/download";
 

@@ -39,6 +39,7 @@ import { MyAccountsPanel } from "./MyAccounts";
 import { AuditPanel } from "./settings/AuditPanel";
 import { AuthenticationPanel } from "./settings/AuthenticationPanel";
 import { DeploysPanel } from "./settings/DeploysPanel";
+import { UpdatesPanel } from "./settings/UpdatesPanel";
 import { DownloadsPanel } from "./settings/DownloadsPanel";
 import { GeneralPanel } from "./settings/GeneralPanel";
 import { IntegrationsPanel } from "./settings/IntegrationsPanel";
@@ -256,6 +257,7 @@ function SectionPanel({
       {section === "prewarming" && <PrewarmingPanel />}
       {section === "papercuts" && <PapercutsPanel />}
       {section === "deploys" && <DeploysPanel />}
+      {section === "updates" && <UpdatesPanel />}
     </>
   );
 }

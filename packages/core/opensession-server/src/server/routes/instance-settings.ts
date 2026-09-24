@@ -104,6 +104,15 @@ function worktreeSettingsDto() {
   };
 }
 
+/** The release download source `opensession update` follows (config.releaseBase,
+ *  recorded by install.sh). Empty means the compiled default is used. */
+function updatesDto() {
+  return {
+    releaseBase: getConfig().releaseBase ?? "",
+    configPath: configPath(),
+  };
+}
+
 /**
  * The connected GitHub organization's public profile, so the onboarding
  * organization step can fill itself in rather than ask for two things the
@@ -296,6 +305,44 @@ export async function handleInstanceSettingsRoutes(
 
   if (path === "/api/settings/worktrees" && req.method === "GET") {
     return Response.json(worktreeSettingsDto());
+  }
+
+  if (path === "/api/settings/updates" && req.method === "GET") {
+    return Response.json(updatesDto());
+  }
+
+  if (path === "/api/settings/updates" && req.method === "PUT") {
+    const forbidden = requireWorkspaceAdmin(ctx);
+    if (forbidden) return forbidden;
+    const body = (await req.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+    if (!body) {
+      return Response.json({ error: "expected a JSON body" }, { status: 400 });
+    }
+    const raw =
+      typeof body.releaseBase === "string" ? body.releaseBase.trim() : "";
+    if (raw) {
+      let valid = false;
+      try {
+        const u = new URL(raw);
+        valid = u.protocol === "https:" || u.protocol === "http:";
+      } catch {}
+      if (!valid) {
+        return Response.json(
+          { error: "releaseBase must be an http(s) URL" },
+          { status: 400 },
+        );
+      }
+    }
+    await withConfigMutationLock(async () => {
+      const config = rawConfig();
+      if (raw) config.releaseBase = raw;
+      else delete config.releaseBase;
+      persistRawConfig(config);
+    });
+    return Response.json(updatesDto());
   }
 
   if (path === "/api/settings/worktrees" && req.method === "PUT") {

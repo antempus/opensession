@@ -189,6 +189,15 @@ export const SETTINGS_KEYWORDS = {
     "install",
   ],
   deploys: ["releases", "restart", "version"],
+  updates: [
+    "update",
+    "upgrade",
+    "release source",
+    "release base",
+    "fork",
+    "upstream",
+    "channel",
+  ],
   papercuts: ["friction", "annoyances"],
   audit: ["history", "events", "who did what"],
   downloads: [

@@ -3,6 +3,7 @@ import * as IconLibrary from "../components/icons";
 import {
   IconArchive,
   IconArrowDown,
+  IconArrowUpToLine,
   IconBandAid,
   IconBell,
   IconBolt,
@@ -62,6 +63,7 @@ export type SettingsSectionKey =
   | "ingress"
   | "prewarming"
   | "deploys"
+  | "updates"
   | "papercuts"
   | "audit"
   | "downloads"
@@ -235,6 +237,13 @@ export const SECTIONS: SettingsSection[] = [
     label: "Deploys",
     group: "Infrastructure",
     icon: <IconRocket />,
+  },
+  {
+    key: "updates",
+    label: "Updates",
+    group: "Infrastructure",
+    adminOnly: true,
+    icon: <IconArrowUpToLine />,
   },
   {
     key: "papercuts",

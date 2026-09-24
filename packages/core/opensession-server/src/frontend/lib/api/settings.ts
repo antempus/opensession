@@ -360,6 +360,25 @@ export async function saveOrganizationSettings(patch: {
   return request("/settings/general", { method: "PUT", body: patch });
 }
 
+export interface UpdateSettingsDto {
+  /** Release download base opensession update follows; "" = compiled default. */
+  releaseBase: string;
+  configPath: string;
+}
+
+export async function fetchUpdateSettings(): Promise<UpdateSettingsDto> {
+  return request("/settings/updates", {
+    label: "Failed to fetch update settings",
+  });
+}
+
+/** Empty string clears the override and reverts to the compiled default. */
+export async function saveUpdateSettings(patch: {
+  releaseBase: string;
+}): Promise<UpdateSettingsDto> {
+  return request("/settings/updates", { method: "PUT", body: patch });
+}
+
 export async function uploadOrganizationIcon(
   png: Blob,
 ): Promise<OrganizationSettingsDto> {

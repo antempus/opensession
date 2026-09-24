@@ -167,6 +167,59 @@ describe("instance general settings", () => {
     expect(JSON.parse(readFileSync(config, "utf-8")).selfDev).toBeUndefined();
   });
 
+  test("records and clears the release update source", async () => {
+    const { config } = await seed();
+    const initial = await handleInstanceSettingsRoutes(
+      context("/api/settings/updates", "GET", { login: "ada" }),
+    );
+    expect(initial?.status).toBe(200);
+    expect((await initial?.json()).releaseBase).toBe("");
+
+    const set = await handleInstanceSettingsRoutes(
+      context("/api/settings/updates", "PUT", {
+        login: "ada",
+        body: {
+          releaseBase:
+            "  https://github.com/acme/opensession/releases/latest/download  ",
+        },
+      }),
+    );
+    expect(set?.status).toBe(200);
+    expect((await set?.json()).releaseBase).toBe(
+      "https://github.com/acme/opensession/releases/latest/download",
+    );
+    let stored = JSON.parse(readFileSync(config, "utf-8"));
+    expect(stored.releaseBase).toBe(
+      "https://github.com/acme/opensession/releases/latest/download",
+    );
+    expect(stored.future).toEqual({ keep: true });
+
+    const cleared = await handleInstanceSettingsRoutes(
+      context("/api/settings/updates", "PUT", {
+        login: "ada",
+        body: { releaseBase: "" },
+      }),
+    );
+    expect(cleared?.status).toBe(200);
+    expect((await cleared?.json()).releaseBase).toBe("");
+    stored = JSON.parse(readFileSync(config, "utf-8"));
+    expect(stored.releaseBase).toBeUndefined();
+  });
+
+  test("rejects a release source that is not an http(s) URL", async () => {
+    const { config } = await seed();
+    const response = await handleInstanceSettingsRoutes(
+      context("/api/settings/updates", "PUT", {
+        login: "ada",
+        body: { releaseBase: "not a url" },
+      }),
+    );
+    expect(response?.status).toBe(400);
+    expect(
+      JSON.parse(readFileSync(config, "utf-8")).releaseBase,
+    ).toBeUndefined();
+  });
+
   test("rejects shared-setting writes from non-admin teammates", async () => {
     const { config } = await seed();
     for (const path of [
@@ -174,6 +227,7 @@ describe("instance general settings", () => {
       "/api/settings/identity",
       "/api/settings/asset-storage",
       "/api/settings/worktrees",
+      "/api/settings/updates",
     ]) {
       const response = await handleInstanceSettingsRoutes(
         context(path, "PUT", {

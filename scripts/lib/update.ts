@@ -71,7 +71,8 @@ export type UpdateOptions = {
 export const UPSTREAM_RELEASE_BASE =
   "https://github.com/tellahq/opensession/releases/latest/download";
 
-/** Compiled fallback when neither the env var nor config records a target. */
+/** Compiled fallback when neither the env var nor the recorded install target
+ *  (config.releaseBase) is set. */
 const DEFAULT_RELEASE_BASE =
   "https://github.com/antempus/opensession/releases/latest/download";
 

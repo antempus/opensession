@@ -16,8 +16,14 @@
 name: Release
 
 on:
+  # Push to the default branch cuts a release (auto patch bump); docs-only
+  # pushes are skipped. NOTE: GitHub does not fire push (or schedule) events on
+  # a FORKED repository, so this trigger stays inert until the fork is detached
+  # (repo Settings / GitHub Support) or the code lives in a non-fork repo. Until
+  # then, release via workflow_dispatch, which works on forks.
   push:
     branches: ["main"]
+    paths-ignore: ["**/*.md", "docs/**"]
   workflow_dispatch:
     inputs:
       version:

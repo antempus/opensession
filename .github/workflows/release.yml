@@ -16,13 +16,8 @@
 name: Release
 
 on:
-  # Every push to the default branch cuts a release (auto patch bump). Keep the
-  # default branch shippable; do development on branches and land finished work.
-  # Docs-only pushes are skipped. workflow_dispatch stays as a manual escape
-  # hatch and for explicit minor/major bumps via the version input.
   push:
     branches: ["main"]
-    paths-ignore: ["**/*.md", "docs/**"]
   workflow_dispatch:
     inputs:
       version:

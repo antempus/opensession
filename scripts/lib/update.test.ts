@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { classifyTopology, parseRemotes, parseSha256Checksum } from "./update";
+import {
+  classifyTopology,
+  isUpstreamReleaseBase,
+  parseRemotes,
+  parseSha256Checksum,
+  resolveReleaseBase,
+} from "./update";
 
 const UPSTREAM_HTTPS = "https://github.com/tellahq/opensession.git";
 const UPSTREAM_SSH = "git@github.com:tellahq/opensession.git";
@@ -91,5 +97,63 @@ describe("classifyTopology", () => {
 
   test("no remotes at all → conservative default", () => {
     expect(classifyTopology([])).toEqual({ source: "origin", kind: "origin" });
+  });
+});
+
+describe("isUpstreamReleaseBase", () => {
+  test("true only for the upstream project releases", () => {
+    expect(
+      isUpstreamReleaseBase(
+        "https://github.com/tellahq/opensession/releases/latest/download",
+      ),
+    ).toBe(true);
+    expect(
+      isUpstreamReleaseBase(
+        "  https://github.com/tellahq/opensession/releases/latest/download  ",
+      ),
+    ).toBe(true);
+  });
+
+  test("false for a fork or an unrelated host", () => {
+    expect(
+      isUpstreamReleaseBase(
+        "https://github.com/acme/opensession/releases/latest/download",
+      ),
+    ).toBe(false);
+    expect(isUpstreamReleaseBase("https://example.test/releases")).toBe(false);
+    expect(
+      isUpstreamReleaseBase(
+        "http://github.com/tellahq/opensession/releases/latest/download",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("resolveReleaseBase", () => {
+  test("the env override wins and is reported as the source", async () => {
+    const prev = process.env.OPENSESSION_RELEASE_BASE;
+    process.env.OPENSESSION_RELEASE_BASE =
+      "https://example.test/releases/latest/download";
+    try {
+      expect(await resolveReleaseBase()).toEqual({
+        base: "https://example.test/releases/latest/download",
+        source: "env",
+      });
+    } finally {
+      if (prev === undefined) delete process.env.OPENSESSION_RELEASE_BASE;
+      else process.env.OPENSESSION_RELEASE_BASE = prev;
+    }
+  });
+
+  test("without env, resolves to config or the compiled default", async () => {
+    const prev = process.env.OPENSESSION_RELEASE_BASE;
+    delete process.env.OPENSESSION_RELEASE_BASE;
+    try {
+      const { base, source } = await resolveReleaseBase();
+      expect(source === "config" || source === "default").toBe(true);
+      expect(base).toMatch(/^https:\/\/github\.com\/[^/]+\/opensession\//);
+    } finally {
+      if (prev !== undefined) process.env.OPENSESSION_RELEASE_BASE = prev;
+    }
   });
 });

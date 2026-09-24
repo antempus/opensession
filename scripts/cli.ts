@@ -100,6 +100,7 @@ ${bold("Maintenance")}
          [--check]         commits), reinstall deps, health-gated restart;
                            --check shows what it would pull, changes nothing
          [--no-restart]    skip the restart
+         [--yes]           confirm updating from a non-upstream release source
   integrations             list integrations and whether they are on
   integrations enable <id>
   integrations disable <id>
@@ -439,7 +440,27 @@ async function main(): Promise<number> {
         channel: flagValue("--channel"),
         check: flags.has("--check"),
         restart: !flags.has("--no-restart"),
+        yes: flags.has("--yes") || flags.has("-y"),
       });
+
+    // Internal (install.sh): record the release download base this box was
+    // installed from, so `opensession update` and the Updates settings panel
+    // follow the same source. Merges into config.json without touching other
+    // keys; not shown in help.
+    case "record-release-base": {
+      const base = positional[0]?.trim();
+      if (!base) {
+        console.error("record-release-base needs a URL");
+        return 1;
+      }
+      const { readConfig, writeConfig } = await import("./lib/config-edit");
+      const cfg = (await readConfig()) ?? {};
+      if (cfg.releaseBase !== base) {
+        cfg.releaseBase = base;
+        await writeConfig(cfg);
+      }
+      return 0;
+    }
 
     case "integrations":
       if (positional[0] === "enable")

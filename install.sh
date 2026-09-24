@@ -959,6 +959,7 @@ show_path_refresh_hint() {
 # ── onboard ─────────────────────────────────────────────────────────────────
 
 if [ "$NO_ONBOARD" = "1" ]; then
+  "$BIN_DIR/opensession" record-release-base "$RELEASE_BASE" >/dev/null 2>&1 || true
   printf '\n'
   success "Installed"
   info "Next: ${C}opensession onboard${N}"
@@ -992,6 +993,11 @@ if [ "$ADVANCED" = "1" ]; then
 else
   run_interactive "$BIN_DIR/opensession" onboard --defaults ${ORG:+--org "$ORG"} || onboard_status=$?
 fi
+
+# Record the release source this box was installed from so `opensession update`
+# and the Updates settings panel follow the same source. Onboard preserves an
+# existing config on a re-run, so this merge is safe on reinstall too.
+"$BIN_DIR/opensession" record-release-base "$RELEASE_BASE" >/dev/null 2>&1 || true
 
 # Ensure the service independently of onboarding. On a re-run onboard sees an
 # existing config and returns before it would install the service, so a first

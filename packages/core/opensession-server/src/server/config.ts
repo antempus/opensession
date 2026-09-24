@@ -252,6 +252,10 @@ export interface OpenSessionConfig {
   repos?: Record<string, RepoSection>;
   /** Registered repo shown by default in the New-session picker. */
   newSessionRepo?: string;
+  /** Release download base this box was installed from (see install.sh and
+   *  scripts/lib/update.ts). `opensession update` prefers it over the compiled
+   *  default; OPENSESSION_RELEASE_BASE still overrides both. */
+  releaseBase?: string;
   identity?: IdentitySection;
   integrations?: IntegrationsSection;
   policy?: PolicySection;
@@ -483,6 +487,10 @@ function parseConfig(text: string): OpenSessionConfig {
     const raw = JSON.parse(text);
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
     const cfg: OpenSessionConfig = {};
+
+    if (typeof raw.releaseBase === "string" && raw.releaseBase.trim()) {
+      cfg.releaseBase = raw.releaseBase.trim();
+    }
 
     const server = obj(raw.server);
     if (server) {

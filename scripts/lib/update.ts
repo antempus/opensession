@@ -61,12 +61,44 @@ export type UpdateOptions = {
   channel?: string;
   restart?: boolean;
   check?: boolean;
+  /** Confirm updating from a non-upstream release source (see resolveReleaseBase). */
+  yes?: boolean;
 };
 
-/** Where published releases are downloaded from (mirrors install.sh). */
-const RELEASE_BASE =
-  process.env.OPENSESSION_RELEASE_BASE ||
+/** The canonical upstream project's release download base. */
+export const UPSTREAM_RELEASE_BASE =
+  "https://github.com/tellahq/opensession/releases/latest/download";
+
+/** Compiled fallback when neither the env var nor config records a target. */
+const DEFAULT_RELEASE_BASE =
   "https://github.com/antempus/opensession/releases/latest/download";
+
+/** True when a release base points at the upstream project's releases. */
+export function isUpstreamReleaseBase(base: string): boolean {
+  return /^https:\/\/github\.com\/tellahq\/opensession\/releases\//.test(
+    base.trim(),
+  );
+}
+
+/**
+ * Where release artefacts are downloaded from, and where that value came from.
+ * Precedence: the OPENSESSION_RELEASE_BASE env override, then the install
+ * target recorded in config (`releaseBase`, written by install.sh), then the
+ * compiled default. Mirrors install.sh so `update` follows the same source the
+ * box was installed from.
+ */
+export async function resolveReleaseBase(): Promise<{
+  base: string;
+  source: "env" | "config" | "default";
+}> {
+  const env = process.env.OPENSESSION_RELEASE_BASE?.trim();
+  if (env) return { base: env, source: "env" };
+  const configured = (await readConfig())?.releaseBase;
+  if (typeof configured === "string" && configured.trim()) {
+    return { base: configured.trim(), source: "config" };
+  }
+  return { base: DEFAULT_RELEASE_BASE, source: "default" };
+}
 
 export function parseSha256Checksum(text: string): string | undefined {
   const expected = text.trim().split(/\s+/)[0]?.toLowerCase();
@@ -134,10 +166,11 @@ function releaseInstall():
 async function updateRelease(
   rel: { manifest: ReleaseManifest; srcLink: string },
   opts: UpdateOptions,
+  releaseBase: string,
 ): Promise<number> {
   const url = opts.channel
     ? opts.channel
-    : `${RELEASE_BASE}/opensession-${rel.manifest.os}-${rel.manifest.arch}.tar.gz`;
+    : `${releaseBase}/opensession-${rel.manifest.os}-${rel.manifest.arch}.tar.gz`;
   info(dim(`current ${rel.manifest.version} (${rel.manifest.commit ?? "?"})`));
   info(dim(`fetching ${url} ...`));
 
@@ -328,16 +361,38 @@ export async function update(opts: UpdateOptions = {}): Promise<number> {
   // through the same health-gated path as the source update below.
   const rel = releaseInstall();
   if (rel) {
+    const { base, source } = await resolveReleaseBase();
+    const upstream = isUpstreamReleaseBase(base);
+    const sourceLabel =
+      source === "env"
+        ? "OPENSESSION_RELEASE_BASE"
+        : source === "config"
+          ? "the recorded install target (config.releaseBase)"
+          : "the compiled default";
     if (opts.check) {
       info(
         dim(
           `release install ${rel.manifest.version}; \`opensession update\` swaps to the latest artefact`,
         ),
       );
+      info(dim(`update source: ${base} (${sourceLabel})`));
+      if (!upstream) info(dim("  this is a non-upstream source"));
       return 0;
     }
+    if (!upstream) {
+      warn(
+        `updating from a non-upstream release source: ${base} (${sourceLabel})`,
+      );
+      if (!opts.yes) {
+        fail(
+          "refusing to update from a non-upstream source without confirmation",
+          "re-run with --yes to proceed, or set OPENSESSION_RELEASE_BASE to the upstream releases URL",
+        );
+        return 1;
+      }
+    }
     const prevTarget = existsSync(rel.srcLink) ? realpathSync(rel.srcLink) : "";
-    const swapped = await updateRelease(rel, opts);
+    const swapped = await updateRelease(rel, opts, base);
     if (swapped !== 0) return swapped;
     const newTarget = existsSync(rel.srcLink) ? realpathSync(rel.srcLink) : "";
     // updateRelease returns 0 both when it swapped and when already current;

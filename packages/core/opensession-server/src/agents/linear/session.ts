@@ -14,6 +14,7 @@ import {
   personaName,
   productName,
 } from "../../server/config";
+import { githubAppEnv } from "../../server/github-app";
 import { getDefaultModel, toPiModel } from "../../server/models";
 import { writeJsonAtomic } from "../../server/shared/atomic-write";
 import { publishSessionChange } from "../../server/session-cache";
@@ -595,6 +596,35 @@ ${participantsLine ? `\n${participantsLine}\n` : ""}
     if (reviewer) {
       args.push("--reviewer", reviewer);
     }
+    // Open the PR as the GitHub App (bot), not whatever personal account gh's
+    // hosts.yml holds. Scope the installation token to the repo this worktree
+    // targets so it stays correct under per-repo Linear routing; GH_TOKEN beats
+    // hosts.yml. Falls back to the ambient login if a token cannot be minted.
+    let ghTokenEnv: Record<string, string> = {};
+    try {
+      const remote = (
+        await new Response(
+          Bun.spawn(["git", "remote", "get-url", "origin"], {
+            cwd: worktreeDir,
+            stdout: "pipe",
+            stderr: "ignore",
+          }).stdout,
+        ).text()
+      ).trim();
+      const ghRepo = remote.match(
+        /github\.com[:/]([^/]+\/[^/\s]+?)(?:\.git)?$/,
+      )?.[1];
+      const overlay = ghRepo ? await githubAppEnv(ghRepo) : null;
+      if (overlay) {
+        ghTokenEnv = overlay;
+      } else {
+        console.warn(
+          "[linear] GitHub App token unavailable; PR will use the ambient gh login",
+        );
+      }
+    } catch (e) {
+      console.warn(`[linear] Could not resolve repo for bot PR auth: ${e}`);
+    }
     const proc = Bun.spawn(args, {
       cwd: worktreeDir,
       stdout: "pipe",
@@ -603,6 +633,7 @@ ${participantsLine ? `\n${participantsLine}\n` : ""}
         ...process.env,
         PATH: `${homeDir()}/.cargo/bin:${homeDir()}/.bun/bin:${homeDir()}/.local/bin:${homeDir()}/bin:${homeDir()}/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
         HOME: homeDir(),
+        ...ghTokenEnv,
       },
     });
 

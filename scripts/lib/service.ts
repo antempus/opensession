@@ -1403,25 +1403,31 @@ export async function control(
         const actorLoaded =
           (await run(["launchctl", "print", kernel], { quiet: true })).code ===
           0;
-        const actor = await runInherit(
-          actorLoaded
-            ? ["launchctl", "kickstart", kernel]
-            : [
-                "launchctl",
-                "bootstrap",
-                domain(),
-                LAUNCHD_SESSION_KERNEL_PLIST,
-              ],
-        );
-        if (actor !== 0) return actor;
+        if (actorLoaded) {
+          const actor = await runInherit(["launchctl", "kickstart", kernel]);
+          if (actor !== 0) return actor;
+        } else {
+          const actor = await bootstrapLaunchAgent(
+            LAUNCHD_SESSION_KERNEL_LABEL,
+            LAUNCHD_SESSION_KERNEL_PLIST,
+          );
+          if (actor.code !== 0) {
+            warn(`launchctl actor bootstrap failed: ${actor.stderr}`);
+            return actor.code;
+          }
+        }
         const gatewayLoaded =
           (await run(["launchctl", "print", label], { quiet: true })).code ===
           0;
-        return await runInherit(
-          gatewayLoaded
-            ? ["launchctl", "kickstart", label]
-            : ["launchctl", "bootstrap", domain(), LAUNCHD_PLIST],
+        if (gatewayLoaded)
+          return await runInherit(["launchctl", "kickstart", label]);
+        const gateway = await bootstrapLaunchAgent(
+          LAUNCHD_LABEL,
+          LAUNCHD_PLIST,
         );
+        if (gateway.code !== 0)
+          warn(`launchctl bootstrap failed: ${gateway.stderr}`);
+        return gateway.code;
       }
       case "stop": {
         const gateway = await runInherit(["launchctl", "bootout", label]);
@@ -1437,12 +1443,16 @@ export async function control(
           kernel,
         ]);
         if (actor !== 0) return actor;
-        return await runInherit([
-          "launchctl",
-          "bootstrap",
-          domain(),
+        // bootout releases the domain asynchronously; a bootstrap that races it
+        // gets EIO. bootstrapLaunchAgent retries and treats a registered job as
+        // success, so `opensession update`'s restart does not spuriously fail.
+        const gateway = await bootstrapLaunchAgent(
+          LAUNCHD_LABEL,
           LAUNCHD_PLIST,
-        ]);
+        );
+        if (gateway.code !== 0)
+          warn(`launchctl bootstrap failed: ${gateway.stderr}`);
+        return gateway.code;
       }
     }
   }

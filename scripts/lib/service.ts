@@ -244,6 +244,41 @@ export async function bootstrapLaunchAgent(
 }
 
 /**
+ * Boot out a LaunchAgent and wait until launchd has fully unloaded it. The
+ * gateway drains in-flight runs on SIGTERM and keeps its port bound until it
+ * exits, so bootstrapping the replacement before the old instance is gone races
+ * the port bind — the new process registers but can never listen, and the
+ * health gate then rolls the update back — or races the domain release (EIO).
+ * Polling `launchctl print` until the label is gone makes a restart
+ * deterministic while preserving the graceful drain.
+ */
+export async function bootoutAndWaitUnloaded(
+  label: string,
+  options: {
+    domain?: string;
+    attempts?: number;
+    delayMs?: number;
+    runCommand?: typeof run;
+    pause?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const launchdDomain = options.domain ?? domain();
+  const attempts = options.attempts ?? 120;
+  const delayMs = options.delayMs ?? 500;
+  const runCommand = options.runCommand ?? run;
+  const pause = options.pause ?? Bun.sleep;
+  await runCommand(["launchctl", "bootout", `${launchdDomain}/${label}`]);
+  for (let i = 0; i < attempts; i++) {
+    const printed = await runCommand(
+      ["launchctl", "print", `${launchdDomain}/${label}`],
+      { quiet: true },
+    );
+    if (printed.code !== 0) return;
+    await pause(delayMs);
+  }
+}
+
+/**
  * `systemctl --user` needs to find the user manager's socket. A login shell
  * has XDG_RUNTIME_DIR set by pam_systemd; a plain `ssh host cmd`, cron, or the
  * installer piped through bash does not, and every user-scope call then fails
@@ -1435,7 +1470,8 @@ export async function control(
         return gateway || actor;
       }
       case "restart": {
-        await runInherit(["launchctl", "bootout", label]);
+        // Restart the kernel in place first (short-lived, no drain) so the
+        // gateway reconnects to a ready kernel when it comes back.
         const actor = await runInherit([
           "launchctl",
           "kickstart",
@@ -1443,9 +1479,11 @@ export async function control(
           kernel,
         ]);
         if (actor !== 0) return actor;
-        // bootout releases the domain asynchronously; a bootstrap that races it
-        // gets EIO. bootstrapLaunchAgent retries and treats a registered job as
-        // success, so `opensession update`'s restart does not spuriously fail.
+        // Then replace the gateway, waiting for the draining old instance to
+        // fully unload (and release its port) before bootstrapping the new one.
+        // Racing it leaves the replacement registered but unable to bind, which
+        // fails the health gate and rolls an otherwise-good update back.
+        await bootoutAndWaitUnloaded(LAUNCHD_LABEL);
         const gateway = await bootstrapLaunchAgent(
           LAUNCHD_LABEL,
           LAUNCHD_PLIST,

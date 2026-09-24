@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { platform } from "os";
 import {
+  bootoutAndWaitUnloaded,
   bootstrapLaunchAgent,
   bunPath,
   envFileWriteProblem,
@@ -178,6 +179,58 @@ describe("launchd bootstrap", () => {
     );
 
     expect(result).toEqual({ code: 0, stdout: "registered", stderr: "" });
+  });
+});
+
+describe("bootoutAndWaitUnloaded", () => {
+  test("boots out then waits until the label is fully unloaded", async () => {
+    const commands: string[][] = [];
+    // bootout, then print returns loaded twice (still draining), then gone.
+    const results = [
+      { code: 0, stdout: "", stderr: "" }, // bootout
+      { code: 0, stdout: "loaded", stderr: "" }, // print: still there
+      { code: 0, stdout: "loaded", stderr: "" }, // print: still there
+      { code: 113, stdout: "", stderr: "Could not find service" }, // gone
+    ];
+    let paused = 0;
+
+    await bootoutAndWaitUnloaded("dev.opensession.test", {
+      domain: "gui/501",
+      runCommand: async (command) => {
+        commands.push(command);
+        return results.shift()!;
+      },
+      pause: async () => {
+        paused++;
+      },
+    });
+
+    expect(commands).toEqual([
+      ["launchctl", "bootout", "gui/501/dev.opensession.test"],
+      ["launchctl", "print", "gui/501/dev.opensession.test"],
+      ["launchctl", "print", "gui/501/dev.opensession.test"],
+      ["launchctl", "print", "gui/501/dev.opensession.test"],
+    ]);
+    // paused once after each of the two "still loaded" polls, not after "gone".
+    expect(paused).toBe(2);
+  });
+
+  test("returns immediately when already unloaded", async () => {
+    const results = [
+      { code: 0, stdout: "", stderr: "" }, // bootout
+      { code: 113, stdout: "", stderr: "Could not find service" }, // gone
+    ];
+    let paused = 0;
+
+    await bootoutAndWaitUnloaded("dev.opensession.test", {
+      domain: "gui/501",
+      runCommand: async () => results.shift()!,
+      pause: async () => {
+        paused++;
+      },
+    });
+
+    expect(paused).toBe(0);
   });
 });
 

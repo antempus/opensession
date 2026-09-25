@@ -18,6 +18,11 @@
  * rather than a handed-out base commit.
  */
 import type { WorkspaceExec } from "./sandbox/workspace-exec";
+import {
+  parseAddedLines,
+  scanAddedContentWithTrufflehog,
+  trufflehogBin,
+} from "./trufflehog-scan";
 
 export interface PushGatePolicy {
   maxChangedFiles: number;
@@ -139,6 +144,9 @@ export async function preflightPushGate(opts: {
   baseBranch: string;
   exec?: WorkspaceExec;
   policy?: PushGatePolicy;
+  /** Run trufflehog (beyond the regex patterns) when available. Default true;
+   *  only runs on host worktrees, since the snapshot reads files off the host. */
+  trufflehog?: boolean;
 }): Promise<PushGateResult> {
   const { dir, baseBranch, exec } = opts;
   const policy = opts.policy ?? DEFAULT_PUSH_GATE_POLICY;
@@ -158,5 +166,39 @@ export async function preflightPushGate(opts: {
 
   const patch = await gitOut(dir, ["diff", `${base}..HEAD`], exec);
   if (patch.code !== 0) return { ok: true };
-  return evaluatePatch(patch.stdout, policy);
+  const patchResult = evaluatePatch(patch.stdout, policy);
+  if ("blocked" in patchResult) return patchResult;
+
+  // Deeper scan on host worktrees: trufflehog over the added content, blocking
+  // only on a VERIFIED live credential (high precision for a blocker). Sandbox
+  // execs skip it — the snapshot reads files off the host — and the regex layer
+  // above still applies there; unverified hits still surface in the post-push
+  // review. This is the "regex is not enough" layer at the pre-push point.
+  if (!exec && opts.trufflehog !== false && trufflehogBin()) {
+    const u0 = await gitOut(
+      dir,
+      [
+        "diff",
+        "-U0",
+        "--no-color",
+        "--find-renames",
+        "--diff-filter=AM",
+        base,
+        "HEAD",
+      ],
+      exec,
+    );
+    if (u0.code === 0) {
+      const addedLines = parseAddedLines(u0.stdout);
+      const scan = await scanAddedContentWithTrufflehog(dir, addedLines);
+      const verified = scan.findings.find((f) => f.verified);
+      if (verified) {
+        return {
+          blocked: `trufflehog flagged a verified ${verified.detector} secret at ${verified.file}:${verified.line}; refusing to push`,
+        };
+      }
+    }
+  }
+
+  return { ok: true };
 }

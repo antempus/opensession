@@ -438,6 +438,7 @@ export async function handleSessionGitRoutes(
       session.branch || "HEAD",
       target.primary ? await workspaceExecFor(session, target.dir) : undefined,
       githubMutationCredential(ctx)?.env,
+      target.defaultBranch,
     );
     if ("error" in result) return Response.json(result, { status: 502 });
     return Response.json(result);

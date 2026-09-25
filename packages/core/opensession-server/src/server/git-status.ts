@@ -12,9 +12,10 @@
  * inside the session's sandbox. Omitted = the host path, unchanged.
  */
 import { $ } from "bun";
-import { audited } from "./audit";
+import { audit, audited } from "./audit";
 import { personaName } from "./config";
 import { isSharedCheckoutDir } from "./worktree";
+import { preflightPushGate } from "./pre-push-gate";
 import type { WorkspaceExec } from "./sandbox/workspace-exec";
 
 /** `git -C <dir> <args>` on the host (Bun $) or through the workspace exec.
@@ -415,6 +416,9 @@ export async function gitPush(
   branch: string,
   exec?: WorkspaceExec,
   env?: Record<string, string>,
+  /** Branch to diff against for the pre-push safety gate (usually the repo's
+   *  default branch). Omit to skip the gate — e.g. a push with no known base. */
+  baseBranch?: string,
 ): Promise<{ ok: true } | { error: string }> {
   return audited(
     {
@@ -423,6 +427,22 @@ export async function gitPush(
       args: { dir, branch, sandboxed: exec?.sandboxed || undefined },
     },
     async () => {
+      // Deterministic pre-push gate: refuse to publish secrets, off-limits
+      // paths, symlinks/submodules, or runaway diffs before they reach the
+      // remote (pre-push-gate.ts). A pushed secret is compromised even if
+      // removed later, so this blocks rather than warns.
+      if (baseBranch) {
+        const gate = await preflightPushGate({ dir, baseBranch, exec });
+        if ("blocked" in gate) {
+          audit({
+            msg: "git_push_blocked",
+            dir,
+            branch,
+            reason: gate.blocked,
+          });
+          return { error: `Push blocked: ${gate.blocked}` };
+        }
+      }
       const operationEnv = gitCredentialEnvForExec(env, exec);
       const args = ["git", "-C", dir, "push", "-u", "origin", "HEAD"];
       let err: string;

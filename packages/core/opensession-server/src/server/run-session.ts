@@ -1836,7 +1836,13 @@ export async function autoPushSessionBranches(
       continue;
     }
     if (!git.hasUpstream || git.ahead <= 0 || git.behind > 0) continue;
-    const result = await gitPush(dir, branch, exec, githubGitEnv);
+    const result = await gitPush(
+      dir,
+      branch,
+      exec,
+      githubGitEnv,
+      repo.defaultBranch,
+    );
     if ("error" in result) {
       console.warn(
         `[auto-push] ${session.id} ${repoId}/${branch}: ${result.error}`,

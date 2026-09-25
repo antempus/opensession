@@ -31,6 +31,9 @@ export function LinearPanel() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
   const [fallback, setFallback] = useState("");
+  const [pickup, setPickup] = useState<"implement" | "plan" | "ask">(
+    "implement",
+  );
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +71,7 @@ export function LinearPanel() {
     if (status?.linearRouting && !loaded) {
       setRules(status.linearRouting.modelLabels.map((r) => ({ ...r })));
       setFallback(status.linearRouting.fallbackModel || "");
+      setPickup(status.linearRouting.pickupAction ?? "implement");
       setLoaded(true);
     }
   }, [status, loaded]);
@@ -79,6 +83,11 @@ export function LinearPanel() {
   const fallbackChoices: ModelOption[] = [
     { value: "", label: "Global default" },
     ...models,
+  ];
+  const pickupChoices = [
+    { value: "implement", label: "Start implementing (opens a PR)" },
+    { value: "plan", label: "Plan first, then wait" },
+    { value: "ask", label: "Ask what to do" },
   ];
 
   function setRule(i: number, patch: Partial<Rule>) {
@@ -94,9 +103,13 @@ export function LinearPanel() {
         .filter((r) => r.label && r.model);
       await setupRequest("/api/setup/linear/routing", {
         method: "PUT",
-        json: { modelLabels: clean, fallbackModel: fallback },
+        json: {
+          modelLabels: clean,
+          fallbackModel: fallback,
+          pickupAction: pickup,
+        },
       });
-      toast("Linear model routing saved");
+      toast("Linear settings saved");
       await refetch();
     } catch (e) {
       setError(errorMessage(e, "Failed to save model routing"));
@@ -116,6 +129,31 @@ export function LinearPanel() {
         title="Linear"
         description="Route Linear-triggered work to a model by label, and see which repositories the GitHub App can reach."
       />
+
+      <SettingsGroupLabel>Ticket pickup</SettingsGroupLabel>
+      <SettingCard>
+        <div className="flex flex-col gap-2 p-3 desktop:flex-row desktop:items-center desktop:justify-between">
+          <span className="text-dim text-body">
+            When the agent picks up a ticket
+          </span>
+          <OptionSelect
+            label="On ticket pickup"
+            className="w-full desktop:w-72"
+            value={pickup}
+            options={pickupChoices}
+            onChange={(v) => {
+              // SAFETY: v is always one of pickupChoices' values, which are
+              // exactly the three valid pickup actions.
+              setPickup(v as "implement" | "plan" | "ask");
+            }}
+          />
+        </div>
+      </SettingCard>
+      <SettingsHint>
+        Implement starts coding as soon as a ticket is assigned and opens a PR
+        when done. Plan runs a planning interview first. Ask waits for you to
+        choose.
+      </SettingsHint>
 
       <SettingsGroupLabel>Model routing</SettingsGroupLabel>
       <SettingCard>

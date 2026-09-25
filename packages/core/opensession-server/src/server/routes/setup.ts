@@ -386,6 +386,10 @@ export async function handleSetupRoutes(
             })),
           fallbackModel:
             typeof l.fallbackModel === "string" ? l.fallbackModel : "",
+          pickupAction:
+            l.pickupAction === "plan" || l.pickupAction === "ask"
+              ? l.pickupAction
+              : "implement",
         };
       })(),
       // The only non-optional component, and the one this page used to omit —
@@ -407,9 +411,25 @@ export async function handleSetupRoutes(
     const body = (await req.json().catch(() => null)) as {
       modelLabels?: unknown;
       fallbackModel?: unknown;
+      pickupAction?: unknown;
     } | null;
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    // What the agent does on ticket pickup: implement (default), plan, or ask.
+    let pickupAction: "implement" | "plan" | "ask" | undefined;
+    if (body.pickupAction !== undefined) {
+      if (
+        body.pickupAction !== "implement" &&
+        body.pickupAction !== "plan" &&
+        body.pickupAction !== "ask"
+      ) {
+        return Response.json(
+          { error: "pickupAction must be implement, plan, or ask" },
+          { status: 400 },
+        );
+      }
+      pickupAction = body.pickupAction;
     }
     // Rules: [{label, model}] — both non-empty strings; blanks dropped.
     const rules: Array<{ label: string; model: string }> = [];
@@ -458,8 +478,19 @@ export async function handleSetupRoutes(
       else delete section.modelLabels;
       if (fallbackModel) section.fallbackModel = fallbackModel;
       else delete section.fallbackModel;
+      // Only touch pickupAction when the client sent it; "implement" is the
+      // default so storing it explicitly is optional.
+      if (pickupAction === "plan" || pickupAction === "ask") {
+        section.pickupAction = pickupAction;
+      } else if (pickupAction === "implement") {
+        delete section.pickupAction;
+      }
       persistRawConfig(config);
-      return Response.json({ modelLabels: rules, fallbackModel });
+      return Response.json({
+        modelLabels: rules,
+        fallbackModel,
+        pickupAction: (section.pickupAction as string) ?? "implement",
+      });
     });
   }
 

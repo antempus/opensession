@@ -2,7 +2,7 @@
  * Linear agent webhook handlers for AgentSession and Issue events.
  */
 import { linearEmailToGithubUsername } from "../../server/shared/user-mappings";
-import { personaName } from "../../server/config";
+import { configuredIntegration, personaName } from "../../server/config";
 import { worktreePathFor } from "../../server/worktree";
 import { resolveLinearRepoId } from "./repo-routing";
 import { resolveLinearModel } from "./model-routing";
@@ -273,6 +273,156 @@ export async function handleIssueUpdate(
   }
 
   return Response.json({ ok: true, autoImplementing: true });
+}
+
+// --- Ticket pickup behavior ---
+
+export type LinearPickupAction = "implement" | "plan" | "ask";
+
+/**
+ * What the agent does when it first picks up a ticket. Default is to start
+ * implementing (`created` used to always stop and ask). Configurable via
+ * `integrations.linear.pickupAction` and the Linear settings page.
+ */
+export function linearPickupAction(): LinearPickupAction {
+  const raw = (configuredIntegration("linear") as { pickupAction?: unknown })
+    ?.pickupAction;
+  return raw === "plan" || raw === "ask" ? raw : "implement";
+}
+
+/**
+ * Run the initial turn for a freshly picked-up ticket without waiting for a
+ * direction reply. `implement` moves the issue to In Progress and runs the
+ * implementation turn to completion, opening a PR on IMPLEMENTATION_COMPLETE;
+ * `plan` runs the planning interview. Mirrors the prompted-path handling for
+ * each phase so pickup behaves exactly like the corresponding reply would.
+ */
+async function startPickupWork(
+  s: ActiveSession,
+  accessToken: string,
+  agentSessionId: string,
+  action: "implement" | "plan",
+): Promise<void> {
+  const persist = () =>
+    saveSessionInfo(s.branch, {
+      claudeSessionId: s.claudeSessionId,
+      issueIdentifier: s.issueIdentifier,
+      issueTitle: s.issueTitle,
+      worktreeDir: s.worktreeDir,
+      linearSessionId: s.linearSessionId,
+      phase: s.phase,
+      issueId: s.issueId,
+      issueUrl: s.issueUrl,
+      participants: s.participants,
+      lastActiveUser: s.lastActiveUser,
+      issueCreator: s.issueCreator,
+      model: s.model,
+    });
+
+  let effectivePrompt: string;
+  if (action === "implement") {
+    s.phase = "working";
+    await moveToStatus(accessToken, s.issueId, s.teamId, "In Progress");
+    const { participantsSection, coAuthorInstruction } =
+      buildParticipantSections(s.participants || [], s.lastActiveUser || null);
+    effectivePrompt = IMPLEMENTATION_PROMPT.replaceAll(
+      "$ISSUE_ID",
+      s.issueIdentifier,
+    )
+      .replaceAll("$ISSUE_URL", s.issueUrl)
+      .replaceAll("$ISSUE_TITLE", s.issueTitle)
+      .replaceAll(
+        "$ISSUE_DESCRIPTION",
+        s.issueDescription || "(No description)",
+      )
+      .replaceAll("$PARTICIPANTS_SECTION", participantsSection)
+      .replaceAll("$CO_AUTHOR_INSTRUCTION", coAuthorInstruction);
+    await createAgentActivity(accessToken, agentSessionId, {
+      type: "thought",
+      body: MESSAGES.implementationStarted,
+    });
+  } else {
+    s.phase = "planning";
+    effectivePrompt = PLANNING_PROMPT.replaceAll("$ISSUE_ID", s.issueIdentifier)
+      .replaceAll("$ISSUE_URL", s.issueUrl)
+      .replaceAll("$ISSUE_TITLE", s.issueTitle)
+      .replaceAll(
+        "$ISSUE_DESCRIPTION",
+        s.issueDescription || "(No description)",
+      );
+    await createAgentActivity(accessToken, agentSessionId, {
+      type: "thought",
+      body: "Starting planning interview...",
+    });
+  }
+
+  const { result, claudeSessionId } = await runAgentHeadless(
+    s.worktreeDir,
+    effectivePrompt,
+    agentSessionId,
+    accessToken,
+    s.claudeSessionId || undefined,
+    s,
+  );
+  s.claudeSessionId = claudeSessionId;
+  await persist();
+
+  if (!result) return;
+
+  if (result.includes("PLANNING_COMPLETE") && s.phase === "planning") {
+    const planMatch = result.split("PLANNING_COMPLETE")[0].trim();
+    if (planMatch) {
+      await postComment(
+        accessToken,
+        s.issueId,
+        `# Implementation Plan\n\n${planMatch}`,
+      );
+    }
+    await moveToStatus(accessToken, s.issueId, s.teamId, "Ready");
+    s.planningConversation = [];
+    s.phase = "awaiting_implementation";
+    await persist();
+    await createAgentActivity(accessToken, agentSessionId, {
+      type: "elicitation",
+      body: `${MESSAGES.planningComplete}\n\nReply when you're ready and I'll start implementing.`,
+    });
+  } else if (result.includes("IMPLEMENTATION_COMPLETE")) {
+    const creatorGithub = linearEmailToGithubUsername(
+      s.issueCreator?.email || null,
+    );
+    const prUrl = await createPrWithAttribution(
+      s.worktreeDir,
+      s.issueIdentifier,
+      s.issueUrl,
+      s.issueTitle,
+      s.participants || [],
+      creatorGithub,
+    );
+    await createAgentActivity(accessToken, agentSessionId, {
+      type: "response",
+      body: prUrl
+        ? `Implementation complete! PR: ${prUrl}`
+        : "Implementation complete! PR creation may have failed - please check manually.",
+    });
+  } else {
+    if (s.phase === "planning") {
+      s.planningConversation.push({
+        role: "agent",
+        content: result,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    const type =
+      s.phase === "planning"
+        ? "elicitation"
+        : result.startsWith("Error:")
+          ? "error"
+          : "response";
+    await createAgentActivity(accessToken, agentSessionId, {
+      type,
+      body: result,
+    });
+  }
 }
 
 // --- Agent session webhook ---
@@ -744,16 +894,23 @@ Help with whatever they're asking. You have a worktree ready at ${session.worktr
         ],
       }).catch(() => {});
 
-      const greeting = GREETING_PROMPT.replaceAll(
-        "$ISSUE_ID",
-        issue.identifier,
-      ).replaceAll("$ISSUE_TITLE", issue.title);
+      const pickup = linearPickupAction();
+      if (pickup === "ask") {
+        const greeting = GREETING_PROMPT.replaceAll(
+          "$ISSUE_ID",
+          issue.identifier,
+        ).replaceAll("$ISSUE_TITLE", issue.title);
 
-      // The greeting asks for direction (plan/implement/other) → elicitation
-      await createAgentActivity(accessToken, agentSession.id, {
-        type: "elicitation",
-        body: greeting,
-      });
+        // The greeting asks for direction (plan/implement/other) → elicitation
+        await createAgentActivity(accessToken, agentSession.id, {
+          type: "elicitation",
+          body: greeting,
+        });
+      } else {
+        // Start work immediately on pickup (default). startPickupWork sets the
+        // phase and runs the turn to completion (PR on implement).
+        await startPickupWork(session, accessToken, agentSession.id, pickup);
+      }
     } catch (e) {
       console.error(`[linear] Error in session creation:`, e);
       await createAgentActivity(accessToken, agentSession.id, {

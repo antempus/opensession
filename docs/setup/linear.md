@@ -103,8 +103,12 @@ Consumed events (`packages/core/opensession-server/src/agents/linear/index.ts`
 and `handlers.ts`):
 
 - `AgentSessionEvent` / `AgentSession`:
-  - `created` prepares the default repo, persists the session, links its Open
-    Session viewer, and asks for plan, implement, or another instruction.
+  - `created` prepares the repo, persists the session, links its Open Session
+    viewer, and then acts on the pickup setting
+    (`integrations.linear.pickupAction`, default `implement`): `implement` moves
+    the issue to In Progress and runs implementation to a PR, `plan` starts the
+    planning interview, and `ask` posts a plan/implement/other prompt and waits.
+    Set it under Settings -> Integrations -> Linear.
   - `prompted` runs planning, implementation, or a free-form coding turn.
     `signal: "stop"` cancels the current engine run.
   - Planning completion posts a `# Implementation Plan` issue comment, moves

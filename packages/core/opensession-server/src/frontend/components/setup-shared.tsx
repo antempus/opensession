@@ -112,6 +112,8 @@ export interface SetupStatus {
   linearRouting?: {
     modelLabels: { label: string; model: string }[];
     fallbackModel: string;
+    /** What the agent does on ticket pickup (agents/linear/handlers.ts). */
+    pickupAction?: "implement" | "plan" | "ask";
   };
 }
 
